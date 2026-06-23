@@ -54,3 +54,35 @@ npm run e2e:pi-agent
 The example starts two harnessed Pi agents from plain caller code. The example
 creates the workspaces and shared resource itself to demonstrate the intended
 boundary: the caller prepares files, the harness runs agent turns.
+
+## Runtime Artifact Image
+
+Daimon can build a local copy-only runtime artifact image for Spawnfile:
+
+```bash
+npm run image:runtime:local
+```
+
+This creates:
+
+```text
+noopolis/spawnfile-runtime-daimon:0.1.0-local
+```
+
+The image is not a full organization image and is not intended to be run
+directly. It contains only:
+
+```text
+/opt/spawnfile/runtime-installs/daimon
+```
+
+Spawnfile can copy that path into generated organization images:
+
+```bash
+SPAWNFILE_DAIMON_RUNTIME_IMAGE=noopolis/spawnfile-runtime-daimon:0.1.0-local \
+  spawnfile build ./agentic-org
+```
+
+This keeps mixed-runtime organizations composable: a generated image can copy
+Daimon, OpenClaw, PicoClaw, or any future runtime artifact independently instead
+of depending on one prebuilt image for every runtime combination.

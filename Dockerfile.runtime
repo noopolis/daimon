@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+
+ARG NODE_IMAGE=node:22-bookworm-slim
+ARG RUNTIME_ROOT=/opt/spawnfile/runtime-installs/daimon
+
+FROM ${NODE_IMAGE} AS build
+
+ARG DAIMON_VERSION=0.1.0
+ARG PI_VERSION=0.79.9
+ARG RUNTIME_ROOT
+
+RUN mkdir -p "${RUNTIME_ROOT}" \
+  && cd "${RUNTIME_ROOT}" \
+  && npm install --omit=dev --no-fund --no-audit \
+    "@noopolis/daimon@${DAIMON_VERSION}" \
+    "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    "@earendil-works/pi-ai@${PI_VERSION}" \
+  && npm cache clean --force \
+  && find node_modules -type d \( \
+      -name docs -o \
+      -name examples -o \
+      -name test -o \
+      -name tests -o \
+      -name __tests__ \
+    \) -prune -exec rm -rf {} + \
+  && find node_modules -type f \( \
+      -name "*.map" -o \
+      -name "*.md" -o \
+      -name "*.mdx" \
+    \) -delete
+
+FROM scratch AS runtime
+
+ARG RUNTIME_ROOT
+
+COPY --from=build ${RUNTIME_ROOT} ${RUNTIME_ROOT}

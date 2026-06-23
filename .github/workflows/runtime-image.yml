@@ -1,0 +1,99 @@
+name: runtime image
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Daimon package version to build into the runtime image"
+        required: true
+        type: string
+      push_latest:
+        default: true
+        description: "Also update the latest tag"
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-image-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: noopolis/spawnfile-runtime-daimon
+  PI_VERSION: 0.79.9
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${INPUT_VERSION}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          if [[ "${version}" != "${package_version}" ]]; then
+            echo "Requested version ${version} does not match package.json version ${package_version}."
+            exit 1
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build image tag list
+        id: tags
+        shell: bash
+        env:
+          PUSH_LATEST: ${{ github.event.inputs.push_latest }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:${version}"
+            if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" || "${PUSH_LATEST}" == "true" ]]; then
+              echo "${IMAGE_NAME}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push runtime artifact image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            DAIMON_VERSION=${{ steps.version.outputs.version }}
+            PI_VERSION=${{ env.PI_VERSION }}
+          cache-from: type=gha,scope=daimon-runtime-image
+          cache-to: type=gha,scope=daimon-runtime-image,mode=max

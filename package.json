@@ -30,7 +30,8 @@
     "prepublishOnly": "npm run typecheck && npm test",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
-    "e2e:pi-agent": "tsx src/examples/pi-agent.ts"
+    "e2e:pi-agent": "tsx src/examples/pi-agent.ts",
+    "image:runtime:local": "docker build -f Dockerfile.runtime -t noopolis/spawnfile-runtime-daimon:0.1.0-local --build-arg DAIMON_VERSION=0.1.0 --build-arg PI_VERSION=0.79.9 ."
   },
   "engines": {
     "node": ">=22.19.0"
