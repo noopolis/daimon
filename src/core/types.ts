@@ -29,6 +29,16 @@ export interface WakeEvent {
   kind: "manual" | "message" | "schedule";
   from?: string;
   text: string;
+  context?: {
+    networkId?: string;
+    roomId?: string;
+    teamId?: string;
+    taskId?: string;
+    roleId?: string;
+    from?: string;
+    pairPeers?: string[];
+    artifactPaths?: string[];
+  };
 }
 
 export interface WakeResult {

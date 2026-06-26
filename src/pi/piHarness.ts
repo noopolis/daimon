@@ -22,6 +22,13 @@ import type {
 } from "../core/types.js";
 
 import { resolvePiHarnessModel } from "./modelConfig.js";
+import { createMemoryRuntime } from "../memory/runtime.js";
+import type {
+  MemoryPacket,
+  MemoryPrepareTurnResult,
+  MemoryRuntime
+} from "../memory/types.js";
+import { readMemoryContext } from "../memory/scope.js";
 
 type TextBlock = { type: "text"; text: string };
 
@@ -34,6 +41,10 @@ export interface PiHarnessOptions {
     name: string;
   };
   modelsPath?: string;
+  memory?: {
+    source?: string;
+    tokenBudget?: number;
+  };
 }
 
 const createModelRegistry = (
@@ -59,6 +70,17 @@ const createModelRegistry = (
   return registry;
 };
 
+const fallbackPacket = (input: WakeEvent): MemoryPacket => ({
+  principal: {
+    agentId: "unknown",
+    scope: "global"
+  },
+  sections: [{ heading: "Wake event", text: formatWakePrompt(input) }],
+  rawHint: "memory bypass active"
+});
+
+const extractOutputText = (chunks: string[]): string => chunks.join("\n").trim();
+
 class PiAgentHandle implements AgentHandle {
   private state: AgentStatus["state"] = "idle";
   private lastWakeAt: string | undefined;
@@ -66,17 +88,23 @@ class PiAgentHandle implements AgentHandle {
 
   constructor(
     readonly id: string,
-    private readonly session: Awaited<ReturnType<typeof createAgentSession>>["session"]
+    private readonly session: Awaited<ReturnType<typeof createAgentSession>>["session"],
+    private readonly memory?: MemoryRuntime
   ) {}
 
   async wake(event: WakeEvent): Promise<WakeResult> {
     const startedAt = Date.now();
     const chunks: string[] = [];
+    const toolEvents: unknown[] = [];
     this.state = "running";
     this.lastWakeAt = new Date().toISOString();
     this.lastError = undefined;
 
     const unsubscribe = this.session.subscribe((piEvent) => {
+      if (piEvent && typeof piEvent === "object" && "type" in piEvent && piEvent.type !== "turn_end") {
+        toolEvents.push(piEvent);
+      }
+
       if (piEvent.type !== "turn_end") {
         return;
       }
@@ -97,17 +125,95 @@ class PiAgentHandle implements AgentHandle {
       }
     });
 
+    const memoryContext = readMemoryContext({
+      kind: event.kind,
+      id: event.id,
+      from: event.from,
+      text: event.text,
+      context: event.context
+    });
+    const request = {
+      eventId: event.id,
+      kind: event.kind,
+      text: event.text,
+      from: event.from,
+      context: memoryContext
+    };
+
+    let prepared: MemoryPrepareTurnResult | undefined;
+    let promptText = formatWakePrompt(event);
+
     try {
-      await this.session.prompt(formatWakePrompt(event), { expandPromptTemplates: false });
+      if (this.memory) {
+        prepared = await this.memory.prepareTurn(request);
+        promptText = prepared.promptText;
+      }
+
+      await this.session.prompt(promptText, { expandPromptTemplates: false });
       this.state = "idle";
+      const outputText = extractOutputText(chunks);
+
+      if (this.memory) {
+        const promptPacket = prepared?.packet ?? fallbackPacket(event);
+        await this.memory.recordTurn({
+          principal: {
+            agentId: this.id,
+            scope: prepared?.principal.scope ?? "global",
+            qualifier: prepared?.principal.qualifier
+          },
+          prompt: {
+            ...promptPacket,
+            principal: {
+              agentId: this.id,
+              scope: prepared?.principal.scope ?? "global",
+              qualifier: prepared?.principal.qualifier
+            }
+          },
+          request,
+          recall: prepared?.recall,
+          result: "completed",
+          outputText,
+          toolEvents
+        });
+      }
+
       return {
         agentId: this.id,
-        text: chunks.join("\n").trim(),
+        text: outputText,
         durationMs: Date.now() - startedAt
       };
     } catch (error) {
       this.state = "failed";
       this.lastError = error instanceof Error ? error.message : String(error);
+
+      if (this.memory) {
+        try {
+          const promptPacket = prepared?.packet ?? fallbackPacket(event);
+          await this.memory.recordTurn({
+            principal: {
+              agentId: this.id,
+              scope: prepared?.principal.scope ?? "global",
+              qualifier: prepared?.principal.qualifier
+            },
+            prompt: {
+              ...promptPacket,
+              principal: {
+                agentId: this.id,
+                scope: prepared?.principal.scope ?? "global",
+                qualifier: prepared?.principal.qualifier
+              }
+            },
+            request,
+            result: "failed",
+            outputText: extractOutputText(chunks),
+            toolEvents,
+            error: this.lastError
+          });
+        } catch {
+          // Memory write-back is best-effort when waking fails.
+        }
+      }
+
       throw error;
     } finally {
       unsubscribe();
@@ -180,6 +286,12 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
     if (!model) {
       throw new Error(`Pi model not found: ${resolvedModel.provider}/${resolvedModel.name}`);
     }
+    const memory = createMemoryRuntime({
+      agentId: input.id,
+      runtimeHomePath: input.runtimeHomePath,
+      source: this.options.memory?.source,
+      tokenBudget: this.options.memory?.tokenBudget
+    });
 
     const { session } = await createAgentSession({
       cwd: input.workspacePath,
@@ -197,6 +309,6 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       })
     });
 
-    return new PiAgentHandle(input.id, session);
+    return new PiAgentHandle(input.id, session, memory);
   }
 }
