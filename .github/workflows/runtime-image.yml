@@ -68,6 +68,24 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Wait for npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.version.outputs.version }}"
+          for attempt in $(seq 1 24); do
+            if npm view "@noopolis/daimon@${version}" version >/dev/null 2>&1 \
+              && npm view "@noopolis/mneme@${MNEME_VERSION}" version >/dev/null 2>&1; then
+              exit 0
+            fi
+            echo "Waiting for npm registry propagation (${attempt}/24)."
+            sleep 5
+          done
+
+          npm view "@noopolis/daimon@${version}" version
+          npm view "@noopolis/mneme@${MNEME_VERSION}" version
+
       - name: Build image tag list
         id: tags
         shell: bash
