@@ -22,18 +22,21 @@ import type {
 } from "../core/types.js";
 
 import { resolvePiHarnessModel } from "./modelConfig.js";
-import { createMemoryRuntime } from "../memory/runtime.js";
-import type {
-  MemoryPacket,
-  MemoryPrepareTurnResult,
-  MemoryRuntime
-} from "../memory/types.js";
-import { readMemoryContext } from "../memory/scope.js";
+import { createPiMemoryTools, piMemoryToolNames, type PiMemoryToolContextRef } from "./memoryTools.js";
+import {
+  createMemoryRuntime,
+  memoryScopeId,
+  readMemoryContext,
+  type MemoryPacket,
+  type MemoryPrepareTurnResult,
+  type MemoryRuntime
+} from "@noopolis/mneme";
 
 type TextBlock = { type: "text"; text: string };
 
 export interface PiHarnessOptions {
   authPath: string;
+  sessionFactory?: PiSessionFactory;
   model?: {
     auth?: HarnessModelSpec["auth"];
     endpoint?: HarnessModelSpec["endpoint"];
@@ -46,6 +49,10 @@ export interface PiHarnessOptions {
     tokenBudget?: number;
   };
 }
+
+export type PiSessionFactory = (
+  input: Parameters<typeof createAgentSession>[0]
+) => ReturnType<typeof createAgentSession>;
 
 const createModelRegistry = (
   authStorage: AuthStorage,
@@ -85,14 +92,28 @@ class PiAgentHandle implements AgentHandle {
   private state: AgentStatus["state"] = "idle";
   private lastWakeAt: string | undefined;
   private lastError: string | undefined;
+  private wakeQueue: Promise<void> = Promise.resolve();
 
   constructor(
     readonly id: string,
     private readonly session: Awaited<ReturnType<typeof createAgentSession>>["session"],
-    private readonly memory?: MemoryRuntime
+    private readonly memory?: MemoryRuntime,
+    private readonly memoryToolContext?: PiMemoryToolContextRef
   ) {}
 
   async wake(event: WakeEvent): Promise<WakeResult> {
+    const queued = this.wakeQueue.then(
+      () => this.runWake(event),
+      () => this.runWake(event)
+    );
+    this.wakeQueue = queued.then(
+      () => undefined,
+      () => undefined
+    );
+    return queued;
+  }
+
+  private async runWake(event: WakeEvent): Promise<WakeResult> {
     const startedAt = Date.now();
     const chunks: string[] = [];
     const toolEvents: unknown[] = [];
@@ -147,6 +168,16 @@ class PiAgentHandle implements AgentHandle {
       if (this.memory) {
         prepared = await this.memory.prepareTurn(request);
         promptText = prepared.promptText;
+        if (this.memoryToolContext) {
+          this.memoryToolContext.current = {
+            wakeId: event.id,
+            threadId: `${memoryContext.networkId ?? "local"}:${memoryContext.roomId ?? event.from ?? "manual"}`,
+            principal: prepared.principal,
+            conversationScope: memoryScopeId(prepared.principal),
+            audienceKey: memoryContext.roomId ?? event.from ?? this.id,
+            transport: "in_process"
+          };
+        }
       }
 
       await this.session.prompt(promptText, { expandPromptTemplates: false });
@@ -204,6 +235,7 @@ class PiAgentHandle implements AgentHandle {
               }
             },
             request,
+            recall: prepared?.recall,
             result: "failed",
             outputText: extractOutputText(chunks),
             toolEvents,
@@ -216,6 +248,9 @@ class PiAgentHandle implements AgentHandle {
 
       throw error;
     } finally {
+      if (this.memoryToolContext) {
+        this.memoryToolContext.current = undefined;
+      }
       unsubscribe();
     }
   }
@@ -248,6 +283,7 @@ const createResourceLoader = (input: AgentStartInput): ResourceLoader => {
     input.instructions,
     "You are running inside a harnessed workspace prepared by the caller.",
     "Use the available coding tools when asked to read, write, edit, or inspect files.",
+    "Use memory_search, memory_locate, memory_register, memory_summarize, and memory_forget when scoped memory matters.",
     "Keep responses brief and report the exact files you created or modified."
   ].join("\n\n");
 
@@ -267,10 +303,12 @@ const createResourceLoader = (input: AgentStartInput): ResourceLoader => {
 export class PiHarnessAdapter implements AgentHarnessAdapter {
   private readonly authStorage: AuthStorage;
   private readonly modelRegistry: ModelRegistry;
+  private readonly sessionFactory: PiSessionFactory;
 
   constructor(private readonly options: PiHarnessOptions) {
     this.authStorage = AuthStorage.create(options.authPath);
     this.modelRegistry = createModelRegistry(this.authStorage, options);
+    this.sessionFactory = options.sessionFactory ?? createAgentSession;
   }
 
   async startAgent(input: AgentStartInput): Promise<AgentHandle> {
@@ -292,8 +330,18 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       source: this.options.memory?.source,
       tokenBudget: this.options.memory?.tokenBudget
     });
+    const memoryToolContext: PiMemoryToolContextRef = {};
+    const memoryTools = createPiMemoryTools({
+      agentId: input.id,
+      memory,
+      contextRef: memoryToolContext
+    });
+    const toolNames = [
+      ...(input.tools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"]),
+      ...piMemoryToolNames(memoryTools)
+    ];
 
-    const { session } = await createAgentSession({
+    const { session } = await this.sessionFactory({
       cwd: input.workspacePath,
       agentDir: input.runtimeHomePath,
       authStorage: this.authStorage,
@@ -301,7 +349,8 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       model,
       thinkingLevel: "off",
       resourceLoader: createResourceLoader(input),
-      tools: input.tools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"],
+      tools: [...new Set(toolNames)],
+      customTools: memoryTools,
       sessionManager: SessionManager.create(input.workspacePath, path.join(input.runtimeHomePath, "sessions")),
       settingsManager: SettingsManager.inMemory({
         compaction: { enabled: false },
@@ -309,6 +358,6 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       })
     });
 
-    return new PiAgentHandle(input.id, session, memory);
+    return new PiAgentHandle(input.id, session, memory, memoryToolContext);
   }
 }

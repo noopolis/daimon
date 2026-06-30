@@ -10,6 +10,7 @@ deployment. Daimon owns only the per-agent runtime boundary.
 
 - `src/core/` defines per-agent harness contracts.
 - `src/pi/` implements the contract using Pi's SDK.
+- `src/observability/` records local agent/org activity traces.
 - `src/examples/` contains runnable local examples and E2E checks.
 
 ## Rules
@@ -19,5 +20,8 @@ deployment. Daimon owns only the per-agent runtime boundary.
 - Keep teams/orgs out of this package. A caller may start many harnessed agents,
   but the harness API should only know about one agent at a time.
 - Keep the public contract independent of Pi-specific types.
+- Memory behavior belongs in the sibling `@noopolis/mneme` package. Daimon may
+  adapt Mneme into Pi custom tools, but must not reimplement Mneme storage,
+  policy, recall, or MCP.
 - Pi-specific logic belongs under `src/pi/`.
 - Examples should be runnable with `npm run e2e:pi-agent`.

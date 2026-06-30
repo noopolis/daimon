@@ -58,7 +58,8 @@ jobs:
           tags: noopolis/spawnfile-runtime-daimon:ci
           build-args: |
             DAIMON_VERSION=${{ steps.package.outputs.version }}
-            PI_VERSION=0.79.9
+            MNEME_VERSION=0.1.0
+            PI_VERSION=0.79.10
           cache-from: type=gha,scope=daimon-runtime-image
           cache-to: type=gha,scope=daimon-runtime-image,mode=max
 
@@ -73,6 +74,7 @@ jobs:
           const pkg = require("/tmp/daimon-package.json");
           const required = [
             "@noopolis/daimon",
+            "@noopolis/mneme",
             "@earendil-works/pi-coding-agent",
             "@earendil-works/pi-ai"
           ];

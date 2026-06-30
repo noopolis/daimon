@@ -1,6 +1,6 @@
 {
   "name": "@noopolis/daimon",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Noopolis native per-agent runtime harness built on Pi.",
   "license": "MIT",
   "type": "module",
@@ -10,6 +10,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./pi": {
+      "types": "./dist/pi/index.d.ts",
+      "import": "./dist/pi/index.js"
+    },
+    "./observability": {
+      "types": "./dist/observability/index.d.ts",
+      "import": "./dist/observability/index.js"
     }
   },
   "files": [
@@ -31,16 +39,29 @@
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "e2e:pi-agent": "tsx src/examples/pi-agent.ts",
-    "image:runtime:local": "docker build -f Dockerfile.runtime -t noopolis/spawnfile-runtime-daimon:0.1.0-local --build-arg DAIMON_VERSION=0.1.0 --build-arg PI_VERSION=0.79.9 ."
+    "e2e:pi-memory-org": "tsx src/examples/pi-memory-org.ts",
+    "e2e:mixed-engine-org": "tsx src/examples/mixed-engine-org.ts",
+    "e2e:jungian-play-org": "tsx src/examples/jungian-play-org.ts",
+    "e2e:jungian-triad-org": "tsx src/examples/jungian-triad-org.ts",
+    "image:runtime:local": "docker build -f Dockerfile.runtime -t noopolis/spawnfile-runtime-daimon:0.1.1-local --build-arg DAIMON_VERSION=0.1.1 --build-arg MNEME_VERSION=0.1.0 --build-arg PI_VERSION=0.79.10 ."
   },
   "engines": {
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.79.9",
-    "@earendil-works/pi-coding-agent": "^0.79.9"
+    "@earendil-works/pi-ai": "^0.79.10",
+    "@earendil-works/pi-coding-agent": "^0.79.10"
+  },
+  "peerDependencies": {
+    "@noopolis/mneme": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@noopolis/mneme": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@noopolis/mneme": "^0.1.0",
     "@types/node": "^24.12.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
