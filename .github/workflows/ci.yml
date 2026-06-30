@@ -49,6 +49,24 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+      - name: Wait for npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.package.outputs.version }}"
+          for attempt in $(seq 1 24); do
+            if npm view "@noopolis/daimon@${version}" version >/dev/null 2>&1 \
+              && npm view "@noopolis/mneme@0.1.0" version >/dev/null 2>&1; then
+              exit 0
+            fi
+            echo "Waiting for npm registry propagation (${attempt}/24)."
+            sleep 5
+          done
+
+          npm view "@noopolis/daimon@${version}" version
+          npm view "@noopolis/mneme@0.1.0" version
+
       - name: Build runtime artifact image
         uses: docker/build-push-action@v6
         with:
