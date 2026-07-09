@@ -837,7 +837,7 @@ has relevant context, but the representative asks that agent through Moltnet.
 
 ### Phase 1: Refactor Pi Behind Engine Interface
 
-- Add `src/engine/CLAUDE.md`.
+- Add `src/engine/AGENTS.md` with a `CLAUDE.md` compatibility symlink.
 - Add `src/engine/types.ts`.
 - Move Pi-specific turn execution behind `PiEngine`.
 - Keep current public `PiHarnessAdapter` behavior passing.
