@@ -26,7 +26,7 @@ export interface HarnessModelSpec {
 
 export interface WakeEvent {
   id: string;
-  kind: "manual" | "message" | "schedule";
+  kind: "manual" | "message" | "schedule" | "dream";
   from?: string;
   text: string;
   context?: {

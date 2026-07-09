@@ -24,7 +24,7 @@ const makeFakePiSessionFactory = (scripts: string[][]) => {
   type SessionResult = Awaited<ReturnType<typeof createAgentSession>>;
   let sessionIndex = 0;
 
-  const factory = () => {
+  const factory = (input?: Parameters<typeof createAgentSession>[0]) => {
     const responses = scripts[sessionIndex] ?? ["ack"];
     sessionIndex += 1;
 
@@ -35,6 +35,25 @@ const makeFakePiSessionFactory = (scripts: string[][]) => {
     const session = {
       async prompt(text: string) {
         prompts.push(text);
+        const customTools = (input?.customTools ?? []) as Array<{
+          execute: (...args: unknown[]) => Promise<unknown>;
+          name: string;
+        }>;
+        const register = customTools.find((tool) => tool.name === "memory_register");
+        const seedMatch = /(?:Seed memory:|private note:)\s*([^\n]+)/iu.exec(text);
+        if (register && seedMatch) {
+          const wakeId = /id:\s*([^\n]+)/u.exec(text)?.[1]?.trim() ?? "wake";
+          await register.execute("register-seed", {
+            scope: "global",
+            kind: "episodic",
+            content: { kind: "text", text: seedMatch[1].trim() },
+            visibility: "global",
+            sensitivity: "normal",
+            evidence_event_ids: [wakeId],
+            source_type: "test",
+            confidence: 1
+          });
+        }
         const output = responses[responseCursor] ?? "ack";
         responseCursor += 1;
         for (const listener of listeners) {
@@ -184,12 +203,7 @@ test("persists and recalls memory across adapter restarts", async () => {
 
   const secondPrompt = secondAdapterSetup.sessionFactory.sessions[0]?.prompts[0] ?? "";
   assert.ok(secondPrompt.includes("Wake event"));
-  const store = new JsonlMemoryStore(base.runtimeHomePath);
-  const events = await store.read({ principalAgentId: "mapper" });
-  const hasRecalled = events.some((event) => {
-    return event.type === "memory.recalled" && `${event.content.kind === "text" ? event.content.text : ""}`.includes("phoenix");
-  });
-  assert.ok(hasRecalled);
+  assert.ok(secondPrompt.includes("phoenix relay"));
   await secondHandle.stop();
 });
 

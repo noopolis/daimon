@@ -37,6 +37,26 @@ Pi-specific exports live under the Pi subpath:
 import { PiHarnessAdapter } from "@noopolis/daimon/pi";
 ```
 
+By default, the in-process Mneme runtime uses the same path as each agent's
+`runtimeHomePath`. If you need agents to keep separate Pi/runtime directories but
+share one memory bank, pass an explicit `memory.runtimeHomePath` in
+`PiHarnessOptions`.
+
+```ts
+const adapter = new PiHarnessAdapter({
+  authPath: "/tmp/daimon-auth.json",
+  memory: {
+    runtimeHomePath: "/shared/memory/bank"
+  }
+});
+```
+
+Pi agents receive Mneme tools in awake mode for normal work. Dream wakes use a
+fresh one-off Pi session under `sessions/dream/<wake-id>-<random>` and inject
+the Mneme dream guidance instead. Daimon does not automatically record every
+turn as memory; agents write memories only by calling Mneme tools such as
+`memory_register`, `memory_summarize`, and `memory_forget`.
+
 ## Tests
 
 The package has a non-live test suite for auth seeding and Pi model config
@@ -107,8 +127,9 @@ archetype gets consulted.
 ## Design Notes
 
 - `MEMORY-SYSTEM.md` describes the implemented scoped memory runtime.
-- `ENGINE-SYSTEM.md` describes the next engine abstraction plan: Pi, Ollama,
-  API providers, and CLI-backed engines such as `agy`, `grok`, and `gemini`.
+- `ENGINE-SYSTEM.md` describes the engine abstraction plan: Pi, local/API
+  model providers, and CLI-backed engines such as `codex`, `claude`, `grok`,
+  and `agy`.
 - Mneme is a sibling package, `@noopolis/mneme`, published separately and used
   by Daimon in-process for Pi agents. Other runtimes can use Mneme through its
   MCP server. The agent-facing tools stay named `memory_search`,
@@ -126,7 +147,7 @@ npm run image:runtime:local
 This creates:
 
 ```text
-noopolis/spawnfile-runtime-daimon:0.1.1-local
+noopolis/spawnfile-runtime-daimon:0.1.2-local
 ```
 
 The image is not a full organization image and is not intended to be run
@@ -139,7 +160,7 @@ directly. It contains only:
 Spawnfile can copy that path into generated organization images:
 
 ```bash
-SPAWNFILE_DAIMON_RUNTIME_IMAGE=noopolis/spawnfile-runtime-daimon:0.1.1-local \
+SPAWNFILE_DAIMON_RUNTIME_IMAGE=noopolis/spawnfile-runtime-daimon:0.1.2-local \
   spawnfile build ./agentic-org
 ```
 

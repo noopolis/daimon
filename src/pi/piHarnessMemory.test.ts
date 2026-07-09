@@ -22,7 +22,72 @@ test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-test("failed wakes still record recalled memory provenance", async () => {
+test("non-memory Pi tool events are not implicitly written to memory", async () => {
+  const root = await tempDir();
+  const runtimeHomePath = path.join(root, "runtime");
+  const workspacePath = path.join(root, "workspace");
+  const listeners = new Set<(event: { type: string; message?: { content?: string } }) => void>();
+  type SessionResult = Awaited<ReturnType<typeof createAgentSession>>;
+
+  const adapter = new PiHarnessAdapter({
+    authPath: path.join(root, "auth.json"),
+    model: {
+      auth: { method: "none" },
+      endpoint: {
+        baseUrl: "http://127.0.0.1:11434/v1",
+        compatibility: "openai"
+      },
+      name: "llama3.2",
+      provider: "local"
+    },
+    sessionFactory: () => Promise.resolve(({
+      session: {
+        async prompt() {
+          for (const listener of listeners) {
+            listener({
+              type: "tool_event",
+              message: { content: "PUBLIC_TOOL_PAYLOAD_MARKER should not be persisted" }
+            });
+            listener({ type: "turn_end", message: { content: "ok" } });
+          }
+        },
+        subscribe(listener: (event: { type: string; message?: { content?: string } }) => void) {
+          listeners.add(listener);
+          return () => void listeners.delete(listener);
+        },
+        dispose() {
+          listeners.clear();
+        }
+      }
+    } as unknown) as SessionResult)
+  });
+
+  const handle = await adapter.startAgent({
+    id: "mapper",
+    name: "Mapper",
+    instructions: "Use memory tools only when explicitly useful.",
+    runtimeHomePath,
+    workspacePath
+  });
+
+  await handle.wake({
+    id: "wake-tool",
+    kind: "manual",
+    text: "Check tool boundary test.",
+    context: {
+      networkId: "noopolis",
+      roomId: "agora",
+      teamId: "ops"
+    }
+  });
+
+  const events = await new JsonlMemoryStore(runtimeHomePath).read({ principalAgentId: "mapper" });
+  assert.equal(JSON.stringify(events).includes("PUBLIC_TOOL_PAYLOAD_MARKER"), false);
+
+  await handle.stop();
+});
+
+test("failed wakes do not implicitly record recalled memory provenance", async () => {
   const root = await tempDir();
   const runtimeHomePath = path.join(root, "runtime");
   const workspacePath = path.join(root, "workspace");
@@ -90,10 +155,10 @@ test("failed wakes still record recalled memory provenance", async () => {
     principalAgentId: "mapper",
     types: ["memory.recalled"]
   });
-  assert.ok(recalled.some((event) =>
+  assert.equal(recalled.some((event) =>
     event.content.kind === "text" &&
     event.content.text.includes("PHOENIX_FAIL_MARKER")
-  ));
+  ), false);
 
   await handle.stop();
 });

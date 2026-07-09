@@ -2,16 +2,29 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import { createMemoryToolDescriptors } from "@noopolis/mneme";
-import type { MemoryRuntime, MemoryToolExecutionContext, MemoryToolResult } from "@noopolis/mneme";
+import type { MemoryRuntime, MemoryToolExecutionContext, MemoryToolResult, MemoryWakeMode } from "@noopolis/mneme";
 
 export interface PiMemoryToolContextRef {
   current?: MemoryToolExecutionContext;
+  observeTool?: (event: PiMemoryToolTraceEvent) => void;
+}
+
+export interface PiMemoryToolTraceEvent {
+  contentCount?: number;
+  decision?: string;
+  durationMs: number;
+  error?: string;
+  kind: "memory";
+  name: string;
+  redactionCount?: number;
+  status: "completed" | "failed";
 }
 
 interface PiMemoryToolInput {
   agentId: string;
   memory: MemoryRuntime;
   contextRef: PiMemoryToolContextRef;
+  mode?: MemoryWakeMode;
 }
 
 type PiMemoryTool = ToolDefinition<any, unknown>;
@@ -75,7 +88,7 @@ const schemaFor = (name: string) => {
 };
 
 export const createPiMemoryTools = (input: PiMemoryToolInput): PiMemoryTool[] =>
-  createMemoryToolDescriptors(input.memory.kernel).map((descriptor) =>
+  createMemoryToolDescriptors(input.memory.kernel, { mode: input.mode ?? "awake" }).map((descriptor) =>
     defineTool({
       name: descriptor.modelName,
       label: descriptor.label,
@@ -84,11 +97,32 @@ export const createPiMemoryTools = (input: PiMemoryToolInput): PiMemoryTool[] =>
       promptGuidelines: descriptor.promptGuidelines,
       parameters: schemaFor(descriptor.modelName),
       async execute(_toolCallId, params) {
-        const result = await descriptor.invoke(
-          params as Record<string, unknown>,
-          input.contextRef.current ?? fallbackContext(input.agentId)
-        );
-        return textContent(result);
+        const startedAt = Date.now();
+        try {
+          const result = await descriptor.invoke(
+            params as Record<string, unknown>,
+            input.contextRef.current ?? fallbackContext(input.agentId)
+          );
+          input.contextRef.observeTool?.({
+            contentCount: result.content.length,
+            decision: result.decision,
+            durationMs: Date.now() - startedAt,
+            kind: "memory",
+            name: descriptor.modelName,
+            redactionCount: result.content.reduce((total, content) => total + content.redactions.length, 0),
+            status: "completed"
+          });
+          return textContent(result);
+        } catch (error) {
+          input.contextRef.observeTool?.({
+            durationMs: Date.now() - startedAt,
+            error: error instanceof Error ? error.message : String(error),
+            kind: "memory",
+            name: descriptor.modelName,
+            status: "failed"
+          });
+          throw error;
+        }
       }
     })
   );

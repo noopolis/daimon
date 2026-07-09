@@ -23,7 +23,17 @@ interface FakePiSession {
 
 type FakePiAdapterSetup = { adapter: PiHarnessAdapter; runtimeHomePath: string; sessions: FakePiSession[] };
 
-type OnPrompt = (input: { text: string; sessionIndex: number; emit: (event: PiSessionEvent) => void }) => void;
+type FakeMemoryTool = {
+  execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string; type: string }> }>;
+  name: string;
+};
+
+type OnPrompt = (input: {
+  customTools: FakeMemoryTool[];
+  text: string;
+  sessionIndex: number;
+  emit: (event: PiSessionEvent) => void;
+}) => void | Promise<void>;
 
 const makeFakePiSessionFactory = (
   responses: string[][],
@@ -35,18 +45,20 @@ const makeFakePiSessionFactory = (
   const listeners = new Set<PiSessionListener>();
   let index = 0;
 
-  const factory: PiSessionFactory = () => {
+  const factory: PiSessionFactory = (input) => {
     const output = responses[index] ?? ["ok"];
     const sessionIndex = index;
     index += 1;
 
     const prompts: string[] = [];
     let cursor = 0;
+    const customTools = (input?.customTools ?? []) as FakeMemoryTool[];
 
     const session = {
       async prompt(text: string) {
         prompts.push(text);
-        options?.onPrompt?.({
+        await options?.onPrompt?.({
+          customTools,
           text,
           sessionIndex,
           emit(event) {
@@ -196,7 +208,27 @@ test("fake sessions can recall prior turn memory without live provider calls", a
   const root = await tempDir();
   const setup = await makeHarness({
     root,
-    responses: [["first-turn"], ["second-turn"]]
+    responses: [["first-turn"], ["second-turn"]],
+    onPrompt: async ({ customTools, text }) => {
+      if (!text.includes("SESSION_TOOL_MARKER") || !text.includes("id: wake-1")) {
+        return;
+      }
+      const register = customTools.find((tool) => tool.name === "memory_register");
+      assert.ok(register);
+      await register.execute("register-session-marker", {
+        scope: "current",
+        kind: "episodic",
+        content: {
+          kind: "text",
+          text: "SESSION_TOOL_MARKER relay route set to amber."
+        },
+        visibility: "room",
+        sensitivity: "normal",
+        evidence_event_ids: ["wake-1"],
+        source_type: "test",
+        confidence: 1
+      });
+    }
   });
 
   const handle = await setup.adapter.startAgent({
@@ -258,8 +290,6 @@ test("fake Moltnet-style pair and room wakes show scoped behavior", async () => 
     from: "inner-shadow",
     text: "Who handled shadow memory last?",
     context: {
-      networkId: "noopolis",
-      roomId: "agora",
       pairPeers: ["inner-shadow"]
     }
   });
@@ -277,55 +307,6 @@ test("fake Moltnet-style pair and room wakes show scoped behavior", async () => 
 
   assert.ok((setup.sessions[0]?.prompts[0] ?? "").includes("PRIVATE_PAIR_MARKER"));
   assert.equal((setup.sessions[0]?.prompts[1] ?? "").includes("PRIVATE_PAIR_MARKER"), false);
-
-  await handle.stop();
-});
-
-test("tool result boundaries stay redacted in activity summary", async () => {
-  const root = await tempDir();
-  const setup = await makeHarness({
-    root,
-    responses: [["ok"]],
-    onPrompt: ({ emit }) => {
-      emit({
-        type: "tool_event",
-        message: {
-          content: "PUBLIC_TOOL_PAYLOAD_MARKER should not be copied to activity"
-        }
-      });
-    }
-  });
-
-  const handle = await setup.adapter.startAgent({
-    id: "mapper",
-    name: "Mapper",
-    instructions: "Use memory tools when necessary.",
-    runtimeHomePath: setup.runtimeHomePath,
-    workspacePath: path.join(root, "workspace")
-  });
-
-  await handle.wake({
-    id: "wake-tool",
-    kind: "manual",
-    text: "Check tool boundary test.",
-    context: {
-      networkId: "noopolis",
-      roomId: "agora",
-      teamId: "ops"
-    }
-  });
-
-  const runtimeStore = new JsonlMemoryStore(setup.runtimeHomePath);
-  const summaryEvents = await runtimeStore.read({
-    principalAgentId: "mapper",
-    types: ["memory.summarized"]
-  });
-
-  assert.equal(summaryEvents.length, 1);
-  assert.equal(summaryEvents[0].content.kind, "text");
-  const summaryText = summaryEvents[0].content.text;
-  assert.ok(summaryText.includes("Observed 1 tool event(s) during turn."));
-  assert.ok(!summaryText.includes("PUBLIC_TOOL_PAYLOAD_MARKER"));
 
   await handle.stop();
 });
