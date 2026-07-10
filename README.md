@@ -15,6 +15,8 @@ should not know what an org is.
 npm install @noopolis/daimon
 ```
 
+The latest published version is 0.1.1; this README describes the source tree (0.1.2).
+
 For Pi agents with memory enabled, install Mneme too:
 
 ```bash
@@ -59,8 +61,9 @@ turn as memory; agents write memories only by calling Mneme tools such as
 
 ## Tests
 
-The package has a non-live test suite for auth seeding and Pi model config
-generation:
+The package has a non-live test suite covering auth seeding, Pi model config
+generation, the harness contract, memory tool wiring, wake and turn traces, and
+the org observer:
 
 ```bash
 npm test
@@ -87,6 +90,10 @@ upstream-documented dummy `ollama` value.
 
 The Pi E2E uses the local Codex CLI subscription auth file to seed an ignored Pi
 `auth.json` under `.runtime/`.
+
+These are live runs: they spend real tokens and require local engine auth
+(`~/.codex/auth.json` for Pi/Codex; mixed-engine and triad additionally need
+authenticated `grok` and `agy` CLIs on PATH). They are not part of `npm test`.
 
 ```bash
 npm install
@@ -138,11 +145,17 @@ archetype gets consulted.
 
 ## Runtime Artifact Image
 
-Daimon can build a local copy-only runtime artifact image for Spawnfile:
+Daimon defines a local copy-only runtime artifact image build for Spawnfile:
 
 ```bash
 npm run image:runtime:local
 ```
+
+Status: this build currently fails against the public npm registry. The
+Dockerfile pins `@noopolis/daimon@0.1.2` and `@noopolis/mneme@0.1.1`, and
+neither is published yet (registry has daimon 0.1.1 and mneme 0.1.0). Works
+only after those versions publish or against a registry that has them. Treat
+as pending publish.
 
 This creates:
 
