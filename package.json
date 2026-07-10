@@ -38,6 +38,8 @@
     "prepublishOnly": "npm run typecheck && npm test",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "emit-causal-fixture": "tsx src/observability/emitCausalFixture.ts",
+    "emit-causal-fixture:spoof": "tsx src/observability/emitCausalFixture.ts --spoof",
     "e2e:pi-agent": "tsx src/examples/pi-agent.ts",
     "e2e:pi-memory-org": "tsx src/examples/pi-memory-org.ts",
     "e2e:mixed-engine-org": "tsx src/examples/mixed-engine-org.ts",
