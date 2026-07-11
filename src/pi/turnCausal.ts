@@ -42,11 +42,18 @@ export interface StampTurnInputSubmittedInput {
  *   which also scopes its own `authPath`/`runtimeHomePath`) — is the
  *   truthful authenticated identity available at this layer.
  * - `cause_event_ids` chains to `event.id` (the WakeEvent id) plus any mneme
- *   recall ids from `prepared.recall.selectedEventIds`. `event.id` stands in
- *   for the upstream moltnet `message.accepted` id: `WakeEvent` does not
- *   carry a separately namespaced moltnet causal event_id, since Daimon
- *   stays detached from Moltnet wiring (see repo `AGENTS.md`) — `event.id`
- *   is the truthful value available here.
+ *   recall ids from `prepared.recall.selectedEventIds`. `event.id` is no
+ *   longer a same-process stand-in for the upstream moltnet
+ *   `message.accepted` id: moltnet's bridge control POST now carries a real
+ *   `event_id` (`protocol.MessageEventID`-shaped, `"moltnet:<messageID>"`)
+ *   for every non-bootstrap wake, and the Pi control source
+ *   (`src/runtime/pi/appControlSource.ts` `formatControlEventId`) threads
+ *   that value verbatim into `WakeEvent.id` in preference to its own
+ *   `context_id`+timestamp fallback. `WakeEvent` still does not carry a
+ *   separately namespaced moltnet field — Daimon stays detached from
+ *   Moltnet wiring (see repo `AGENTS.md`) — but `event.id` is now the same
+ *   id moltnet itself stamped on `message.accepted`, so this chain is
+ *   id-joined across authorities rather than merely locally consistent.
  * - `run_id` always comes from `resolveRunId()` (`NOOPOLIS_RUN_ID`), never
  *   from `event` or model output.
  */
