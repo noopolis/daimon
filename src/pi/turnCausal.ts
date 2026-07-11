@@ -42,7 +42,7 @@ export interface StampTurnInputSubmittedInput {
  *   which also scopes its own `authPath`/`runtimeHomePath`) — is the
  *   truthful authenticated identity available at this layer.
  * - `cause_event_ids` chains to `event.id` (the WakeEvent id) plus any mneme
- *   recall ids from `prepared.recall.selectedEventIds`. `event.id` is no
+ *   recall ids from `prepared.recalledCausalEventIds`. `event.id` is no
  *   longer a same-process stand-in for the upstream moltnet
  *   `message.accepted` id: moltnet's bridge control POST now carries a real
  *   `event_id` (`protocol.MessageEventID`-shaped, `"moltnet:<messageID>"`)
@@ -54,6 +54,16 @@ export interface StampTurnInputSubmittedInput {
  *   Moltnet wiring (see repo `AGENTS.md`) — but `event.id` is now the same
  *   id moltnet itself stamped on `message.accepted`, so this chain is
  *   id-joined across authorities rather than merely locally consistent.
+ *   `prepared.recalledCausalEventIds` (not `prepared.recall.selectedEventIds`)
+ *   for the same reason: `recall.selectedEventIds` are mneme's raw
+ *   kernel-log recall ids (`evt_<...>`), a different id namespace than the
+ *   `mneme:<uuid>` ids mneme's own `memory.recalled` causal events are
+ *   stamped under (`contract/causal.ts` `mnemeCausalEventId`). Chaining the
+ *   raw recall id would never resolve against mneme's causal stream; the
+ *   `recalledCausalEventIds` mneme exposes on `MemoryPrepareTurnResult` are
+ *   the actual `event_id`s of the `memory.recalled` events it appended for
+ *   this turn, so this cause link is id-joined the same way the moltnet
+ *   link above is.
  * - `run_id` always comes from `resolveRunId()` (`NOOPOLIS_RUN_ID`), never
  *   from `event` or model output.
  */
@@ -62,7 +72,7 @@ export const stampTurnInputSubmitted = (
 ): Promise<CausalEvent<TurnInputSubmittedPayload>> =>
   emitTurnInputSubmitted({
     agentId: input.agentId,
-    causeEventIds: [input.event.id, ...(input.prepared?.recall.selectedEventIds ?? [])],
+    causeEventIds: [input.event.id, ...(input.prepared?.recalledCausalEventIds ?? [])],
     inputContentSha256: sha256Hex(input.event.text),
     inputMessageIds: [input.event.id],
     principalId: agentPrincipalId(input.agentId),

@@ -34,6 +34,18 @@ const readCausalEvents = async (runtimeHomePath: string): Promise<CausalEvent[]>
     .map((line) => JSON.parse(line) as CausalEvent);
 };
 
+/** Reads mneme's own `noopolis.causal-event.v1` stream, kept beside its
+ * `memory/events.jsonl` domain ledger under the same `runtimeHomePath`
+ * (see `@noopolis/mneme` `CausalEventStore`) — a different file than
+ * daimon's own `telemetry/causal.jsonl` above. */
+const readMnemeCausalEvents = async (runtimeHomePath: string): Promise<CausalEvent[]> => {
+  const raw = await readFile(path.join(runtimeHomePath, "memory", "causal.jsonl"), "utf8");
+  return raw
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as CausalEvent);
+};
+
 const scriptedSessionFactory = (reply: string, options: { throws?: boolean } = {}): PiSessionFactory =>
   (() =>
     Promise.resolve({
@@ -118,9 +130,23 @@ test("wake() stamps turn.input.submitted and turn.output.completed with a correc
   assert.deepEqual(inputEvent.payload.input_message_ids, ["wake-1"]);
   assert.equal(inputEvent.payload.input_content_sha256, sha256Hex(eventText));
   assert.equal(typeof inputEvent.payload.prompt_sha256, "string");
-  // cause chain: the WakeEvent id (moltnet message.accepted stand-in) plus the mneme recall id.
+
+  // cause chain: the WakeEvent id (moltnet message.accepted stand-in) plus
+  // the mneme:<uuid> id mneme's own memory.recalled causal event was
+  // actually stamped under (contract/causal.ts mnemeCausalEventId) — NOT
+  // recalled.id, which is the raw kernel-log event id in a different
+  // namespace and never appears in mneme's causal.jsonl as an event_id, so
+  // it would never resolve for a cross-authority reconciler.
+  const mnemeCausalEvents = await readMnemeCausalEvents(runtimeHomePath);
+  const recalledCausalEvents = mnemeCausalEvents.filter((event) => event.type === "memory.recalled");
+  assert.equal(recalledCausalEvents.length, 1);
+  const [recalledCausalEvent] = recalledCausalEvents;
+  assert.equal(recalledCausalEvent.payload.memory_id, recalled.id);
+  assert.ok(recalledCausalEvent.event_id.startsWith("mneme:"));
+
   assert.ok(inputEvent.cause_event_ids.includes("wake-1"));
-  assert.ok(inputEvent.cause_event_ids.includes(recalled.id));
+  assert.ok(inputEvent.cause_event_ids.includes(recalledCausalEvent.event_id));
+  assert.equal(inputEvent.cause_event_ids.includes(recalled.id), false);
   assert.equal(inputEvent.cause_event_ids.length, 2);
 
   assert.equal(outputEvent.type, "turn.output.completed");
