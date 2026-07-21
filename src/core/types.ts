@@ -24,6 +24,13 @@ export interface HarnessModelSpec {
   provider: string;
 }
 
+export interface WakeDeliveryMetadata {
+  eventId: string;
+  sender: string;
+  target: string;
+  contextId: string;
+}
+
 export interface WakeEvent {
   id: string;
   kind: "manual" | "message" | "schedule" | "dream";
@@ -39,6 +46,7 @@ export interface WakeEvent {
     pairPeers?: string[];
     artifactPaths?: string[];
   };
+  delivery?: WakeDeliveryMetadata;
 }
 
 export interface WakeResult {
