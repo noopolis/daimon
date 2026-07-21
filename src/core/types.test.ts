@@ -23,6 +23,21 @@ type DeliveryMissingContextIdIsInvalid = Assert<
     ? false
     : true)
 >;
+type DeliveryMissingEventIdIsInvalid = Assert<
+  ({ sender: string; target: string; contextId: string } extends WakeDeliveryMetadata
+    ? false
+    : true)
+>;
+type DeliveryMissingSenderIsInvalid = Assert<
+  ({ eventId: string; target: string; contextId: string } extends WakeDeliveryMetadata
+    ? false
+    : true)
+>;
+type DeliveryMissingTargetIsInvalid = Assert<
+  ({ eventId: string; sender: string; contextId: string } extends WakeDeliveryMetadata
+    ? false
+    : true)
+>;
 
 type LegacyWakeDeliveryIsOptional = Assert<
   IsEqual<WakeEvent["delivery"], WakeDeliveryMetadata | undefined>
@@ -32,6 +47,9 @@ const _deliveryShapeCheck: DeliveryHasClosedShape = true;
 const _deliveryNoIndex: DeliveryHasNoStringIndex = true;
 const _legacyWakeHasNoExtras: DeliveryWithoutExtras = true;
 const _missingContextId: DeliveryMissingContextIdIsInvalid = true;
+const _missingEventId: DeliveryMissingEventIdIsInvalid = true;
+const _missingSender: DeliveryMissingSenderIsInvalid = true;
+const _missingTarget: DeliveryMissingTargetIsInvalid = true;
 const _deliveryOptional: LegacyWakeDeliveryIsOptional = true;
 
 const legacyEvent: WakeEvent = {
