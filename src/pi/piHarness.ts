@@ -8,6 +8,7 @@ import {
   SessionManager,
   SettingsManager
 } from "@earendil-works/pi-coding-agent";
+import { createMemoryRuntime } from "@noopolis/mneme";
 
 import type { AgentHandle, AgentHarnessAdapter, AgentStartInput, HarnessModelSpec } from "../core/types.js";
 
@@ -16,7 +17,7 @@ import { createPiModelRegistry } from "./modelRegistry.js";
 import { createPiMemoryTools, piMemoryToolNames, type PiMemoryToolContextRef } from "./memoryTools.js";
 import { createResourceLoader } from "./prompts.js";
 import { PiAgentHandle, type PiSessionCreator } from "./piAgentHandle.js";
-import { createMemoryRuntime } from "@noopolis/mneme";
+import { createPiWorldTools, piWorldToolNames, type PiWorldBinding } from "./worldTools.js";
 
 type HarnessMemoryEmbeddingProvider = {
   dimensions?: number;
@@ -39,6 +40,7 @@ export interface PiHarnessOptions {
     tokenBudget?: number;
     runtimeHomePath?: string;
   };
+  world?: PiWorldBinding;
 }
 
 export type PiSessionFactory = (
@@ -89,9 +91,13 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         contextRef: memoryToolContext,
         mode
       });
+      const worldTools = this.options.world === undefined
+        ? undefined
+        : createPiWorldTools({ world: this.options.world });
       const toolNames = [
         ...(input.tools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"]),
-        ...piMemoryToolNames(memoryTools)
+        ...piMemoryToolNames(memoryTools),
+        ...(worldTools === undefined ? [] : piWorldToolNames(worldTools))
       ];
 
       const { session } = await this.sessionFactory({
@@ -103,7 +109,7 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         thinkingLevel: "off",
         resourceLoader: createResourceLoader(input, mode),
         tools: [...new Set(toolNames)],
-        customTools: memoryTools,
+        customTools: worldTools === undefined ? memoryTools : [...memoryTools, ...worldTools],
         sessionManager: SessionManager.create(input.workspacePath, sessionDirectory),
         settingsManager: SettingsManager.inMemory({
           compaction: { enabled: false },
