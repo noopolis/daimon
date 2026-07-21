@@ -69,8 +69,25 @@ test("exposes the exact six tools and projects each call onto the B25 JSON contr
   assert.deepEqual(calls.map((call) => call.body), cases.map((entry) => entry[2]));
   for (const candidate of tools) {
     const properties = (candidate.parameters as unknown as { properties: Record<string, unknown> }).properties;
-    assert.equal(Object.hasOwn(properties, "principal"), false);
-    assert.equal(Object.hasOwn(properties, "actor"), false);
+    for (const forbidden of ["principal", "actor", "url", "token", "tokenEnv", "authorization"]) {
+      assert.equal(Object.hasOwn(properties, forbidden), false);
+    }
+  }
+});
+
+test("accepts only an exact canonical world base and named environment binding", () => {
+  const invalid = [
+    { url: "http://world/v1/world/", tokenEnv: "WORLD_TOKEN" },
+    { url: "http://world/v1/world?member=red", tokenEnv: "WORLD_TOKEN" },
+    { url: "http://bearer@world/v1/world", tokenEnv: "WORLD_TOKEN" },
+    { url: "http://world/v1/world", tokenEnv: "world_token" },
+    { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN", authorization: "Bearer override" }
+  ];
+  for (const world of invalid) {
+    assert.throws(
+      () => createPiWorldTools({ world: world as never, fetch: async () => response({ ok: true }) }),
+      { name: "TypeError", message: "invalid Pi world tool configuration" }
+    );
   }
 });
 
@@ -168,11 +185,9 @@ test("never retries HTTP rejection and never exposes bearer, response, or transp
 
 test("honors caller cancellation and an overall timeout without retry", async () => {
   let calls = 0;
-  const waitingFetch: PiWorldFetch = async (_url, init) => {
+  const waitingFetch: PiWorldFetch = async () => {
     calls += 1;
-    return new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted secret-canary", "AbortError")), { once: true });
-    });
+    return new Promise<Response>(() => {});
   };
   const cancelledTools = createPiWorldTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" }, fetch: waitingFetch, readEnvironment: () => "bearer"

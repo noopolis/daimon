@@ -65,6 +65,7 @@ export class PiWorldToolError extends Error {
 type PiWorldTool = ToolDefinition<any, unknown>;
 type WorldOperation = "status" | "capabilities" | "observe" | "affordances" | "act" | "ledger";
 class BodyReadCancelled extends Error {}
+class RequestInterrupted extends Error {}
 const UTF8 = new TextEncoder();
 const fail = (code: PiWorldToolErrorCode): never => { throw new PiWorldToolError(code); };
 const text = (value: unknown, maximum = 256): value is string => typeof value === "string"
@@ -125,6 +126,22 @@ const serialize = (value: unknown): string => {
     if (output === undefined || UTF8.encode(output).byteLength > PI_WORLD_TOOL_LIMITS.requestBytes) return fail("world_request_invalid");
     return output;
   } catch { return fail("world_request_invalid"); }
+};
+const fetchResponse = async (
+  fetchWorld: PiWorldFetch,
+  url: string,
+  init: RequestInit,
+  signal: AbortSignal
+): Promise<Response> => {
+  if (signal.aborted) throw new RequestInterrupted();
+  let interrupted: (() => void) | undefined;
+  const interruption = new Promise<never>((_resolve, reject) => {
+    interrupted = () => reject(new RequestInterrupted());
+    signal.addEventListener("abort", interrupted, { once: true });
+  });
+  try { return await Promise.race([fetchWorld(url, init), interruption]); } finally {
+    if (interrupted !== undefined) signal.removeEventListener("abort", interrupted);
+  }
 };
 const readChunk = async (reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal) => {
   if (signal.aborted) throw new BodyReadCancelled();
@@ -246,12 +263,12 @@ export const createPiWorldTools = (input: CreatePiWorldToolsInput): PiWorldTool[
           if (callerSignal?.aborted) return fail("world_request_cancelled");
           if (controller.signal.aborted) return fail(timedOut ? "world_request_timeout" : "world_request_cancelled");
           try {
-            response = await fetchWorld(`${world.url}/${descriptor.operation}`, {
+            response = await fetchResponse(fetchWorld, `${world.url}/${descriptor.operation}`, {
               method: "POST",
               headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
               body: serialized,
               signal: controller.signal
-            });
+            }, controller.signal);
             if (descriptor.operation === "act" && response.status === 408 && attempt === 0) {
               cancelBody(response);
               response = undefined;
