@@ -82,18 +82,35 @@ const binding = (value: unknown): PiWorldBinding | undefined => {
     const tokenEnv = Object.getOwnPropertyDescriptor(value, "tokenEnv");
     if (!url?.enumerable || !("value" in url) || !tokenEnv?.enumerable || !("value" in tokenEnv)
       || typeof url.value !== "string" || url.value !== url.value.trim() || url.value.length > 2_048
+      || url.value.includes("?") || url.value.includes("#")
       || typeof tokenEnv.value !== "string" || !/^[A-Z_][A-Z0-9_]{0,127}$/u.test(tokenEnv.value)) return undefined;
     const parsed = new URL(url.value);
-    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username !== ""
+    if (parsed.href !== url.value || (parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username !== ""
       || parsed.password !== "" || parsed.search !== "" || parsed.hash !== ""
       || !parsed.pathname.endsWith("/v1/world") || parsed.pathname.endsWith("/")) return undefined;
     return Object.freeze({ url: url.value, tokenEnv: tokenEnv.value });
   } catch { return undefined; }
 };
-const result = (details: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(details) }],
-  details
-});
+const result = (details: unknown, bearer: string) => {
+  const pending: unknown[] = [details];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (typeof value === "string") {
+      if (value.includes(bearer)) return fail("world_response_invalid");
+    } else if (Array.isArray(value)) {
+      pending.push(...value);
+    } else if (value !== null && typeof value === "object") {
+      for (const [key, nested] of Object.entries(value)) {
+        if (key.includes(bearer)) return fail("world_response_invalid");
+        pending.push(nested);
+      }
+    }
+  }
+  let serialized: string;
+  try { serialized = JSON.stringify(details); } catch { return fail("world_response_invalid"); }
+  if (serialized.includes(bearer)) return fail("world_response_invalid");
+  return { content: [{ type: "text" as const, text: serialized }], details };
+};
 const requestBody = (operation: WorldOperation, params: Record<string, unknown>): Record<string, unknown> => {
   if (!text(params.decision_token, 512)) return fail("world_request_invalid");
   if (operation === "status" || operation === "capabilities" || operation === "affordances") {
@@ -193,9 +210,10 @@ const readResponse = async (response: Response, signal: AbortSignal, maximum: nu
   return parsed;
 };
 const cancelBody = (response: Response): void => {
-  if (response.body !== null) {
-    try { void response.body.cancel().catch(() => {}); } catch { /* Never surface response diagnostics. */ }
-  }
+  try {
+    const body = response.body;
+    if (body !== null) void body.cancel().catch(() => {});
+  } catch { /* Never surface response diagnostics. */ }
 };
 
 const schemas = Object.freeze({
@@ -269,29 +287,36 @@ export const createPiWorldTools = (input: CreatePiWorldToolsInput): PiWorldTool[
               body: serialized,
               signal: controller.signal
             }, controller.signal);
-            if (descriptor.operation === "act" && response.status === 408 && attempt === 0) {
-              cancelBody(response);
-              response = undefined;
-              continue;
-            }
-            break;
           } catch (error) {
             if (callerSignal?.aborted) return fail("world_request_cancelled");
             if (controller.signal.aborted) return fail(timedOut ? "world_request_timeout" : "world_request_cancelled");
             if (descriptor.operation !== "act" || !(error instanceof TypeError) || attempt === 1) {
               return fail("world_transport_unavailable");
             }
+            continue;
           }
+          let status: number;
+          try { status = response.status; } catch { return fail("world_response_invalid"); }
+          if (descriptor.operation === "act" && status === 408 && attempt === 0) {
+            cancelBody(response);
+            response = undefined;
+            continue;
+          }
+          break;
         }
         if (response === undefined) return fail("world_transport_unavailable");
-        if (!response.ok) {
-          cancelBody(response);
-          if (response.status === 401 || response.status === 403) return fail("world_request_denied");
-          return fail("world_request_rejected");
-        }
-        try { return result(await readResponse(response, controller.signal, maximum)); } catch (error) {
+        try {
+          const status = response.status;
+          if (!response.ok) {
+            cancelBody(response);
+            if (status === 401 || status === 403) return fail("world_request_denied");
+            return fail("world_request_rejected");
+          }
+          return result(await readResponse(response, controller.signal, maximum), bearer);
+        } catch (error) {
           if (error instanceof BodyReadCancelled) return fail(timedOut ? "world_request_timeout" : "world_request_cancelled");
-          throw error;
+          if (error instanceof PiWorldToolError) throw error;
+          return fail("world_response_invalid");
         }
       } finally {
         clearTimeout(timer);

@@ -79,6 +79,11 @@ test("accepts only an exact canonical world base and named environment binding",
   const invalid = [
     { url: "http://world/v1/world/", tokenEnv: "WORLD_TOKEN" },
     { url: "http://world/v1/world?member=red", tokenEnv: "WORLD_TOKEN" },
+    { url: "http://world/v1/world?", tokenEnv: "WORLD_TOKEN" },
+    { url: "http://world/v1/world#", tokenEnv: "WORLD_TOKEN" },
+    { url: "HTTP://world/v1/world", tokenEnv: "WORLD_TOKEN" },
+    { url: "http://world:80/v1/world", tokenEnv: "WORLD_TOKEN" },
+    { url: "http://world/segment/../v1/world", tokenEnv: "WORLD_TOKEN" },
     { url: "http://bearer@world/v1/world", tokenEnv: "WORLD_TOKEN" },
     { url: "http://world/v1/world", tokenEnv: "world_token" },
     { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN", authorization: "Bearer override" }
@@ -229,6 +234,47 @@ test("fails closed for missing auth and oversized or malformed successful respon
     await assert.rejects(execute(tool(tools, "world_status"), { decision_token: "decision-red" }),
       rejectedCode("world_response_invalid", ["secret-response-canary"]));
   }
+});
+
+test("fails closed when a successful response echoes the call-time bearer", async () => {
+  const bearer = "secret-bearer-canary";
+  const tools = createPiWorldTools({
+    world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
+    readEnvironment: () => bearer,
+    fetch: async () => response({ result: { authorization: `Bearer ${bearer}` } })
+  });
+  await assert.rejects(execute(tool(tools, "world_status"), { decision_token: "decision-red" }),
+    rejectedCode("world_response_invalid", [bearer, `Bearer ${bearer}`]));
+});
+
+test("turns hostile response inspection and a locked successful body into fixed diagnostics", async () => {
+  const bearer = "secret-bearer-canary";
+  const hostileCanary = "secret-hostile-response-canary";
+  const hostile = new Proxy(response({ ok: true }), {
+    get(target, property, receiver) {
+      if (property === "ok") throw new Error(hostileCanary);
+      return Reflect.get(target, property, receiver);
+    }
+  });
+  const hostileTools = createPiWorldTools({
+    world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
+    readEnvironment: () => bearer,
+    fetch: async () => hostile
+  });
+  await assert.rejects(execute(tool(hostileTools, "world_status"), { decision_token: "decision-red" }),
+    rejectedCode("world_response_invalid", [bearer, hostileCanary]));
+
+  const locked = response({ ok: true });
+  const reader = locked.body?.getReader();
+  assert.ok(reader);
+  const lockedTools = createPiWorldTools({
+    world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
+    readEnvironment: () => bearer,
+    fetch: async () => locked
+  });
+  await assert.rejects(execute(tool(lockedTools, "world_status"), { decision_token: "decision-red" }),
+    rejectedCode("world_response_invalid", [bearer, "locked"]));
+  reader.releaseLock();
 });
 
 test("caller abort and timeout settle while hostile response cancellation remains pending", async () => {
