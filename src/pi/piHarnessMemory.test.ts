@@ -71,7 +71,7 @@ test("non-memory Pi tool events are not implicitly written to memory", async () 
   });
 
   await handle.wake({
-    id: "wake-tool",
+    id: "daimon:wake-tool",
     kind: "manual",
     text: "Check tool boundary test.",
     context: {
@@ -113,6 +113,7 @@ test("failed wakes do not implicitly record recalled memory provenance", async (
   });
 
   type SessionResult = Awaited<ReturnType<typeof createAgentSession>>;
+  let searchAfterFailure: { execute: (...args: unknown[]) => Promise<unknown> } | undefined;
   const adapter = new PiHarnessAdapter({
     authPath: path.join(root, "auth.json"),
     model: {
@@ -124,17 +125,24 @@ test("failed wakes do not implicitly record recalled memory provenance", async (
       name: "llama3.2",
       provider: "local"
     },
-    sessionFactory: () => Promise.resolve(({
-      session: {
-        async prompt() {
-          throw new Error("prompt failed after recall");
-        },
-        subscribe() {
-          return () => {};
-        },
-        dispose() {}
-      }
-    } as unknown) as SessionResult)
+    sessionFactory: (input) => {
+      assert.ok(input);
+      searchAfterFailure = (input.customTools as Array<{
+        execute: (...args: unknown[]) => Promise<unknown>;
+        name: string;
+      }>).find((tool) => tool.name === "memory_search");
+      return Promise.resolve(({
+        session: {
+          async prompt() {
+            throw new Error("prompt failed after recall");
+          },
+          subscribe() {
+            return () => {};
+          },
+          dispose() {}
+        }
+      } as unknown) as SessionResult);
+    }
   });
 
   const handle = await adapter.startAgent({
@@ -146,7 +154,7 @@ test("failed wakes do not implicitly record recalled memory provenance", async (
   });
 
   await assert.rejects(handle.wake({
-    id: "wake-fail-after-recall",
+    id: "daimon:wake-fail-after-recall",
     kind: "manual",
     text: "Use the phoenix memory before failing."
   }), /prompt failed after recall/u);
@@ -159,6 +167,11 @@ test("failed wakes do not implicitly record recalled memory provenance", async (
     event.content.kind === "text" &&
     event.content.text.includes("PHOENIX_FAIL_MARKER")
   ), false);
+  assert.ok(searchAfterFailure);
+  await assert.rejects(
+    searchAfterFailure.execute("late-failed-call", { scope: "current", query: "PHOENIX_FAIL_MARKER" }),
+    /active trusted turn context/u
+  );
 
   await handle.stop();
 });

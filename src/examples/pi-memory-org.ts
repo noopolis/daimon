@@ -6,6 +6,7 @@ import type { AgentHandle, WakeEvent, WakeResult } from "../core/types.js";
 import { JsonlMemoryStore } from "@noopolis/mneme";
 import { seedPiOpenAICodexAuthFromCodex } from "../pi/auth.js";
 import { PiHarnessAdapter } from "../pi/piHarness.js";
+import { exampleCausalId } from "./exampleCausalId.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const daimonRoot = path.resolve(__dirname, "../..");
@@ -122,7 +123,7 @@ const seedPrivateMemories = async (handles: Map<string, AgentHandle>): Promise<v
   console.log("\n== Private seed phase ==");
   for (const agent of demoAgents) {
     const result = await handles.get(agent.id)?.wake({
-      id: `seed-${agent.id}`,
+      id: exampleCausalId(`seed-${agent.id}`),
       kind: "manual",
       text: [
         "Private memory seed.",
@@ -139,7 +140,7 @@ const runRoomConversation = async (handles: Map<string, AgentHandle>): Promise<s
   const transcript: string[] = [];
 
   const atlas = await wake(handles.get("atlas")!, {
-    id: "room-atlas-1",
+    id: exampleCausalId("room-atlas-1"),
     kind: "manual",
     context: roomContext,
     text: [
@@ -154,7 +155,7 @@ const runRoomConversation = async (handles: Map<string, AgentHandle>): Promise<s
   transcript.push(`atlas: ${atlas.text}`);
 
   const oracle = await wake(handles.get("oracle")!, {
-    id: "room-oracle-1",
+    id: exampleCausalId("room-oracle-1"),
     kind: "manual",
     context: roomContext,
     text: [
@@ -169,7 +170,7 @@ const runRoomConversation = async (handles: Map<string, AgentHandle>): Promise<s
   transcript.push(`oracle: ${oracle.text}`);
 
   const keeper = await wake(handles.get("keeper")!, {
-    id: "room-keeper-1",
+    id: exampleCausalId("room-keeper-1"),
     kind: "manual",
     context: roomContext,
     text: [
@@ -201,7 +202,7 @@ const verifyFreshSessionRecall = async (
   const keeper = await startAgent(adapter, demoAgents.find((agent) => agent.id === "keeper")!);
   try {
     const event: WakeEvent = {
-      id: "room-keeper-2",
+      id: exampleCausalId("room-keeper-2"),
       kind: "manual",
       context: roomContext,
       text: [

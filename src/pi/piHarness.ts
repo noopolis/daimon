@@ -8,7 +8,7 @@ import {
   SessionManager,
   SettingsManager
 } from "@earendil-works/pi-coding-agent";
-import { createMemoryRuntime } from "@noopolis/mneme";
+import { createMemoryRuntime, type MemoryAuthorityConfig } from "@noopolis/mneme";
 
 import type { AgentHandle, AgentHarnessAdapter, AgentStartInput, HarnessModelSpec } from "../core/types.js";
 
@@ -35,6 +35,7 @@ export interface PiHarnessOptions {
   };
   modelsPath?: string;
   memory?: {
+    authority?: MemoryAuthorityConfig;
     embeddingProvider?: HarnessMemoryEmbeddingProvider;
     source?: string;
     tokenBudget?: number;
@@ -75,6 +76,7 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
     }
     const memoryOptions = {
       agentId: input.id,
+      authority: this.options.memory?.authority,
       embeddingProvider: this.options.memory?.embeddingProvider,
       runtimeHomePath: memoryRuntimeHomePath,
       source: this.options.memory?.source,

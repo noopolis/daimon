@@ -31,6 +31,7 @@ const readJsonl = async (runtimeHomePath: string): Promise<Record<string, unknow
 
 const buildPrepared = (overrides: Partial<MemoryPrepareTurnResult> = {}): MemoryPrepareTurnResult => ({
   principal: { agentId: "agent-a", scope: "room" },
+  allowedScopes: ["agent:agent-a/scope:room"],
   packet: { principal: { agentId: "agent-a", scope: "room" }, sections: [] },
   promptText: "prompt",
   recall: {

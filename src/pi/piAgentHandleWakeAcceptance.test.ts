@@ -25,7 +25,7 @@ const roots: string[] = [];
 const count = (xs: readonly string[], value: string): number => xs.filter((item) => item === value).length;
 const gate = (): Gate => { let release = (): void => {}; const signal = new Promise<void>((resolve) => { release = resolve; }); return { signal, release }; };
 const code = (expected: WakeAcceptanceError["code"]) => (value: unknown): boolean => value instanceof WakeAcceptanceError && value.code === expected;
-const event = (id: string, text = `body-${id}`): WakeEvent => ({ id, kind: "message", from: "sender", text, context: { networkId: "net", roomId: "room", teamId: "team", pairPeers: ["one"], artifactPaths: ["a"] }, delivery: { eventId: id, sender: "sender", target: "agent", contextId: `ctx-${id}` } });
+const event = (id: string, text = `body-${id}`): WakeEvent => ({ id: `moltnet:${id}`, kind: "message", from: "sender", text, context: { networkId: "net", roomId: "room", teamId: "team", pairPeers: ["one"], artifactPaths: ["a"] }, delivery: { eventId: `moltnet:${id}`, sender: "sender", target: "agent", contextId: `ctx-${id}` } });
 const tmp = async (): Promise<string> => { const root = await mkdtemp(path.join(os.tmpdir(), "b34-")); roots.push(root); return root; };
 const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 const state = async (home: string): Promise<WakeAcceptanceStoreState> => JSON.parse(await readFile(new WakeAcceptanceStore(home, "agent").getAcceptanceFilePath(), "utf8")) as WakeAcceptanceStoreState;
@@ -119,7 +119,7 @@ test("wake snapshots every delivered consumer before admission", async () => {
   const waking = handle.wake(original); await entered.signal; original.text = "after"; original.from = "bad"; original.delivery = { eventId: "snap", sender: "bad", target: "agent", contextId: "bad" }; original.context?.pairPeers?.push("two"); original.context?.artifactPaths?.push("b"); release.release(); await waking;
   const expectedContext = { networkId: "net", roomId: "room", teamId: "team", pairPeers: ["one"], artifactPaths: ["a"] };
   const memoryCapture = requests.map((request) => { if (request.context === undefined) throw new Error("missing memory context"); return { id: request.id, kind: request.kind, from: request.from, text: request.text, context: { networkId: request.context.networkId, roomId: request.context.roomId, teamId: request.context.teamId, pairPeers: request.context.pairPeers, artifactPaths: request.context.artifactPaths } }; });
-  assert.deepEqual(memoryCapture, [{ id: "snap", kind: "message", from: "sender", text: "before", context: expectedContext }]); assert.deepEqual(inputs.map((input) => input.event), [event("snap", "before")]); assert.deepEqual(outputs.map((output) => ({ cause: output.causeEventId, turn: output.turnId })), [{ cause: "daimon:snap:turn.input.submitted", turn: "snap" }]); assert.deepEqual(traces.map((trace) => ({ event: trace.event, prompt: trace.promptText })), [{ event: event("snap", "before"), prompt: prompts[0] }]); assert.match(prompts[0], /before/); assert.doesNotMatch(prompts[0], /\nafter\b|from: bad|pair\/qualifier:two/);
+  assert.deepEqual(memoryCapture, [{ id: "moltnet:snap", kind: "message", from: "sender", text: "before", context: expectedContext }]); assert.deepEqual(inputs.map((input) => input.event), [event("snap", "before")]); assert.deepEqual(outputs.map((output) => ({ cause: output.causeEventId, turn: output.turnId })), [{ cause: "daimon:moltnet:snap:turn.input.submitted", turn: "moltnet:snap" }]); assert.deepEqual(traces.map((trace) => ({ event: trace.event, prompt: trace.promptText })), [{ event: event("snap", "before"), prompt: prompts[0] }]); assert.match(prompts[0], /before/); assert.doesNotMatch(prompts[0], /\nafter\b|from: bad|pair\/qualifier:two/);
   const record = (await state(home)).records[0]; assert.deepEqual({ identity: record.identity, digest: record.digest, body: record.body_sha256, context: record.context_id, sender: record.sender }, { identity: candidate.identity, digest: candidate.digest, body: sha("before"), context: "ctx-snap", sender: "sender" });
   assert.equal((await handle.wake(event("snap", "before"))).durationMs, 0); assert.equal(count(order, "prompt"), 1); await handle.stop();
 });
@@ -127,14 +127,14 @@ test("wake snapshots every delivered consumer before admission", async () => {
 test("delivery validation bypass and typed Pi fixture behavior", async () => {
   const home = await tmp(); const { handle, order } = await harness(home);
   await assert.rejects(handle.wake({ ...event("bad"), kind: "manual" }), code("wake_delivery_invalid"));
-  for (const kind of ["dream", "manual", "schedule"] as const) assert.equal((await handle.wake({ id: kind, kind, from: "x", text: kind })).text, "done");
+  for (const kind of ["dream", "manual", "schedule"] as const) assert.equal((await handle.wake({ id: `daimon:${kind}`, kind, from: "x", text: kind })).text, "done");
   assert.equal(count(order, "begin"), 0); assert.equal(count(order, "prompt"), 3); await handle.stop();
 });
 
 test("failure matrix preserves original errors and exact durable outcomes", async () => {
   const rows: Array<{ stage: string; input: WakeEvent; failAt?: Options["failAt"]; memory?: boolean; dream?: boolean; hook?: "invoking" | "completed"; incompleteFails?: boolean; order: readonly string[]; final?: "incomplete" | "invoking" }> = [
     { stage: "memory prepare", input: event("memory"), memory: true, order: ["candidate", "begin", "accepted", "memory", "trace", "incomplete"], final: "incomplete" },
-    { stage: "dream session create/select", input: { id: "dream", kind: "dream", from: "x", text: "x" }, dream: true, order: ["trace"], final: undefined },
+    { stage: "dream session create/select", input: { id: "daimon:dream", kind: "dream", from: "x", text: "x" }, dream: true, order: ["trace"], final: undefined },
     { stage: "engine prompt", input: event("prompt"), failAt: "prompt", order: ["candidate", "begin", "accepted", "causal input", "invoking", "prompt", "trace", "incomplete"], final: "incomplete" },
     { stage: "causal input", input: event("input"), failAt: "input", order: ["candidate", "begin", "accepted", "causal input", "trace", "incomplete"], final: "incomplete" },
     { stage: "causal output", input: event("output"), failAt: "output", order: ["candidate", "begin", "accepted", "causal input", "invoking", "prompt", "causal output", "trace", "incomplete"], final: "incomplete" },

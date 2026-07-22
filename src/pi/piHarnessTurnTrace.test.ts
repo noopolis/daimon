@@ -86,18 +86,18 @@ test("Pi harness writes a safe per-turn trace with wake, memory, tool, and model
   });
 
   await handle.wake({
-    id: "wake-trace",
+    id: "moltnet:wake-trace",
     kind: "message",
     from: "moltnet",
     text: "Use memory if useful.",
     context: { networkId: "noopolis", roomId: "agora", teamId: "ops" }
   });
 
-  const trace = await readTrace(runtimeHomePath, "wake-trace");
+  const trace = await readTrace(runtimeHomePath, "moltnet_wake-trace");
   const ndjson = await readFile(path.join(runtimeHomePath, "telemetry", "turns.ndjson"), "utf8");
-  assert.equal(JSON.parse(ndjson.trim()).turn_id, "wake-trace");
+  assert.equal(JSON.parse(ndjson.trim()).turn_id, "moltnet:wake-trace");
   assert.equal(trace.schema, "daimon.turn_trace.v1");
-  assert.equal(trace.wake.event_id, "wake-trace");
+  assert.equal(trace.wake.event_id, "moltnet:wake-trace");
   assert.equal(trace.wake.context.roomId, "agora");
   assert.deepEqual(trace.engine, {
     auth_method: "none",
@@ -141,12 +141,12 @@ test("Pi harness writes failed turn traces with redacted errors", async () => {
   });
 
   await assert.rejects(handle.wake({
-    id: "wake-failed",
+    id: "daimon:wake-failed",
     kind: "manual",
     text: "This will fail."
   }), /failed/u);
 
-  const trace = await readTrace(runtimeHomePath, "wake-failed");
+  const trace = await readTrace(runtimeHomePath, "daimon_wake-failed");
   assert.equal(trace.status, "failed");
   assert.equal(trace.error.stage, "engine_prompt");
   assert.match(trace.error.message, /\[path\]/u);

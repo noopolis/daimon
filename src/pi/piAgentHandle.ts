@@ -2,13 +2,13 @@ import type { createAgentSession } from "@earendil-works/pi-coding-agent";
 
 import type { AgentHandle, AgentStatus, WakeEvent, WakeResult } from "../core/types.js";
 
-import type { PiMemoryToolContextRef } from "./memoryTools.js";
+import { createTrustedPiMemoryToolContext, type PiMemoryToolContextRef } from "./memoryTools.js";
 import { formatWakePrompt } from "./prompts.js";
 import { stampTurnInputSubmitted, stampTurnOutputCompleted, type StampTurnInputSubmittedInput, type StampTurnOutputCompletedInput } from "./turnCausal.js";
 import { WakeAcceptanceError, WakeAcceptanceStore, type WakeAcceptanceCapability, type WakeAcceptanceStoreLike } from "./wakeAcceptance.js";
 import { persistPiTurnTrace, summarizeSessionEvent, type PiMemoryPrepareTraceInput, type PiTurnTraceModel, type PiTurnTraceToolEvent } from "./turnTrace.js";
 import { createAwakeThreadId, createDreamSessionDirectory, createDreamSessionKey, createDreamThreadId, formatDreamPrompt } from "./wakeModes.js";
-import { memoryScopeId, readMemoryContext, type MemoryPrepareTurnResult, type MemoryRuntime, type MemoryWakeMode } from "@noopolis/mneme";
+import { readMemoryContext, type MemoryPrepareTurnResult, type MemoryRuntime, type MemoryWakeMode } from "@noopolis/mneme";
 
 const cloneContext = (context: WakeEvent["context"]): WakeEvent["context"] => ({
   ...context,
@@ -221,15 +221,14 @@ export class PiAgentHandle implements AgentHandle {
 
         if (this.memoryToolContext !== undefined) {
           this.memoryToolContext.observeTool = (toolEvent) => tools.push(toolEvent);
-          this.memoryToolContext.current = {
-            audienceKey: memoryContext.roomId ?? event.from ?? this.id,
-            conversationScope: memoryScopeId(prepared.principal),
+          this.memoryToolContext.current = createTrustedPiMemoryToolContext({
+            agentId: this.id,
+            memory: this.memory,
             mode: selectedSession.mode,
-            principal: prepared.principal,
+            prepared,
             threadId: selectedSession.threadId,
-            transport: "in_process",
             wakeId: event.id
-          };
+          });
         }
       }
 
