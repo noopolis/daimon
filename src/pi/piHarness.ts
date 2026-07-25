@@ -19,6 +19,12 @@ import { createResourceLoader } from "./prompts.js";
 import { PiAgentHandle, type PiSessionCreator } from "./piAgentHandle.js";
 import { createPiWorldTools, piWorldToolNames, type PiWorldBinding } from "./worldTools.js";
 import type { PiWorldToolContextRef } from "./worldNudge.js";
+import {
+  bindPiRawTrainingCapture,
+  validatePiRawTrainingCaptureOptions,
+  type PiRawTrainingCaptureOptions,
+  type PiRawTrainingCaptureRef
+} from "./rawTrainingCapture.js";
 
 type HarnessMemoryEmbeddingProvider = {
   dimensions?: number;
@@ -46,6 +52,7 @@ export interface PiHarnessOptions {
     runtimeHomePath?: string;
   };
   thinkingLevel?: PiThinkingLevel;
+  rawTrainingCapture?: PiRawTrainingCaptureOptions;
   world?: PiWorldBinding;
 }
 
@@ -65,6 +72,7 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
   }
 
   async startAgent(input: AgentStartInput): Promise<AgentHandle> {
+    validatePiRawTrainingCaptureOptions(this.options.rawTrainingCapture);
     await mkdir(input.runtimeHomePath, { recursive: true });
     await mkdir(input.workspacePath, { recursive: true });
     const memoryRuntimeHomePath = this.options.memory?.runtimeHomePath ?? input.runtimeHomePath;
@@ -94,6 +102,8 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       memory === undefined ? undefined : {};
     const worldToolContext: PiWorldToolContextRef | undefined =
       this.options.world === undefined ? undefined : {};
+    const rawTrainingCaptureRef: PiRawTrainingCaptureRef | undefined =
+      this.options.rawTrainingCapture === undefined ? undefined : {};
     const createSession: PiSessionCreator = async (mode, sessionDirectory) => {
       const memoryTools = memory === undefined || memoryToolContext === undefined
         ? []
@@ -134,6 +144,9 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
           retry: { enabled: true, maxRetries: 1 }
         })
       });
+      if (rawTrainingCaptureRef !== undefined) {
+        bindPiRawTrainingCapture(session, rawTrainingCaptureRef);
+      }
       return session;
     };
 
@@ -152,6 +165,8 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       memory,
       memoryToolContext,
       worldToolContext,
+      rawTrainingCaptureRef,
+      this.options.rawTrainingCapture,
       worldToolContext === undefined
         ? undefined
         : {

@@ -20,6 +20,14 @@ import {
   formatDreamPrompt
 } from "./wakeModes.js";
 import {
+  capturePiRawTrainingEvent,
+  createPiRawTrainingCapture,
+  persistPiRawTrainingCapture,
+  type PiRawTrainingCapture,
+  type PiRawTrainingCaptureOptions,
+  type PiRawTrainingCaptureRef
+} from "./rawTrainingCapture.js";
+import {
   formatWorldWakePrompt,
   worldTurnContext,
   type PiWorldToolContextRef
@@ -61,6 +69,8 @@ export class PiAgentHandle implements AgentHandle {
     private readonly memory?: MemoryRuntime,
     private readonly memoryToolContext?: PiMemoryToolContextRef,
     private readonly worldToolContext?: PiWorldToolContextRef,
+    private readonly rawTrainingCaptureRef?: PiRawTrainingCaptureRef,
+    private readonly rawTrainingCaptureOptions?: PiRawTrainingCaptureOptions,
     private readonly worldTrajectoryIdentity?: PiWorldTrajectoryIdentity
   ) {}
 
@@ -84,6 +94,8 @@ export class PiAgentHandle implements AgentHandle {
     let enginePromptMs: number | undefined;
     let memoryPrepare: PiMemoryPrepareTraceInput | undefined;
     let selectedSession: WakeSessionSelection | undefined;
+    let rawTrainingCapture: PiRawTrainingCapture | undefined;
+    let rawTrainingCapturePersisted = false;
     let unsubscribe: (() => void) | undefined;
     let stage = "select_session";
     this.state = "running";
@@ -124,7 +136,15 @@ export class PiAgentHandle implements AgentHandle {
         this.worldToolContext.current = worldContext;
       }
       selectedSession = await this.selectSessionForWake(event, memoryContext);
+      if (this.rawTrainingCaptureRef !== undefined
+        && this.rawTrainingCaptureOptions !== undefined) {
+        rawTrainingCapture = createPiRawTrainingCapture();
+        this.rawTrainingCaptureRef.current = rawTrainingCapture;
+      }
       unsubscribe = selectedSession.session.subscribe((piEvent) => {
+        if (rawTrainingCapture !== undefined) {
+          capturePiRawTrainingEvent(rawTrainingCapture, piEvent);
+        }
         if (worldTrajectory !== undefined) {
           capturePiWorldTrajectoryEvent(worldTrajectory, piEvent);
         }
@@ -232,6 +252,23 @@ export class PiAgentHandle implements AgentHandle {
         tools,
         totalMs: Date.now() - startedAtMs
       });
+      if (rawTrainingCapture !== undefined
+        && this.rawTrainingCaptureOptions !== undefined) {
+        await persistPiRawTrainingCapture({
+          agentId: this.id,
+          capture: rawTrainingCapture,
+          completedAt: new Date(),
+          options: this.rawTrainingCaptureOptions,
+          runtimeHomePath: this.runtimeHomePath,
+          session: selectedSession.session,
+          startedAt,
+          status: "completed",
+          totalMs: Date.now() - startedAtMs,
+          turnId: event.id,
+          world: worldContext
+        });
+        rawTrainingCapturePersisted = true;
+      }
       if (worldContext !== undefined
         && worldTrajectory !== undefined
         && this.worldTrajectoryIdentity !== undefined) {
@@ -286,6 +323,24 @@ export class PiAgentHandle implements AgentHandle {
         tools,
         totalMs: Date.now() - startedAtMs
       });
+      if (!rawTrainingCapturePersisted
+        && rawTrainingCapture !== undefined
+        && this.rawTrainingCaptureOptions !== undefined
+        && selectedSession !== undefined) {
+        await persistPiRawTrainingCapture({
+          agentId: this.id,
+          capture: rawTrainingCapture,
+          completedAt: new Date(),
+          options: this.rawTrainingCaptureOptions,
+          runtimeHomePath: this.runtimeHomePath,
+          session: selectedSession.session,
+          startedAt,
+          status: "failed",
+          totalMs: Date.now() - startedAtMs,
+          turnId: event.id,
+          world: worldContext
+        });
+      }
       if (worldContext !== undefined
         && worldTrajectory !== undefined
         && this.worldTrajectoryIdentity !== undefined) {
@@ -314,6 +369,9 @@ export class PiAgentHandle implements AgentHandle {
       }
       if (this.worldToolContext) {
         this.worldToolContext.current = undefined;
+      }
+      if (this.rawTrainingCaptureRef) {
+        this.rawTrainingCaptureRef.current = undefined;
       }
       unsubscribe?.();
       if (selectedSession?.disposeAfterWake) {

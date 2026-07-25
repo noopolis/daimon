@@ -8,6 +8,13 @@ import type { PiWorldTurnContext } from "./worldNudge.js";
 
 export const WORLD_TRAJECTORY_SCHEMA = "daimon.world_trajectory.v1" as const;
 
+/**
+ * Pi's SessionManager remains the private raw session recorder. This module
+ * derives a minimized public/evaluation projection from the same subscribed
+ * session events. Raw training capture is deliberately separate; see
+ * docs/WORLD_TRAJECTORIES.md.
+ */
+
 export interface PiWorldTrajectoryToolCall {
   arguments?: unknown;
   completed_at?: string;
