@@ -1,6 +1,8 @@
 import { chmod, readFile, readdir, rm, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import type { createAgentSession } from "@earendil-works/pi-coding-agent";
+
 import type { PiWorldTurnContext } from "./worldNudge.js";
 import { sanitizeTraceFileId } from "./turnTrace.js";
 
@@ -30,16 +32,12 @@ export interface PiRawTrainingCaptureRef {
   current?: PiRawTrainingCapture;
 }
 
-interface PiRawTrainingSession {
-  readonly agent: {
-    onPayload?: (...args: any[]) => unknown | undefined | Promise<unknown | undefined>;
-    onResponse?: (...args: any[]) => void | Promise<void>;
-  };
-  readonly model: unknown;
-  readonly sessionFile: string | undefined;
-  readonly sessionId: string;
-  readonly thinkingLevel: string;
-}
+type PiNativeSession =
+  Awaited<ReturnType<typeof createAgentSession>>["session"];
+type PiRawTrainingSession = Pick<
+  PiNativeSession,
+  "agent" | "model" | "sessionFile" | "sessionId" | "thinkingLevel"
+>;
 
 export interface PersistPiRawTrainingCaptureInput {
   agentId: string;

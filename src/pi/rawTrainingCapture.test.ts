@@ -11,22 +11,14 @@ import {
   persistPiRawTrainingCapture,
   type PiRawTrainingCaptureRef
 } from "./rawTrainingCapture.js";
+import type { createAgentSession } from "@earendil-works/pi-coding-agent";
 
 const tempDir = (): Promise<string> => mkdtemp(path.join(os.tmpdir(), "daimon-raw-training-"));
 
 describe("Pi raw training capture", () => {
   it("records the effective provider payload without changing hook semantics", async () => {
     const ref: PiRawTrainingCaptureRef = { current: createPiRawTrainingCapture() };
-    const session: {
-      agent: {
-        onPayload?: (...args: any[]) => unknown | Promise<unknown>;
-        onResponse?: (...args: any[]) => void | Promise<void>;
-      };
-      model: unknown;
-      sessionFile: string;
-      sessionId: string;
-      thinkingLevel: string;
-    } = {
+    const session = {
       agent: {
         onPayload: (payload: unknown) => ({ wrapped: payload }),
         onResponse: () => undefined
@@ -36,18 +28,26 @@ describe("Pi raw training capture", () => {
       sessionId: "session-1",
       thinkingLevel: "high"
     };
-    bindPiRawTrainingCapture(session, ref);
-    const transformed = await session.agent.onPayload?.(
+    const nativeSession =
+      session as unknown as Awaited<ReturnType<typeof createAgentSession>>["session"];
+    bindPiRawTrainingCapture(nativeSession, ref);
+    const transformed = await nativeSession.agent.onPayload?.(
       { messages: [{ role: "system", content: "complete private prompt" }] },
-      { id: "teacher" }
+      { id: "teacher" } as never
     );
-    await session.agent.onResponse?.({ status: 200 }, { id: "teacher" });
+    await nativeSession.agent.onResponse?.(
+      { status: 200, headers: {} },
+      { id: "teacher" } as never
+    );
 
     assert.deepEqual(transformed, {
       wrapped: { messages: [{ role: "system", content: "complete private prompt" }] }
     });
     assert.deepEqual(ref.current?.requests[0]?.payload, transformed);
-    assert.deepEqual(ref.current?.requests[0]?.response, { status: 200 });
+    assert.deepEqual(ref.current?.requests[0]?.response, {
+      status: 200,
+      headers: {}
+    });
   });
 
   it("copies native Pi bytes, retains unredacted payload/events, and prunes old turns", async () => {
@@ -87,7 +87,7 @@ describe("Pi raw training capture", () => {
           sessionFile,
           sessionId: "native",
           thinkingLevel: "high"
-        },
+        } as unknown as Awaited<ReturnType<typeof createAgentSession>>["session"],
         startedAt: new Date(index),
         status: "completed",
         totalMs: 7,
