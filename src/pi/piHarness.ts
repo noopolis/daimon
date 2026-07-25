@@ -78,24 +78,28 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
     if (!model) {
       throw new Error(`Pi model not found: ${resolvedModel.provider}/${resolvedModel.name}`);
     }
-    const memoryOptions = {
-      agentId: input.id,
-      embeddingProvider: this.options.memory?.embeddingProvider,
-      runtimeHomePath: memoryRuntimeHomePath,
-      source: this.options.memory?.source,
-      tokenBudget: this.options.memory?.tokenBudget
-    } as Parameters<typeof createMemoryRuntime>[0] & {
-      embeddingProvider?: HarnessMemoryEmbeddingProvider;
-    };
-    const memory = createMemoryRuntime(memoryOptions);
-    const memoryToolContext: PiMemoryToolContextRef = {};
-    const createSession: PiSessionCreator = async (mode, sessionDirectory) => {
-      const memoryTools = createPiMemoryTools({
+    const memory = this.options.memory === undefined
+      ? undefined
+      : createMemoryRuntime({
         agentId: input.id,
-        memory,
-        contextRef: memoryToolContext,
-        mode
+        embeddingProvider: this.options.memory.embeddingProvider,
+        runtimeHomePath: memoryRuntimeHomePath,
+        source: this.options.memory.source,
+        tokenBudget: this.options.memory.tokenBudget
+      } as Parameters<typeof createMemoryRuntime>[0] & {
+        embeddingProvider?: HarnessMemoryEmbeddingProvider;
       });
+    const memoryToolContext: PiMemoryToolContextRef | undefined =
+      memory === undefined ? undefined : {};
+    const createSession: PiSessionCreator = async (mode, sessionDirectory) => {
+      const memoryTools = memory === undefined || memoryToolContext === undefined
+        ? []
+        : createPiMemoryTools({
+          agentId: input.id,
+          memory,
+          contextRef: memoryToolContext,
+          mode
+        });
       const worldTools = this.options.world === undefined
         ? undefined
         : createPiWorldTools({ world: this.options.world });
@@ -112,7 +116,10 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         modelRegistry: this.modelRegistry,
         model,
         thinkingLevel: this.options.thinkingLevel ?? "off",
-        resourceLoader: createResourceLoader(input, mode),
+        resourceLoader: createResourceLoader(input, mode, {
+          memory: memory !== undefined,
+          world: worldTools !== undefined
+        }),
         tools: [...new Set(toolNames)],
         customTools: worldTools === undefined ? memoryTools : [...memoryTools, ...worldTools],
         sessionManager: SessionManager.create(input.workspacePath, sessionDirectory),

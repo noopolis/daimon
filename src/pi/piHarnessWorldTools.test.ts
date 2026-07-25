@@ -84,6 +84,40 @@ test("an absent world binding preserves the prior Pi tool set and custom-tool or
   await handle.stop();
 });
 
+test("a world-only agent omits unrelated memory and coding tools", async () => {
+  const root = await tempDir();
+  const captured = capturingFactory();
+  const adapter = new PiHarnessAdapter({
+    authPath: path.join(root, "auth.json"),
+    model: localModel,
+    sessionFactory: captured.factory,
+    world: {
+      url: "http://simfile-world:19972/v1/world",
+      tokenEnv: "WORLD_ONLY_TOKEN"
+    }
+  });
+  const handle = await adapter.startAgent({
+    id: "player",
+    name: "Player",
+    instructions: "Observe and act once.",
+    runtimeHomePath: path.join(root, "runtime"),
+    tools: [],
+    workspacePath: path.join(root, "workspace")
+  });
+
+  const input = captured.calls[0];
+  assert.ok(input);
+  assert.deepEqual(input.tools, PI_WORLD_TOOL_NAMES);
+  assert.deepEqual(
+    (input.customTools as CapturedTool[]).map((tool) => tool.name),
+    PI_WORLD_TOOL_NAMES
+  );
+  const systemPrompt = input.resourceLoader?.getSystemPrompt?.() ?? "";
+  assert.match(systemPrompt, /authenticated world tools/u);
+  assert.doesNotMatch(systemPrompt, /Mneme Memory|coding tools|files you created/u);
+  await handle.stop();
+});
+
 test("a world binding appends exact Pi tools and reads only its named bearer when called", async () => {
   const root = await tempDir();
   const captured = capturingFactory();
