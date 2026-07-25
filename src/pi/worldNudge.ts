@@ -37,7 +37,7 @@ export const worldTurnContext = (event: WakeEvent): PiWorldTurnContext | undefin
   if (event.kind !== "message" || event.delivery === undefined) return undefined;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(event.text) as unknown;
+    parsed = JSON.parse(event.transportText ?? event.text) as unknown;
   } catch {
     return undefined;
   }

@@ -47,6 +47,8 @@ export interface WakeEvent {
     artifactPaths?: string[];
   };
   delivery?: WakeDeliveryMetadata;
+  /** Exact transport body retained outside the runtime-enriched model prompt. */
+  transportText?: string;
 }
 
 export interface WakeResult {

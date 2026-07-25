@@ -48,3 +48,19 @@ test("rejects untrusted or malformed lookalikes", () => {
   assert.equal(worldTurnContext(event(JSON.stringify({ ...valid, tick: -1 }))), undefined);
   assert.equal(worldTurnContext(event("{not-json")), undefined);
 });
+
+test("binds the trusted delivery body before runtime prompt enrichment", () => {
+  const valid = {
+    version: WORLD_NUDGE_VERSION,
+    run_id: "run-1",
+    tick: 7,
+    decision_token: "opaque-decision-token"
+  };
+  const delivered = event("runtime-enriched prompt");
+  const context = worldTurnContext({
+    ...delivered,
+    transportText: JSON.stringify(valid)
+  });
+  assert.equal(context?.runId, "run-1");
+  assert.equal(context?.tick, 7);
+});
