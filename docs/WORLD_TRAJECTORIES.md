@@ -31,8 +31,11 @@ The capture reuses Pi rather than building a parallel cognition recorder:
 This material may include prompts, private memory, credentials embedded by an
 upstream payload transform, reasoning, and other sensitive content. That is
 intentional for the private teacher dataset. The option is fail-closed: a
-configured turn fails if its persisted Pi session cannot be copied. Retention
-deletes the oldest per-turn capture after the configured maximum.
+configured turn fails if its persisted Pi session cannot be copied. Each turn
+is written to a private staging directory and renamed into view only after all
+four files and permissions are complete; a failed publication is not retried
+against the same immutable turn path. Retention deletes the oldest per-turn
+capture after the configured maximum.
 
 Stable run/tick/wake identifiers are recorded only as join metadata.
 Authoritative post-action physics outcomes remain Simfile-owned and are joined
