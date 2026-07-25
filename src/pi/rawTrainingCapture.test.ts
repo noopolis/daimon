@@ -105,6 +105,7 @@ describe("Pi raw training capture", () => {
     const turnsPath = path.join(root, "private-training", "pi", "raw", "turns");
     const [turn] = await readdir(turnsPath);
     assert.match(turn ?? "", /wake-1$/u);
+    assert.equal((await readdir(turnsPath)).some((name) => name.startsWith(".partial-")), false);
     const turnPath = path.join(turnsPath, turn ?? "");
     assert.equal(await readFile(path.join(turnPath, "pi-session.jsonl"), "utf8"), nativeBytes);
     assert.match(
@@ -116,6 +117,14 @@ describe("Pi raw training capture", () => {
       /private reasoning/u
     );
     assert.equal((await stat(turnPath)).mode & 0o777, 0o700);
+    for (const directory of [
+      path.join(root, "private-training"),
+      path.join(root, "private-training", "pi"),
+      path.join(root, "private-training", "pi", "raw"),
+      turnsPath
+    ]) {
+      assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    }
     assert.equal((await stat(path.join(turnPath, "manifest.json"))).mode & 0o777, 0o600);
     const manifest = JSON.parse(
       await readFile(path.join(turnPath, "manifest.json"), "utf8")

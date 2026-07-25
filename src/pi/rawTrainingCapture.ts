@@ -1,4 +1,5 @@
-import { chmod, readFile, readdir, rm, mkdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, readFile, readdir, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { createAgentSession } from "@earendil-works/pi-coding-agent";
@@ -152,15 +153,24 @@ export const persistPiRawTrainingCapture = async (
   }
 
   const nativeSessionBytes = await readFile(input.session.sessionFile);
-  const root = path.join(input.runtimeHomePath, "private-training", "pi", "raw");
+  const privateTrainingPath = path.join(input.runtimeHomePath, "private-training");
+  const piPath = path.join(privateTrainingPath, "pi");
+  const root = path.join(piPath, "raw");
   const turnsPath = path.join(root, "turns");
   const turnPath = path.join(
     turnsPath,
     `${String(input.startedAt.getTime()).padStart(13, "0")}-${sanitizeTraceFileId(input.turnId)}`
   );
+  const partialTurnPath = path.join(
+    turnsPath,
+    `.partial-${path.basename(turnPath)}-${randomUUID()}`
+  );
   await mkdir(turnsPath, { mode: 0o700, recursive: true });
-  await Promise.all([chmod(root, 0o700), chmod(turnsPath, 0o700)]);
-  await mkdir(turnPath, { mode: 0o700 });
+  await Promise.all(
+    [privateTrainingPath, piPath, root, turnsPath]
+      .map((directory) => chmod(directory, 0o700))
+  );
+  await mkdir(partialTurnPath, { mode: 0o700 });
 
   const manifest = {
     access: {
@@ -201,33 +211,44 @@ export const persistPiRawTrainingCapture = async (
     thinking_level: input.session.thinkingLevel
   };
 
-  await Promise.all([
-    writeFile(
-      path.join(turnPath, "manifest.json"),
-      `${JSON.stringify(manifest, null, 2)}\n`,
-      { encoding: "utf8", mode: 0o600 }
-    ),
-    writeFile(
-      path.join(turnPath, "provider-exchange.json"),
-      `${JSON.stringify(providerExchange, null, 2)}\n`,
-      { encoding: "utf8", mode: 0o600 }
-    ),
-    writeFile(
-      path.join(turnPath, "events.ndjson"),
-      input.capture.events.length === 0 ? "" : `${input.capture.events.join("\n")}\n`,
-      { encoding: "utf8", mode: 0o600 }
-    ),
-    writeFile(
-      path.join(turnPath, "pi-session.jsonl"),
-      nativeSessionBytes,
-      { mode: 0o600 }
-    )
-  ]);
-  await Promise.all([
-    chmod(turnPath, 0o700),
-    ...["manifest.json", "provider-exchange.json", "events.ndjson", "pi-session.jsonl"]
-      .map((name) => chmod(path.join(turnPath, name), 0o600))
-  ]);
+  const files = [
+    "manifest.json",
+    "provider-exchange.json",
+    "events.ndjson",
+    "pi-session.jsonl"
+  ] as const;
+  try {
+    await Promise.all([
+      writeFile(
+        path.join(partialTurnPath, "manifest.json"),
+        `${JSON.stringify(manifest, null, 2)}\n`,
+        { encoding: "utf8", mode: 0o600 }
+      ),
+      writeFile(
+        path.join(partialTurnPath, "provider-exchange.json"),
+        `${JSON.stringify(providerExchange, null, 2)}\n`,
+        { encoding: "utf8", mode: 0o600 }
+      ),
+      writeFile(
+        path.join(partialTurnPath, "events.ndjson"),
+        input.capture.events.length === 0 ? "" : `${input.capture.events.join("\n")}\n`,
+        { encoding: "utf8", mode: 0o600 }
+      ),
+      writeFile(
+        path.join(partialTurnPath, "pi-session.jsonl"),
+        nativeSessionBytes,
+        { mode: 0o600 }
+      )
+    ]);
+    await Promise.all([
+      chmod(partialTurnPath, 0o700),
+      ...files.map((name) => chmod(path.join(partialTurnPath, name), 0o600))
+    ]);
+    await rename(partialTurnPath, turnPath);
+  } catch (error) {
+    await rm(partialTurnPath, { force: true, recursive: true });
+    throw error;
+  }
   await pruneTurns(turnsPath, input.options.retention.maxTurns);
   return turnPath;
 };
