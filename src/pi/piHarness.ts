@@ -24,6 +24,10 @@ type HarnessMemoryEmbeddingProvider = {
   embed(text: string): Promise<number[]>;
 };
 
+export type PiThinkingLevel = NonNullable<
+  NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"]
+>;
+
 export interface PiHarnessOptions {
   authPath: string;
   sessionFactory?: PiSessionFactory;
@@ -40,6 +44,7 @@ export interface PiHarnessOptions {
     tokenBudget?: number;
     runtimeHomePath?: string;
   };
+  thinkingLevel?: PiThinkingLevel;
   world?: PiWorldBinding;
 }
 
@@ -106,7 +111,7 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         authStorage: this.authStorage,
         modelRegistry: this.modelRegistry,
         model,
-        thinkingLevel: "off",
+        thinkingLevel: this.options.thinkingLevel ?? "off",
         resourceLoader: createResourceLoader(input, mode),
         tools: [...new Set(toolNames)],
         customTools: worldTools === undefined ? memoryTools : [...memoryTools, ...worldTools],
