@@ -33,7 +33,10 @@ export const createResourceLoader = (
       : []),
     ...(capabilities.memory ? [getMemorySkillTextForMode(mode)] : []),
     ...(capabilities.world
-      ? ["Use only the authenticated world tools and standing instructions to perceive and act; never invent world state or authority fields."]
+      ? [
+        "Use only the authenticated world tools and standing instructions to perceive and act. "
+        + "The harness binds wake authority and request identity; choose only the sense, affordance, target, and typed action input exposed by tool schemas."
+      ]
       : [])
   ].filter((section) => section.length > 0).join("\n\n");
 

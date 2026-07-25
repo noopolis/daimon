@@ -18,6 +18,7 @@ import { createPiMemoryTools, piMemoryToolNames, type PiMemoryToolContextRef } f
 import { createResourceLoader } from "./prompts.js";
 import { PiAgentHandle, type PiSessionCreator } from "./piAgentHandle.js";
 import { createPiWorldTools, piWorldToolNames, type PiWorldBinding } from "./worldTools.js";
+import type { PiWorldToolContextRef } from "./worldNudge.js";
 
 type HarnessMemoryEmbeddingProvider = {
   dimensions?: number;
@@ -91,6 +92,8 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       });
     const memoryToolContext: PiMemoryToolContextRef | undefined =
       memory === undefined ? undefined : {};
+    const worldToolContext: PiWorldToolContextRef | undefined =
+      this.options.world === undefined ? undefined : {};
     const createSession: PiSessionCreator = async (mode, sessionDirectory) => {
       const memoryTools = memory === undefined || memoryToolContext === undefined
         ? []
@@ -102,7 +105,10 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         });
       const worldTools = this.options.world === undefined
         ? undefined
-        : createPiWorldTools({ world: this.options.world });
+        : createPiWorldTools({
+          world: this.options.world,
+          contextRef: worldToolContext
+        });
       const toolNames = [
         ...(input.tools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"]),
         ...piMemoryToolNames(memoryTools),
@@ -144,7 +150,14 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         provider: resolvedModel.provider
       },
       memory,
-      memoryToolContext
+      memoryToolContext,
+      worldToolContext,
+      worldToolContext === undefined
+        ? undefined
+        : {
+          instructions: input.instructions,
+          thinkingLevel: this.options.thinkingLevel ?? "off"
+        }
     );
   }
 }

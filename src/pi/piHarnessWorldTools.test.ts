@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -37,19 +37,24 @@ test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-const capturingFactory = (): { calls: SessionInput[]; factory: PiSessionFactory } => {
+const capturingFactory = (): {
+  calls: SessionInput[];
+  factory: PiSessionFactory;
+  prompts: string[];
+} => {
   const calls: SessionInput[] = [];
+  const prompts: string[] = [];
   const factory: PiSessionFactory = async (input) => {
     calls.push(input);
     return {
       session: {
-        async prompt() {},
+        async prompt(prompt: string) { prompts.push(prompt); },
         subscribe() { return () => {}; },
         dispose() {}
       }
     } as unknown as SessionResult;
   };
-  return { calls, factory };
+  return { calls, factory, prompts };
 };
 
 const localModel = Object.freeze({
@@ -115,6 +120,38 @@ test("a world-only agent omits unrelated memory and coding tools", async () => {
   const systemPrompt = input.resourceLoader?.getSystemPrompt?.() ?? "";
   assert.match(systemPrompt, /authenticated world tools/u);
   assert.doesNotMatch(systemPrompt, /Mneme Memory|coding tools|files you created/u);
+  await handle.wake({
+    id: "moltnet:world-nudge-1",
+    kind: "message",
+    from: "world",
+    text: JSON.stringify({
+      version: "simfile.world-nudge.v1",
+      run_id: "run-world",
+      tick: 4,
+      decision_token: "secret-world-decision"
+    }),
+    delivery: {
+      eventId: "moltnet:world-nudge-1",
+      sender: "world",
+      target: "player",
+      contextId: "dm:player:world"
+    }
+  });
+  assert.equal(captured.prompts.length, 1);
+  assert.match(captured.prompts[0]!, /run-world[\s\S]*already bound/u);
+  assert.equal(captured.prompts[0]!.includes("secret-world-decision"), false);
+  const trajectory = await readFile(
+    path.join(
+      root,
+      "runtime",
+      "telemetry",
+      "world-trajectories",
+      "moltnet_world-nudge-1.json"
+    ),
+    "utf8"
+  );
+  assert.equal(JSON.parse(trajectory).schema, "daimon.world_trajectory.v1");
+  assert.equal(trajectory.includes("secret-world-decision"), false);
   await handle.stop();
 });
 

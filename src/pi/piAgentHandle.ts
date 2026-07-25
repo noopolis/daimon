@@ -20,6 +20,17 @@ import {
   formatDreamPrompt
 } from "./wakeModes.js";
 import {
+  formatWorldWakePrompt,
+  worldTurnContext,
+  type PiWorldToolContextRef
+} from "./worldNudge.js";
+import {
+  capturePiWorldTrajectoryEvent,
+  createPiWorldTrajectoryCapture,
+  persistPiWorldTrajectory,
+  type PiWorldTrajectoryIdentity
+} from "./worldTrajectory.js";
+import {
   memoryScopeId,
   readMemoryContext,
   type MemoryPrepareTurnResult,
@@ -48,7 +59,9 @@ export class PiAgentHandle implements AgentHandle {
     private readonly runtimeHomePath: string,
     private readonly traceModel: PiTurnTraceModel,
     private readonly memory?: MemoryRuntime,
-    private readonly memoryToolContext?: PiMemoryToolContextRef
+    private readonly memoryToolContext?: PiMemoryToolContextRef,
+    private readonly worldToolContext?: PiWorldToolContextRef,
+    private readonly worldTrajectoryIdentity?: PiWorldTrajectoryIdentity
   ) {}
 
   async wake(event: WakeEvent): Promise<WakeResult> {
@@ -84,20 +97,37 @@ export class PiAgentHandle implements AgentHandle {
       text: event.text,
       context: event.context
     });
+    const worldContext = this.worldToolContext === undefined
+      ? undefined
+      : worldTurnContext(event);
+    const safeWakeText = worldContext === undefined
+      ? event.text
+      : formatWorldWakePrompt(worldContext);
+    const worldTrajectory = worldContext === undefined
+      ? undefined
+      : createPiWorldTrajectoryCapture();
     const request = {
       eventId: event.id,
       kind: event.kind,
-      text: event.text,
+      text: safeWakeText,
       from: event.from,
       context: memoryContext
     };
 
     let prepared: MemoryPrepareTurnResult | undefined;
-    let promptText = formatWakePrompt(event);
+    let promptText = worldContext === undefined
+      ? formatWakePrompt(event)
+      : safeWakeText;
 
     try {
+      if (this.worldToolContext !== undefined) {
+        this.worldToolContext.current = worldContext;
+      }
       selectedSession = await this.selectSessionForWake(event, memoryContext);
       unsubscribe = selectedSession.session.subscribe((piEvent) => {
+        if (worldTrajectory !== undefined) {
+          capturePiWorldTrajectoryEvent(worldTrajectory, piEvent);
+        }
         const toolEvent = summarizeSessionEvent(piEvent);
         if (toolEvent) {
           tools.push(toolEvent);
@@ -202,6 +232,25 @@ export class PiAgentHandle implements AgentHandle {
         tools,
         totalMs: Date.now() - startedAtMs
       });
+      if (worldContext !== undefined
+        && worldTrajectory !== undefined
+        && this.worldTrajectoryIdentity !== undefined) {
+        await persistPiWorldTrajectory({
+          agentId: this.id,
+          capture: worldTrajectory,
+          completedAt: new Date(),
+          context: worldContext,
+          instructions: this.worldTrajectoryIdentity.instructions,
+          model: this.traceModel,
+          promptText,
+          runtimeHomePath: this.runtimeHomePath,
+          startedAt,
+          status: "completed",
+          thinkingLevel: this.worldTrajectoryIdentity.thinkingLevel,
+          totalMs: Date.now() - startedAtMs,
+          turnId: event.id
+        });
+      }
 
       return {
         agentId: this.id,
@@ -237,12 +286,34 @@ export class PiAgentHandle implements AgentHandle {
         tools,
         totalMs: Date.now() - startedAtMs
       });
+      if (worldContext !== undefined
+        && worldTrajectory !== undefined
+        && this.worldTrajectoryIdentity !== undefined) {
+        await persistPiWorldTrajectory({
+          agentId: this.id,
+          capture: worldTrajectory,
+          completedAt: new Date(),
+          context: worldContext,
+          instructions: this.worldTrajectoryIdentity.instructions,
+          model: this.traceModel,
+          promptText,
+          runtimeHomePath: this.runtimeHomePath,
+          startedAt,
+          status: "failed",
+          thinkingLevel: this.worldTrajectoryIdentity.thinkingLevel,
+          totalMs: Date.now() - startedAtMs,
+          turnId: event.id
+        });
+      }
 
       throw error;
     } finally {
       if (this.memoryToolContext) {
         this.memoryToolContext.current = undefined;
         this.memoryToolContext.observeTool = undefined;
+      }
+      if (this.worldToolContext) {
+        this.worldToolContext.current = undefined;
       }
       unsubscribe?.();
       if (selectedSession?.disposeAfterWake) {
