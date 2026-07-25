@@ -250,7 +250,10 @@ export class PiAgentHandle implements AgentHandle {
         startedAt,
         status: "completed",
         tools,
-        totalMs: Date.now() - startedAtMs
+        totalMs: Date.now() - startedAtMs,
+        ...(this.worldToolContext === undefined
+          ? {}
+          : { worldContextBound: worldContext !== undefined })
       });
       if (rawTrainingCapture !== undefined
         && this.rawTrainingCaptureOptions !== undefined) {
@@ -324,7 +327,10 @@ export class PiAgentHandle implements AgentHandle {
         startedAt,
         status: "failed",
         tools,
-        totalMs: Date.now() - startedAtMs
+        totalMs: Date.now() - startedAtMs,
+        ...(this.worldToolContext === undefined
+          ? {}
+          : { worldContextBound: worldContext !== undefined })
       });
       if (!rawTrainingCapturePersistAttempted
         && rawTrainingCapture !== undefined

@@ -84,9 +84,12 @@ export interface PiTurnTraceRecord {
   turn_id: string;
   wake: {
     context?: WakeEvent["context"];
+    delivery_authenticated?: boolean;
     event_id: string;
     from?: string;
     kind: WakeEvent["kind"];
+    transport_text_present?: boolean;
+    world_context_bound?: boolean;
   };
 }
 
@@ -119,6 +122,7 @@ export interface BuildPiTurnTraceRecordInput {
   status: "completed" | "failed";
   tools: PiTurnTraceToolEvent[];
   totalMs: number;
+  worldContextBound?: boolean;
 }
 
 export interface PersistPiTurnTraceInput extends Omit<BuildPiTurnTraceRecordInput, "completedAt" | "session"> {
@@ -252,6 +256,13 @@ export const buildPiTurnTraceRecord = (input: BuildPiTurnTraceRecordInput): PiTu
   turn_id: input.event.id,
   wake: {
     ...(input.event.context ? { context: input.event.context } : {}),
+    ...(input.worldContextBound === undefined
+      ? {}
+      : {
+        delivery_authenticated: input.event.delivery !== undefined,
+        transport_text_present: typeof input.event.transportText === "string",
+        world_context_bound: input.worldContextBound
+      }),
     event_id: input.event.id,
     ...(input.event.from ? { from: input.event.from } : {}),
     kind: input.event.kind

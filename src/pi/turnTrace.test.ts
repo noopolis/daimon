@@ -5,12 +5,60 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  buildPiTurnTraceRecord,
   redactTraceText,
   sanitizeTraceFileId,
   summarizePrompt,
   summarizeSessionEvent,
   writeTurnTraceRecord
 } from "./turnTrace.js";
+
+test("turn traces disclose world binding state without retaining authority", () => {
+  const record = buildPiTurnTraceRecord({
+    agentId: "red",
+    completedAt: new Date("2026-01-01T00:00:01.000Z"),
+    event: {
+      id: "moltnet:wake-red",
+      kind: "message",
+      text: "enriched public prompt",
+      transportText: "{\"decision_token\":\"private\"}",
+      delivery: {
+        contextId: "moltnet:pitch:dm:1",
+        eventId: "moltnet:wake-red",
+        sender: "world",
+        target: "red"
+      }
+    },
+    memoryEnabled: false,
+    model: {
+      authMethod: "none",
+      model: "qwen3:4b",
+      provider: "local"
+    },
+    outputText: "",
+    promptText: "World decision wake",
+    session: {
+      disposeAfterWake: false,
+      mode: "awake",
+      threadId: "moltnet:pitch:dm:1"
+    },
+    startedAt: new Date("2026-01-01T00:00:00.000Z"),
+    status: "completed",
+    tools: [],
+    totalMs: 1_000,
+    worldContextBound: true
+  });
+
+  assert.deepEqual(record.wake, {
+    delivery_authenticated: true,
+    event_id: "moltnet:wake-red",
+    kind: "message",
+    transport_text_present: true,
+    world_context_bound: true
+  });
+  assert.equal(JSON.stringify(record).includes("decision_token"), false);
+  assert.equal(JSON.stringify(record).includes("private"), false);
+});
 
 test("turn trace helpers summarize prompts without raw prompt text", () => {
   const summary = summarizePrompt("## Dream Mode\nMemory context\nActive environment context:\nsecret");
