@@ -95,7 +95,7 @@ export class PiAgentHandle implements AgentHandle {
     let memoryPrepare: PiMemoryPrepareTraceInput | undefined;
     let selectedSession: WakeSessionSelection | undefined;
     let rawTrainingCapture: PiRawTrainingCapture | undefined;
-    let rawTrainingCapturePersisted = false;
+    let rawTrainingCapturePersistAttempted = false;
     let unsubscribe: (() => void) | undefined;
     let stage = "select_session";
     this.state = "running";
@@ -254,6 +254,10 @@ export class PiAgentHandle implements AgentHandle {
       });
       if (rawTrainingCapture !== undefined
         && this.rawTrainingCaptureOptions !== undefined) {
+        // Do not retry a partially failed private capture in the catch path.
+        // The first failure is authoritative and retrying the same immutable
+        // turn path would only mask it with an EEXIST/partial-write error.
+        rawTrainingCapturePersistAttempted = true;
         await persistPiRawTrainingCapture({
           agentId: this.id,
           capture: rawTrainingCapture,
@@ -267,7 +271,6 @@ export class PiAgentHandle implements AgentHandle {
           turnId: event.id,
           world: worldContext
         });
-        rawTrainingCapturePersisted = true;
       }
       if (worldContext !== undefined
         && worldTrajectory !== undefined
@@ -323,10 +326,11 @@ export class PiAgentHandle implements AgentHandle {
         tools,
         totalMs: Date.now() - startedAtMs
       });
-      if (!rawTrainingCapturePersisted
+      if (!rawTrainingCapturePersistAttempted
         && rawTrainingCapture !== undefined
         && this.rawTrainingCaptureOptions !== undefined
         && selectedSession !== undefined) {
+        rawTrainingCapturePersistAttempted = true;
         await persistPiRawTrainingCapture({
           agentId: this.id,
           capture: rawTrainingCapture,
