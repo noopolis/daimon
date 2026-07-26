@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -131,6 +132,23 @@ describe("Pi raw training capture", () => {
     ) as Record<string, any>;
     assert.equal(manifest.access.export_by_default, false);
     assert.equal(manifest.join.run_id, "run");
+    assert.equal(manifest.schema, "daimon.pi.raw_training_capture.v2");
+    assert.equal(manifest.integrity.capture_boundary, "post_turn");
+    assert.equal(
+      manifest.integrity.files.native_pi_session.sha256,
+      createHash("sha256").update(Buffer.from(nativeBytes, "utf8")).digest("hex")
+    );
+    for (const [key, filename] of [
+      ["events", "events.ndjson"],
+      ["provider_exchange", "provider-exchange.json"]
+    ] as const) {
+      const bytes = await readFile(path.join(turnPath, filename));
+      assert.equal(manifest.integrity.files[key].bytes, bytes.byteLength);
+      assert.equal(
+        manifest.integrity.files[key].sha256,
+        createHash("sha256").update(bytes).digest("hex")
+      );
+    }
     assert.equal(JSON.stringify(manifest).includes("not-a-join-key"), false);
   });
 });

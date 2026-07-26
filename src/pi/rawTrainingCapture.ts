@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, readFile, readdir, rename, rm, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -8,7 +8,7 @@ import type { PiWorldTurnContext } from "./worldNudge.js";
 import { sanitizeTraceFileId } from "./turnTrace.js";
 
 export const PI_RAW_TRAINING_CAPTURE_SCHEMA =
-  "daimon.pi.raw_training_capture.v1" as const;
+  "daimon.pi.raw_training_capture.v2" as const;
 
 export interface PiRawTrainingCaptureOptions {
   enabled: true;
@@ -55,6 +55,8 @@ export interface PersistPiRawTrainingCaptureInput {
 }
 
 const json = (value: unknown): string => JSON.stringify(value);
+const sha256 = (value: Uint8Array): string =>
+  createHash("sha256").update(value).digest("hex");
 
 /**
  * Installs a transparent recorder at Pi's native provider-payload seam.
@@ -172,6 +174,20 @@ export const persistPiRawTrainingCapture = async (
   );
   await mkdir(partialTurnPath, { mode: 0o700 });
 
+  const providerExchange = {
+    model: structuredClone(input.session.model),
+    requests: input.capture.requests,
+    session_id: input.session.sessionId,
+    thinking_level: input.session.thinkingLevel
+  };
+  const eventsBytes = Buffer.from(
+    input.capture.events.length === 0 ? "" : `${input.capture.events.join("\n")}\n`,
+    "utf8"
+  );
+  const providerExchangeBytes = Buffer.from(
+    `${JSON.stringify(providerExchange, null, 2)}\n`,
+    "utf8"
+  );
   const manifest = {
     access: {
       classification: "private_raw_training",
@@ -184,6 +200,25 @@ export const persistPiRawTrainingCapture = async (
       events: "events.ndjson",
       native_pi_session: "pi-session.jsonl",
       provider_exchange: "provider-exchange.json"
+    },
+    integrity: {
+      capture_boundary: "post_turn",
+      files: {
+        events: {
+          bytes: eventsBytes.byteLength,
+          records: input.capture.events.length,
+          sha256: sha256(eventsBytes)
+        },
+        native_pi_session: {
+          bytes: nativeSessionBytes.byteLength,
+          sha256: sha256(nativeSessionBytes)
+        },
+        provider_exchange: {
+          bytes: providerExchangeBytes.byteLength,
+          requests: input.capture.requests.length,
+          sha256: sha256(providerExchangeBytes)
+        }
+      }
     },
     join: input.world === undefined ? undefined : {
       run_id: input.world.runId,
@@ -204,12 +239,6 @@ export const persistPiRawTrainingCapture = async (
     },
     turn_id: input.turnId
   };
-  const providerExchange = {
-    model: structuredClone(input.session.model),
-    requests: input.capture.requests,
-    session_id: input.session.sessionId,
-    thinking_level: input.session.thinkingLevel
-  };
 
   const files = [
     "manifest.json",
@@ -226,13 +255,13 @@ export const persistPiRawTrainingCapture = async (
       ),
       writeFile(
         path.join(partialTurnPath, "provider-exchange.json"),
-        `${JSON.stringify(providerExchange, null, 2)}\n`,
-        { encoding: "utf8", mode: 0o600 }
+        providerExchangeBytes,
+        { mode: 0o600 }
       ),
       writeFile(
         path.join(partialTurnPath, "events.ndjson"),
-        input.capture.events.length === 0 ? "" : `${input.capture.events.join("\n")}\n`,
-        { encoding: "utf8", mode: 0o600 }
+        eventsBytes,
+        { mode: 0o600 }
       ),
       writeFile(
         path.join(partialTurnPath, "pi-session.jsonl"),
