@@ -18,16 +18,27 @@ ${event.text}`;
 
 export const createResourceLoader = (
   input: AgentStartInput,
-  mode: MemoryWakeMode
+  mode: MemoryWakeMode,
+  capabilities: Readonly<{ memory: boolean; world: boolean }>
 ): ResourceLoader => {
   const systemPrompt = [
     `You are ${input.name} (${input.id}).`,
     input.instructions,
     "You are running inside a harnessed workspace prepared by the caller.",
-    "Use the available coding tools when asked to read, write, edit, or inspect files.",
-    getMemorySkillTextForMode(mode),
-    "Keep responses brief and report the exact files you created or modified."
-  ].join("\n\n");
+    ...(input.tools === undefined || input.tools.length > 0
+      ? [
+        "Use the available coding tools when asked to read, write, edit, or inspect files.",
+        "Keep responses brief and report the exact files you created or modified."
+      ]
+      : []),
+    ...(capabilities.memory ? [getMemorySkillTextForMode(mode)] : []),
+    ...(capabilities.world
+      ? [
+        "Use only the authenticated world tools and standing instructions to perceive and act. "
+        + "The harness binds wake authority and request identity; choose only the sense, affordance, target, and typed action input exposed by tool schemas."
+      ]
+      : [])
+  ].filter((section) => section.length > 0).join("\n\n");
 
   return {
     getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),

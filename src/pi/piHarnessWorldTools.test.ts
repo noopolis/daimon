@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -37,19 +37,24 @@ test.afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-const capturingFactory = (): { calls: SessionInput[]; factory: PiSessionFactory } => {
+const capturingFactory = (): {
+  calls: SessionInput[];
+  factory: PiSessionFactory;
+  prompts: string[];
+} => {
   const calls: SessionInput[] = [];
+  const prompts: string[] = [];
   const factory: PiSessionFactory = async (input) => {
     calls.push(input);
     return {
       session: {
-        async prompt() {},
+        async prompt(prompt: string) { prompts.push(prompt); },
         subscribe() { return () => {}; },
         dispose() {}
       }
     } as unknown as SessionResult;
   };
-  return { calls, factory };
+  return { calls, factory, prompts };
 };
 
 const localModel = Object.freeze({
@@ -81,6 +86,72 @@ test("an absent world binding preserves the prior Pi tool set and custom-tool or
   assert.deepEqual(input.tools, [...BASE_TOOLS, ...MEMORY_TOOLS]);
   assert.deepEqual((input.customTools as CapturedTool[]).map((tool) => tool.name), MEMORY_TOOLS);
   assert.equal(input.tools.some((name) => name.startsWith("world_")), false);
+  await handle.stop();
+});
+
+test("a world-only agent omits unrelated memory and coding tools", async () => {
+  const root = await tempDir();
+  const captured = capturingFactory();
+  const adapter = new PiHarnessAdapter({
+    authPath: path.join(root, "auth.json"),
+    model: localModel,
+    sessionFactory: captured.factory,
+    world: {
+      url: "http://simfile-world:19972/v1/world",
+      tokenEnv: "WORLD_ONLY_TOKEN"
+    }
+  });
+  const handle = await adapter.startAgent({
+    id: "player",
+    name: "Player",
+    instructions: "Observe and act once.",
+    runtimeHomePath: path.join(root, "runtime"),
+    tools: [],
+    workspacePath: path.join(root, "workspace")
+  });
+
+  const input = captured.calls[0];
+  assert.ok(input);
+  assert.deepEqual(input.tools, PI_WORLD_TOOL_NAMES);
+  assert.deepEqual(
+    (input.customTools as CapturedTool[]).map((tool) => tool.name),
+    PI_WORLD_TOOL_NAMES
+  );
+  const systemPrompt = input.resourceLoader?.getSystemPrompt?.() ?? "";
+  assert.match(systemPrompt, /authenticated world tools/u);
+  assert.doesNotMatch(systemPrompt, /Mneme Memory|coding tools|files you created/u);
+  await handle.wake({
+    id: "moltnet:world-nudge-1",
+    kind: "message",
+    from: "world",
+    text: JSON.stringify({
+      version: "simfile.world-nudge.v1",
+      run_id: "run-world",
+      tick: 4,
+      decision_token: "secret-world-decision"
+    }),
+    delivery: {
+      eventId: "moltnet:world-nudge-1",
+      sender: "world",
+      target: "player",
+      contextId: "dm:player:world"
+    }
+  });
+  assert.equal(captured.prompts.length, 1);
+  assert.match(captured.prompts[0]!, /run-world[\s\S]*already bound/u);
+  assert.equal(captured.prompts[0]!.includes("secret-world-decision"), false);
+  const trajectory = await readFile(
+    path.join(
+      root,
+      "runtime",
+      "telemetry",
+      "world-trajectories",
+      "moltnet_world-nudge-1.json"
+    ),
+    "utf8"
+  );
+  assert.equal(JSON.parse(trajectory).schema, "daimon.world_trajectory.v1");
+  assert.equal(trajectory.includes("secret-world-decision"), false);
   await handle.stop();
 });
 

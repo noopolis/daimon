@@ -8,6 +8,7 @@ import {
   type PiWorldFetch,
   WORLD_ACTION_RESULT_PAGE_REQUEST_VERSION
 } from "./worldTools.js";
+import type { PiWorldToolContextRef } from "./worldNudge.js";
 
 type WorldTool = ReturnType<typeof createPiWorldTools>[number];
 type ToolResult = { content: Array<{ text: string; type: string }>; details: unknown };
@@ -73,6 +74,56 @@ test("exposes the exact six tools and projects each call onto the B25 JSON contr
       assert.equal(Object.hasOwn(properties, forbidden), false);
     }
   }
+});
+
+test("binds wake authority outside the model-visible schemas", async () => {
+  const bodies: unknown[] = [];
+  const contextRef: PiWorldToolContextRef = {
+    current: {
+      decisionToken: "decision-bound",
+      requestId: "request-bound",
+      runId: "run-bound",
+      tick: 7,
+      wakeId: "wake-bound"
+    }
+  };
+  const tools = createPiWorldTools({
+    world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
+    contextRef,
+    readEnvironment: () => "bound-bearer",
+    fetch: async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as unknown);
+      return response({ ok: true });
+    }
+  });
+  const observe = tool(tools, "world_observe");
+  const act = tool(tools, "world_act");
+  assert.deepEqual(Object.keys((observe.parameters as { properties: object }).properties), ["sense"]);
+  assert.deepEqual(
+    Object.keys((act.parameters as { properties: object }).properties),
+    ["affordance", "target", "input"]
+  );
+  await execute(observe, { sense: "world://pitch/sense/vision" });
+  await execute(act, {
+    affordance: "world://pitch/affordance/kick",
+    target: "world://pitch/entity/ball",
+    input: { force: 1 }
+  });
+  assert.deepEqual(bodies, [
+    { decision_token: "decision-bound", sense: "world://pitch/sense/vision" },
+    {
+      decision_token: "decision-bound",
+      request_id: "request-bound",
+      affordance: "world://pitch/affordance/kick",
+      target: "world://pitch/entity/ball",
+      input: { force: 1 }
+    }
+  ]);
+  contextRef.current = undefined;
+  await assert.rejects(
+    execute(observe, { sense: "world://pitch/sense/vision" }),
+    rejectedCode("world_request_invalid")
+  );
 });
 
 test("accepts only an exact canonical world base and named environment binding", () => {

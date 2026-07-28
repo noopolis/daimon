@@ -21,10 +21,12 @@ interface FakePiSessionConfig {
 
 const makeFakePiSessionFactory = (scripts: string[][]) => {
   const sessions: FakePiSessionConfig[] = [];
+  const inputs: Array<Parameters<typeof createAgentSession>[0]> = [];
   type SessionResult = Awaited<ReturnType<typeof createAgentSession>>;
   let sessionIndex = 0;
 
   const factory = (input?: Parameters<typeof createAgentSession>[0]) => {
+    inputs.push(input ?? {});
     const responses = scripts[sessionIndex] ?? ["ack"];
     sessionIndex += 1;
 
@@ -73,12 +75,13 @@ const makeFakePiSessionFactory = (scripts: string[][]) => {
     return Promise.resolve({ session } as SessionResult);
   };
 
-  return { sessions, factory };
+  return { sessions, inputs, factory };
 };
 
 const makeHarness = async (input: {
   root: string;
   sessionScripts: string[][];
+  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 }) => {
   const sessionFactory = makeFakePiSessionFactory(input.sessionScripts);
   const authPath = path.join(input.root, "auth.json");
@@ -97,7 +100,8 @@ const makeHarness = async (input: {
       provider: "local"
     },
     sessionFactory: sessionFactory.factory,
-    memory: { tokenBudget: 1200 }
+    memory: { tokenBudget: 1200 },
+    thinkingLevel: input.thinkingLevel
   });
 
   return { adapter, runtimeHomePath, workspacePath, sessionFactory };
@@ -144,6 +148,26 @@ test("starts a local endpoint model without an explicit modelsPath", async () =>
 
   assert.equal(handle.status().state, "idle");
   assert.ok((await stat(workspacePath)).isDirectory());
+  await handle.stop();
+});
+
+test("passes the configured thinking level to Pi sessions", async () => {
+  const root = await tempDir();
+  const harness = await makeHarness({
+    root,
+    sessionScripts: [["done"]],
+    thinkingLevel: "minimal"
+  });
+
+  const handle = await harness.adapter.startAgent({
+    id: "fast-thinker",
+    instructions: "Use the supplied world tools.",
+    name: "Fast thinker",
+    runtimeHomePath: harness.runtimeHomePath,
+    workspacePath: harness.workspacePath
+  });
+
+  assert.equal(harness.sessionFactory.inputs[0]?.thinkingLevel, "minimal");
   await handle.stop();
 });
 
