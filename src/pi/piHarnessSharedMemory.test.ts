@@ -51,7 +51,7 @@ const makeFakePiSessionFactory = (scripts: string[][]) => {
             content: { kind: "text", text: "BANK_SHARED_SCOPE_ALPHA" },
             visibility: "global",
             sensitivity: "normal",
-            evidence_event_ids: ["wake-mapper"],
+            evidence_event_ids: ["daimon:wake-mapper"],
             source_type: "test",
             confidence: 1
           });
@@ -136,7 +136,7 @@ test("shares one Mneme bank across agents with separate Pi runtimes", async () =
   });
 
   await mapper.wake({
-    id: "wake-mapper",
+    id: "daimon:wake-mapper",
     kind: "manual",
     text: "Store durable global marker: BANK_SHARED_SCOPE_ALPHA"
   });
@@ -154,7 +154,7 @@ test("shares one Mneme bank across agents with separate Pi runtimes", async () =
   assert.notEqual(mapperWorkspace, listenerWorkspace);
 
   await listener.wake({
-    id: "wake-listener",
+    id: "daimon:wake-listener",
     kind: "manual",
     text: "What did we agree earlier?"
   });

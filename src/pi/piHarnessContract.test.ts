@@ -187,7 +187,7 @@ test("prompt excludes forbidden private pair context for room wakes", async () =
   });
 
   await handle.wake({
-    id: "wake-room",
+    id: "daimon:wake-room",
     kind: "manual",
     text: "How should we handle alignment in public?",
     context: {
@@ -210,7 +210,7 @@ test("fake sessions can recall prior turn memory without live provider calls", a
     root,
     responses: [["first-turn"], ["second-turn"]],
     onPrompt: async ({ customTools, text }) => {
-      if (!text.includes("SESSION_TOOL_MARKER") || !text.includes("id: wake-1")) {
+      if (!text.includes("SESSION_TOOL_MARKER") || !text.includes("id: moltnet:wake-1")) {
         return;
       }
       const register = customTools.find((tool) => tool.name === "memory_register");
@@ -224,7 +224,7 @@ test("fake sessions can recall prior turn memory without live provider calls", a
         },
         visibility: "room",
         sensitivity: "normal",
-        evidence_event_ids: ["wake-1"],
+        evidence_event_ids: ["moltnet:wake-1"],
         source_type: "test",
         confidence: 1
       });
@@ -240,7 +240,7 @@ test("fake sessions can recall prior turn memory without live provider calls", a
   });
 
   await handle.wake({
-    id: "wake-1",
+    id: "moltnet:wake-1",
     kind: "message",
     from: "operator",
     text: "Register this marker: SESSION_TOOL_MARKER relay route set to amber.",
@@ -252,7 +252,7 @@ test("fake sessions can recall prior turn memory without live provider calls", a
   });
 
   await handle.wake({
-    id: "wake-2",
+    id: "moltnet:wake-2",
     kind: "message",
     from: "operator",
     text: "What was the relay marker?",
@@ -285,7 +285,7 @@ test("fake Moltnet-style pair and room wakes show scoped behavior", async () => 
   });
 
   await handle.wake({
-    id: "wake-pair",
+    id: "moltnet:wake-pair",
     kind: "message",
     from: "inner-shadow",
     text: "Who handled shadow memory last?",
@@ -295,7 +295,7 @@ test("fake Moltnet-style pair and room wakes show scoped behavior", async () => 
   });
 
   await handle.wake({
-    id: "wake-room",
+    id: "daimon:wake-room",
     kind: "manual",
     text: "Summarize public room context only.",
     context: {
@@ -330,7 +330,7 @@ test("memory activity can be reloaded through Pi adapter across turns", async ()
       rawHint: "seeded"
     },
     request: {
-      eventId: "seed-legacy",
+      eventId: "daimon:seed-legacy",
       kind: "manual",
       text: "seed legacy event for continuity",
       context: {}
@@ -348,7 +348,7 @@ test("memory activity can be reloaded through Pi adapter across turns", async ()
   });
 
   await handle.wake({
-    id: "wake-continuation",
+    id: "daimon:wake-continuation",
     kind: "manual",
     text: "Continue from seeded activity.",
     context: {
@@ -362,7 +362,7 @@ test("memory activity can be reloaded through Pi adapter across turns", async ()
   assert.ok(secondPrompt.includes("Legacy activity context.") || secondPrompt.includes("seed legacy event for continuity"));
 
   const events = await runtime.prepareTurn({
-    eventId: "noop-wake",
+    eventId: "daimon:noop-wake",
     kind: "manual",
     text: "continuation check",
     context: {

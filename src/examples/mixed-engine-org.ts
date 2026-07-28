@@ -7,6 +7,7 @@ import { createMemoryRuntime } from "@noopolis/mneme";
 import { JsonlMemoryStore } from "@noopolis/mneme";
 import type { MemoryRuntime } from "@noopolis/mneme";
 import { OrgObserver } from "../observability/index.js";
+import { exampleCausalId } from "./exampleCausalId.js";
 import { runEngineDetailed, type EngineKind } from "./mixedEngineCli.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -225,7 +226,7 @@ const seedSignals = async (): Promise<Map<string, string>> => {
   const signals = new Map<string, string>();
   const results = await Promise.all(agents.map(async (agent) => {
     const result = await agent.wake({
-      id: `seed-${agent.config.id}`,
+      id: exampleCausalId(`seed-${agent.config.id}`),
       kind: "manual",
       text: [
         "Invent a private signal token for yourself.",
@@ -258,7 +259,7 @@ const runRoom = async (signals: Map<string, string>): Promise<string[]> => {
   const sentinelSignal = signals.get("sentinel")!;
 
   const navigatorEvent: WakeEvent = {
-    id: "room-navigator-1",
+    id: exampleCausalId("room-navigator-1"),
     kind: "manual",
     context: roomContext,
     text: [
@@ -281,7 +282,7 @@ const runRoom = async (signals: Map<string, string>): Promise<string[]> => {
   console.log(transcript.at(-1));
 
   const cartographerEvent: WakeEvent = {
-    id: "room-cartographer-1",
+    id: exampleCausalId("room-cartographer-1"),
     kind: "manual",
     context: roomContext,
     text: [
@@ -305,7 +306,7 @@ const runRoom = async (signals: Map<string, string>): Promise<string[]> => {
   console.log(transcript.at(-1));
 
   const sentinelEvent: WakeEvent = {
-    id: "room-sentinel-1",
+    id: exampleCausalId("room-sentinel-1"),
     kind: "manual",
     context: roomContext,
     text: [
@@ -329,7 +330,7 @@ const runRoom = async (signals: Map<string, string>): Promise<string[]> => {
 const runFinalRecall = async (signals: Map<string, string>): Promise<void> => {
   console.log("\n== Fresh CLI final recall ==");
   const event: WakeEvent = {
-    id: "room-sentinel-2",
+    id: exampleCausalId("room-sentinel-2"),
     kind: "manual",
     context: roomContext,
     text: [

@@ -6,6 +6,7 @@ import type { WakeEvent } from "../core/types.js";
 import { JsonlMemoryStore } from "@noopolis/mneme";
 import { OrgObserver } from "../observability/index.js";
 import { beatsFor, defaultDialogueTurns, selectVoicesForBeat } from "./jungianConversationPlan.js";
+import { exampleCausalId } from "./exampleCausalId.js";
 import { JungianVoice, type JungianVoiceTurn, runLimited } from "./jungianPlayAgent.js";
 import { jungianSelves, playScenario, type JungianSelfProfile } from "./jungianProfiles.js";
 import { JungianTrace, parseInnerUsed, parseSpeakLine } from "./jungianTrace.js";
@@ -170,7 +171,7 @@ const runCouncil = async (
   console.log(`\n== ${self.profile.name} inner council: ${focus} ==`);
   const turns = await runLimited(voices, councilConcurrency, async (voice) => {
     const event: WakeEvent = {
-      id: `${eventId}-${voice.config.id}`,
+      id: exampleCausalId(`${eventId}-${voice.config.id}`),
       kind: "manual",
       context: roomContext,
       text: councilPrompt(self.profile, focus, transcript)
@@ -200,7 +201,7 @@ const runRepresentative = async (
   counsel: JungianVoiceTurn[]
 ): Promise<string> => {
   const event: WakeEvent = {
-    id: eventId,
+    id: exampleCausalId(eventId),
     kind: "manual",
     context: roomContext,
     text: representativePrompt(self.profile, focus, transcript, counsel)

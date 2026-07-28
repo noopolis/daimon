@@ -6,6 +6,7 @@ import type { WakeEvent } from "../core/types.js";
 import { JsonlMemoryStore } from "@noopolis/mneme";
 import { OrgObserver } from "../observability/index.js";
 import { PiHarnessAdapter } from "../pi/piHarness.js";
+import { exampleCausalId } from "./exampleCausalId.js";
 import { JungianPiRepresentative, seedPiCodexAuth, type PiRepresentativeTurn } from "./jungianPiRepresentative.js";
 import { JungianVoice, type JungianVoiceTurn, runLimited } from "./jungianPlayAgent.js";
 import { JungianTrace, parseInnerUsed, parseSpeakLine } from "./jungianTrace.js";
@@ -181,7 +182,7 @@ const runCouncil = async (
   console.log(`\n== ${self.profile.name} inner counsel ==`);
   return runLimited(voices, 2, async (voice) => {
     const event: WakeEvent = {
-      id: `${eventBase}-council-${voice.config.id}`,
+      id: exampleCausalId(`${eventBase}-council-${voice.config.id}`),
       kind: "manual",
       context: roomContext,
       text: councilPrompt(self.profile, focus, transcript)
@@ -226,7 +227,7 @@ const runRepresentative = async (
   counsel: JungianVoiceTurn[]
 ): Promise<void> => {
   const event: WakeEvent = {
-    id: `${eventBase}-speaks`,
+    id: exampleCausalId(`${eventBase}-speaks`),
     kind: "manual",
     context: roomContext,
     text: representativePrompt(self.profile, focus, transcript, counsel)

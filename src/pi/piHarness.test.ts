@@ -187,7 +187,7 @@ test("persists and recalls memory across adapter restarts", async () => {
   });
 
   await firstHandle.wake({
-    id: "wake-1",
+    id: "moltnet:wake-1",
     kind: "message",
     from: "orchestrator",
     text: "Seed memory: we built the phoenix relay and tagged it in memory.",
@@ -214,7 +214,7 @@ test("persists and recalls memory across adapter restarts", async () => {
   });
 
   await secondHandle.wake({
-    id: "wake-2",
+    id: "moltnet:wake-2",
     kind: "message",
     from: "orchestrator",
     text: "Can you continue the phoenix relay work?",
@@ -247,7 +247,7 @@ test("isolates memory between different agents with shared runtime home", async 
   });
 
   await mapper.wake({
-    id: "wake-a",
+    id: "daimon:wake-a",
     kind: "manual",
     text: "Mapper's private note: the phoenix signal is for internal routing only.",
     context: {
@@ -271,7 +271,7 @@ test("isolates memory between different agents with shared runtime home", async 
   });
 
   await listener.wake({
-    id: "wake-b",
+    id: "daimon:wake-b",
     kind: "manual",
     text: "Can you summarize the current status?",
     context: {
@@ -341,12 +341,12 @@ test("serializes concurrent wakes through one Pi session", async () => {
   });
 
   const first = handle.wake({
-    id: "wake-1",
+    id: "daimon:wake-1",
     kind: "message",
     text: "first message"
   });
   const second = handle.wake({
-    id: "wake-2",
+    id: "daimon:wake-2",
     kind: "message",
     text: "second message"
   });
@@ -418,12 +418,12 @@ test("continues queued wakes after a failed wake", async () => {
   });
 
   const first = handle.wake({
-    id: "wake-fail",
+    id: "daimon:wake-fail",
     kind: "message",
     text: "fail first"
   });
   const second = handle.wake({
-    id: "wake-after",
+    id: "daimon:wake-after",
     kind: "message",
     text: "run after failure"
   });

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentHandle } from "../core/types.js";
 import { seedPiOpenAICodexAuthFromCodex } from "../pi/auth.js";
 import { PiHarnessAdapter } from "../pi/piHarness.js";
+import { exampleCausalId } from "./exampleCausalId.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const daimonRoot = path.resolve(__dirname, "../..");
@@ -93,7 +94,7 @@ const run = async (): Promise<void> => {
     console.log("started", JSON.stringify([mapper.status(), reviewer.status()], null, 2));
 
     const mapped = await mapper.wake({
-      id: "wake-mapper-1",
+      id: exampleCausalId("wake-mapper-1"),
       kind: "manual",
       from: "caller",
       text: [
@@ -106,7 +107,7 @@ const run = async (): Promise<void> => {
     console.log("mapper", JSON.stringify(mapped, null, 2));
 
     const reviewed = await reviewer.wake({
-      id: "wake-reviewer-1",
+      id: exampleCausalId("wake-reviewer-1"),
       kind: "message",
       from: "mapper",
       text: [
