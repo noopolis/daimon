@@ -40,6 +40,7 @@ test("non-memory Pi tool events are not implicitly written to memory", async () 
       name: "llama3.2",
       provider: "local"
     },
+    memory: { tokenBudget: 1200 },
     sessionFactory: () => Promise.resolve(({
       session: {
         async prompt() {
@@ -125,6 +126,7 @@ test("failed wakes do not implicitly record recalled memory provenance", async (
       name: "llama3.2",
       provider: "local"
     },
+    memory: { tokenBudget: 1200 },
     sessionFactory: (input) => {
       assert.ok(input);
       searchAfterFailure = (input.customTools as Array<{
