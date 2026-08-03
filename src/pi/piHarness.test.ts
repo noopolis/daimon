@@ -51,7 +51,6 @@ const makeFakePiSessionFactory = (scripts: string[][]) => {
             content: { kind: "text", text: seedMatch[1].trim() },
             visibility: "global",
             sensitivity: "normal",
-            evidence_event_ids: [wakeId],
             source_type: "test",
             confidence: 1
           });

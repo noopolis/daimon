@@ -224,7 +224,6 @@ test("fake sessions can recall prior turn memory without live provider calls", a
         },
         visibility: "room",
         sensitivity: "normal",
-        evidence_event_ids: ["moltnet:wake-1"],
         source_type: "test",
         confidence: 1
       });

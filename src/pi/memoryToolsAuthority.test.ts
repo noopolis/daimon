@@ -199,7 +199,15 @@ test("each callable memory tool enforces its own exact top-level allowlist while
   const probes: ReadonlyArray<[string, Record<string, unknown>]> = [
     ["memory_search", { limit: 1, memory_id: "foreign", query: "status", scope: "current" }],
     ["memory_locate", { query: "status", scope: "current" }],
-    ["memory_register", { limit: 1 }],
+    ["memory_register", {
+      content: { kind: "artifact" },
+      evidence_event_ids: ["forbidden"],
+      kind: "artifact",
+      scope: "current",
+      sensitivity: "normal",
+      source_type: "pi-test",
+      visibility: "room"
+    }],
     ["memory_summarize", { query: "status", scope: "current" }],
     ["memory_forget", { event_ids: ["memory-event"], horizon: 1, scope: "current" }],
     ["memory_promote", { memory_id: "memory-event", query: "status", scope: "current" }]
@@ -219,7 +227,6 @@ test("each callable memory tool enforces its own exact top-level allowlist while
       kind: "artifact",
       metadata: { mode: "descriptive", runtimeId: "quoted-runtime" }
     },
-    evidence_event_ids: ["daimon:wake-room"],
     kind: "artifact",
     scope: "current",
     sensitivity: "normal",
