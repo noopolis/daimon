@@ -51,7 +51,6 @@ const makeFakePiSessionFactory = (scripts: string[][]) => {
             content: { kind: "text", text: "BANK_SHARED_SCOPE_ALPHA" },
             visibility: "global",
             sensitivity: "normal",
-            evidence_event_ids: ["daimon:wake-mapper"],
             source_type: "test",
             confidence: 1
           });

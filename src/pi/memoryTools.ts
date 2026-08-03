@@ -1,8 +1,14 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import { canonicalScopeKey, createMemoryToolDescriptors, memoryScopeId } from "@noopolis/mneme";
+import {
+  canonicalScopeKey,
+  createMemoryToolDescriptors,
+  memoryScopeId,
+  schemaForModelToolName
+} from "@noopolis/mneme";
 import type {
+  MemoryKernel,
   MemoryPrepareTurnResult,
   MemoryRuntime,
   MemoryToolExecutionContext,
@@ -123,24 +129,26 @@ const textContent = (result: MemoryToolResult) => ({
   details: result
 });
 
-const MEMORY_TOOL_ARGUMENT_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = {
-  memory_forget: new Set(["event_ids", "reason", "scope"]),
-  memory_locate: new Set(["active_scope", "limit", "query"]),
-  memory_promote: new Set(["memory_id", "reason", "scope"]),
-  memory_register: new Set([
-    "confidence",
-    "content",
-    "evidence_event_ids",
-    "kind",
-    "memory_id",
-    "scope",
-    "sensitivity",
-    "source_type",
-    "visibility"
-  ]),
-  memory_search: new Set(["limit", "query", "scope"]),
-  memory_summarize: new Set(["horizon", "scope"])
-};
+export function canonicalToolFieldNames(name: string, representation?: unknown): string[] {
+  const source = arguments.length >= 2 ? representation : schemaForModelToolName(name);
+  if (source !== null && typeof source === "object") {
+    const candidate = source as { shape?: unknown };
+    const fields = candidate.shape !== undefined ? candidate.shape : source;
+    if (fields !== null && typeof fields === "object" && !Array.isArray(fields)) {
+      const names = Object.keys(fields);
+      if (names.length > 0) {
+        return names;
+      }
+    }
+  }
+  throw new Error(`@noopolis/mneme returned no usable field contract for memory tool ${name}`);
+}
+
+export const MEMORY_TOOL_ARGUMENT_FIELDS: Readonly<Record<string, ReadonlySet<string>>> =
+  Object.fromEntries(
+    createMemoryToolDescriptors({} as MemoryKernel, { mode: "dream" })
+      .map(({ modelName }) => [modelName, new Set(canonicalToolFieldNames(modelName))])
+  );
 
 const requireExactModelArguments = (toolName: string, params: unknown): void => {
   if (typeof params !== "object" || params === null || Array.isArray(params)) {
@@ -161,7 +169,7 @@ const contentSchema = Type.Object({
   kind: Type.String({ description: "Memory content kind: text, claim, decision, artifact, or relationship." })
 }, { additionalProperties: true });
 
-const schemaFor = (name: string) => {
+export const schemaFor = (name: string) => {
   if (name === "memory_search") {
     return Type.Object({
       scope: Type.String({ description: "Scope alias or canonical scope id. Use current, global, or all when appropriate." }),
@@ -183,7 +191,6 @@ const schemaFor = (name: string) => {
       content: contentSchema,
       visibility: Type.String({ description: "private, pair, team, room, global, public, or sealed." }),
       sensitivity: Type.String({ description: "normal, sensitive, or secret." }),
-      evidence_event_ids: Type.Array(Type.String(), { description: "Event ids that justify the memory." }),
       source_type: Type.String({ description: "Source label for the registered memory." }),
       confidence: Type.Optional(Type.Number({ description: "Confidence from 0 to 1." })),
       memory_id: Type.Optional(Type.String({ description: "Existing memory chain id for a new revision." }))
@@ -202,11 +209,14 @@ const schemaFor = (name: string) => {
       reason: Type.Optional(Type.String({ description: "Why this memory is being promoted." }))
     }, { additionalProperties: false });
   }
-  return Type.Object({
-    scope: Type.String({ description: "Scope alias or canonical scope id for the tombstone." }),
-    event_ids: Type.Array(Type.String(), { description: "Memory event ids to tombstone." }),
-    reason: Type.Optional(Type.String({ description: "Why these memories should be forgotten." }))
-  }, { additionalProperties: false });
+  if (name === "memory_forget") {
+    return Type.Object({
+      scope: Type.String({ description: "Scope alias or canonical scope id for the tombstone." }),
+      event_ids: Type.Array(Type.String(), { description: "Memory event ids to tombstone." }),
+      reason: Type.Optional(Type.String({ description: "Why these memories should be forgotten." }))
+    }, { additionalProperties: false });
+  }
+  throw new Error(`Unknown Pi memory tool: ${name}`);
 };
 
 export const createPiMemoryTools = (input: PiMemoryToolInput): PiMemoryTool[] =>
