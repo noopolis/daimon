@@ -42,7 +42,6 @@
     "emit-causal-fixture:spoof": "tsx src/observability/emitCausalFixture.ts --spoof",
     "e2e:pi-agent": "tsx src/examples/pi-agent.ts",
     "e2e:pi-memory-org": "tsx src/examples/pi-memory-org.ts",
-    "e2e:mixed-engine-org": "tsx src/examples/mixed-engine-org.ts",
     "e2e:jungian-play-org": "tsx src/examples/jungian-play-org.ts",
     "e2e:jungian-triad-org": "tsx src/examples/jungian-triad-org.ts",
     "image:runtime:local": "docker build -f Dockerfile.runtime -t noopolis/spawnfile-runtime-daimon:0.1.2-local --build-arg DAIMON_VERSION=0.1.2 --build-arg MNEME_VERSION=0.1.1 --build-arg PI_VERSION=0.79.10 ."

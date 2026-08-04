@@ -1,4 +1,4 @@
-import type { EngineKind } from "./mixedEngineCli.js";
+import type { CliEngineKind as EngineKind } from "../pi/cliSession.js";
 
 export type RepresentativeEngine = EngineKind | "pi";
 

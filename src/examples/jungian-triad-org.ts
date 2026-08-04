@@ -11,7 +11,7 @@ import { JungianPiRepresentative, seedPiCodexAuth, type PiRepresentativeTurn } f
 import { JungianVoice, type JungianVoiceTurn, runLimited } from "./jungianPlayAgent.js";
 import { JungianTrace, parseInnerUsed, parseSpeakLine } from "./jungianTrace.js";
 import { triadScenario, triadSelves, type TriadSelfProfile } from "./jungianTriadProfiles.js";
-import type { EngineKind } from "./mixedEngineCli.js";
+import type { CliEngineKind as EngineKind } from "../pi/cliSession.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const daimonRoot = path.resolve(__dirname, "../..");

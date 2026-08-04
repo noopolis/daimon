@@ -66,9 +66,11 @@ export type PiHarnessOptions = PiHarnessBaseOptions & (
   }
 );
 
-export type PiSessionFactory = (
-  input: Parameters<typeof createAgentSession>[0]
-) => Promise<{ session: PiSessionLike }>;
+export type PiSessionFactoryInput = Exclude<Parameters<typeof createAgentSession>[0], undefined> & {
+  daimonSecretEnvironmentNames?: readonly string[];
+};
+
+export type PiSessionFactory = (input: PiSessionFactoryInput) => Promise<{ session: PiSessionLike }>;
 
 export class PiHarnessAdapter implements AgentHarnessAdapter {
   private readonly authStorage: AuthStorage;
@@ -139,6 +141,7 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       return {
         cwd: input.workspacePath,
         agentDir: input.runtimeHomePath,
+        daimonSecretEnvironmentNames: this.options.world === undefined ? [] : [this.options.world.tokenEnv],
         authStorage: this.authStorage,
         modelRegistry: this.modelRegistry,
         model,
