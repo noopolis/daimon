@@ -8,7 +8,8 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { PiHarnessAdapter, type PiSessionFactory } from "./piHarness.js";
-import { createCliSessionFactory } from "./cliSession.js";
+import { createCliSessionFactory, readChild, renderCodexArgs, spawnEngine } from "./cliSession.js";
+import { formatWorldWakePrompt } from "./worldNudge.js";
 
 const require = createRequire(import.meta.url);
 const mcpClientEntry = pathToFileURL(require.resolve("@modelcontextprotocol/sdk/client/index.js")).href;
@@ -52,6 +53,9 @@ test("CLI adapter mounts the harness tool objects and preserves the causal wake 
   process.env[tokenEnv] = bearer;
   const stub = path.join(root, "stub-engine.mjs");
   await writeFile(stub, [
+    "const promptChunks = [];",
+    "for await (const chunk of process.stdin) promptChunks.push(chunk);",
+    "const prompt = Buffer.concat(promptChunks).toString('utf8');",
     `import { Client } from ${JSON.stringify(mcpClientEntry)};`,
     `import { StreamableHTTPClientTransport } from ${JSON.stringify(mcpTransportEntry)};`,
     "const config = process.argv[process.argv.indexOf('-c') + 1];",
@@ -62,7 +66,7 @@ test("CLI adapter mounts the harness tool objects and preserves the causal wake 
     "const observe = await client.callTool({ name: 'world_observe', arguments: { sense: 'world://proof/sense' } });",
     "const act = await client.callTool({ name: 'world_act', arguments: { affordance: 'world://proof/act', target: 'world://proof/target', input: { ok: true } } });",
     "const refused = await client.callTool({ name: 'world_status', arguments: {} });",
-    `process.stdout.write(JSON.stringify({ listed: listed.tools.map((tool) => tool.name), observe, act, refused, bearer: process.env.${tokenEnv} ?? null, argv: process.argv.join('\\n') }));`,
+    `process.stdout.write(JSON.stringify({ listed: listed.tools.map((tool) => tool.name), observe, act, refused, bearer: process.env.${tokenEnv} ?? null, argv: process.argv.join('\\n'), prompt }));`,
     "await client.close();"
   ].join("\n"));
   const captured: Parameters<PiSessionFactory>[0][] = [];
@@ -103,6 +107,13 @@ test("CLI adapter mounts the harness tool objects and preserves the causal wake 
     assert.match(result.text, /world_observe/);
     assert.match(result.text, /world_act/);
     assert.match(result.text, /"isError":true/);
+    assert.equal((JSON.parse(result.text) as { prompt: string }).prompt, formatWorldWakePrompt({
+      decisionToken,
+      requestId: "unused-in-test",
+      runId: "proof-run",
+      tick: 1,
+      wakeId: "proof-wake"
+    }));
     assert.equal(JSON.stringify(result).includes(decisionToken), false);
     assert.equal(JSON.stringify(result).includes(bearer), false);
     assert.deepEqual(captured[0]?.customTools?.map((tool) => tool.name).filter((name) => name.startsWith("world_")), [
@@ -138,6 +149,21 @@ test("CLI adapter mounts the harness tool objects and preserves the causal wake 
   }
 });
 
+test("codex argv includes the configurable sandbox setting", () => {
+  const previous = process.env.DAIMON_CODEX_SANDBOX;
+  try {
+    delete process.env.DAIMON_CODEX_SANDBOX;
+    const defaultArgs = renderCodexArgs({ commandArgs: [] }, "/workspace", "http://127.0.0.1:1234/mcp");
+    assert.deepEqual(defaultArgs.slice(defaultArgs.indexOf("--sandbox"), defaultArgs.indexOf("--sandbox") + 2), ["--sandbox", "danger-full-access"]);
+    process.env.DAIMON_CODEX_SANDBOX = "workspace-write";
+    const overrideArgs = renderCodexArgs({ commandArgs: [] }, "/workspace", "http://127.0.0.1:1234/mcp");
+    assert.deepEqual(overrideArgs.slice(overrideArgs.indexOf("--sandbox"), overrideArgs.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+  } finally {
+    if (previous === undefined) delete process.env.DAIMON_CODEX_SANDBOX;
+    else process.env.DAIMON_CODEX_SANDBOX = previous;
+  }
+});
+
 test("CLI engine failures include bounded redacted diagnostics", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-diagnostic-"));
   const tokenEnv = "DAIMON_CLI_DIAGNOSTIC_BEARER";
@@ -164,6 +190,28 @@ test("CLI engine failures include bounded redacted diagnostics", async () => {
     });
   } finally {
     delete process.env[tokenEnv];
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("codex child stdin EPIPE does not replace the engine exit diagnostic", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-epipe-"));
+  const stub = path.join(root, "early-exit-engine.mjs");
+  await writeFile(stub, "process.exit(1);");
+  try {
+    const child = spawnEngine({
+      command: process.execPath,
+      commandArgs: [stub],
+      engine: "codex",
+      maxToolTurns: 1,
+      timeoutMs: 10_000
+    }, "fail", { cwd: root }, undefined);
+    await assert.rejects(readChild(child, 10_000, []), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /CLI engine exited 1/);
+      return true;
+    });
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
