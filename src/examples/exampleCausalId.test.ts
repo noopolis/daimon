@@ -13,7 +13,6 @@ const exampleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const readmeExamples = [
   "pi-agent.ts",
   "pi-memory-org.ts",
-  "mixed-engine-org.ts",
   "jungian-play-org.ts",
   "jungian-triad-org.ts"
 ];

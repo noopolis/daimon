@@ -6,7 +6,7 @@ import { OrgObserver } from "./orgObserver.js";
 describe("OrgObserver", () => {
   it("records consultations, recall provenance, leaks, and markdown summaries", () => {
     const observer = new OrgObserver({
-      orgId: "mixed-engine-org",
+      orgId: "cli-engine-org",
       runId: "run-test"
     });
     observer.recordSignal({

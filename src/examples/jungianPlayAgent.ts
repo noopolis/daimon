@@ -4,7 +4,7 @@ import path from "node:path";
 import type { WakeEvent } from "../core/types.js";
 import { createMemoryRuntime } from "@noopolis/mneme";
 import type { MemoryRecallAudit, MemoryRuntime } from "@noopolis/mneme";
-import { runEngineDetailed, type EngineKind, type EngineRunResult } from "./mixedEngineCli.js";
+import { runEngineDetailed, type CliEngineKind as EngineKind, type EngineRunResult } from "../pi/cliSession.js";
 
 export interface JungianVoiceConfig {
   archetype?: string;
