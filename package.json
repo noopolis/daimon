@@ -54,7 +54,7 @@
     "@earendil-works/pi-ai": "^0.79.10",
     "@earendil-works/pi-coding-agent": "^0.79.10",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@noopolis/mneme": "file:../mneme",
+    "@noopolis/mneme": "^0.1.1",
     "ajv": "^8.17.1"
   },
   "devDependencies": {
