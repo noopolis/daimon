@@ -73,6 +73,44 @@ test("redacts hidden cognition and credential-shaped values recursively", () => 
   assert.equal(bytes.includes("/Users/apresmoi"), false);
 });
 
+test("captures the message-bearing payload from failed world calls", () => {
+  const capture = createPiWorldTrajectoryCapture();
+  capturePiWorldTrajectoryEvent(capture, {
+    type: "tool_execution_end",
+    toolCallId: "call-error",
+    toolName: "world_observe",
+    result: {
+      content: [{ type: "text", text: "World tool authentication is unavailable." }],
+      details: {}
+    },
+    isError: true
+  });
+  assert.deepEqual(capture.calls[0]?.result, {
+    content: [{ type: "text", text: "World tool authentication is unavailable." }],
+    details: {}
+  });
+  assert.equal(capture.calls[0]?.status, "failed");
+});
+
+test("redacts credentials and bounds failed world-call payloads", () => {
+  const capture = createPiWorldTrajectoryCapture();
+  capturePiWorldTrajectoryEvent(capture, {
+    type: "tool_execution_end",
+    toolCallId: "call-error-bounded",
+    toolName: "world_affordances",
+    result: {
+      content: [{ type: "text", text: `Bearer ${"a".repeat(64)} ${"x".repeat(40_000)}` }],
+      details: { authorization: "Bearer should-not-survive" }
+    },
+    isError: true
+  });
+  const result = JSON.stringify(capture.calls[0]?.result);
+  assert.match(result, /Bearer \[REDACTED\]/u);
+  assert.equal(result.includes("should-not-survive"), false);
+  assert.ok(result.length < 33_000);
+  assert.equal(result.includes("x".repeat(2_000)), false);
+});
+
 test("writes a versioned join-ready world trajectory without raw instructions or prompts", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-world-trajectory-"));
   const capture = createPiWorldTrajectoryCapture();

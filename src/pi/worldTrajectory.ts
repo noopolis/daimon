@@ -128,7 +128,9 @@ export const capturePiWorldTrajectoryEvent = (
   }
   const call = capture.calls.findLast((candidate) => candidate.tool_call_id === toolCallId);
   const resultRecord = asObject(record?.result);
-  const result = resultRecord?.details ?? record?.result;
+  const result = record?.isError === true
+    ? record?.result
+    : resultRecord?.details ?? record?.result;
   const startedAt = capture.starts.get(toolCallId);
   const completed = call ?? {
     name,
