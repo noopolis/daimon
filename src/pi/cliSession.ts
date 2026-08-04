@@ -64,7 +64,7 @@ const terminate = (child: ChildProcess): void => {
   if (!child.killed) child.kill("SIGTERM");
 };
 
-const readChild = (child: ChildProcess, timeoutMs: number, secretValues: readonly string[]): Promise<string> => new Promise((resolve, reject) => {
+export const readChild = (child: ChildProcess, timeoutMs: number, secretValues: readonly string[]): Promise<string> => new Promise((resolve, reject) => {
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
@@ -138,7 +138,15 @@ const addGrokServer = async (endpoint: string, cwd: string, env: NodeJS.ProcessE
   await readChild(child, 30_000, secretValues);
 };
 
-const spawnEngine = (
+export const renderCodexArgs = (
+  options: Pick<CliEngineOptions, "commandArgs">,
+  cwd: string,
+  endpoint: string | undefined,
+  sandbox: string = process.env.DAIMON_CODEX_SANDBOX ?? "danger-full-access"
+): string[] => [...(options.commandArgs ?? []), "exec", "--sandbox", sandbox, "--skip-git-repo-check", "--color", "never", "-C", cwd,
+  "-c", `mcp_servers.daimon.url=${endpoint}`, "-"];
+
+export const spawnEngine = (
   options: CliEngineOptions,
   prompt: string,
   input: SessionInput,
@@ -150,9 +158,12 @@ const spawnEngine = (
     ...(input.daimonSecretEnvironmentNames ?? [])
   ]);
   if (options.engine === "codex") {
-    const args = [...(options.commandArgs ?? []), "exec", "--skip-git-repo-check", "--color", "never", "-C", input.cwd,
-      "-c", `mcp_servers.daimon.url=${endpoint}`, "-"];
-    return spawn(command, args, { cwd: input.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const args = renderCodexArgs(options, input.cwd, endpoint);
+    const child = spawn(command, args, { cwd: input.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    child.stdin.on("error", () => undefined);
+    child.stdin.write(prompt);
+    child.stdin.end();
+    return child;
   }
   if (options.engine === "grok") {
     return spawn(command, [...(options.commandArgs ?? []), "--single", prompt, "--max-turns", String(options.maxToolTurns), "--no-memory",

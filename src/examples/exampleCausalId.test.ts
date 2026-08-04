@@ -9,6 +9,8 @@ import { createMemoryRuntime } from "@noopolis/mneme";
 
 import { exampleCausalId } from "./exampleCausalId.js";
 
+process.env.NOOPOLIS_RUN_ID = "test-example-causal-id";
+
 const exampleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const readmeExamples = [
   "pi-agent.ts",
