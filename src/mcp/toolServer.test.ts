@@ -77,6 +77,76 @@ test("MCP server refuses calls after the wake deadline with a distinct error", a
   assert.throws(() => { throw new McpWakeDeadlineError(); }, { name: "McpWakeDeadlineError" });
 });
 
+test("MCP deadline aborts an in-flight tool and reports an error", async () => {
+  let signalAbortedDuringCall = false;
+  const slow = defineTool({
+    name: "slow",
+    label: "Slow",
+    description: "Sleeps past the deadline.",
+    parameters: Type.Object({}, { additionalProperties: false }),
+    async execute(_id, _params, signal) {
+      signal?.addEventListener("abort", () => { signalAbortedDuringCall = true; }, { once: true });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return { content: [{ type: "text" as const, text: "done" }], details: undefined };
+    }
+  });
+  const started = Date.now();
+  const result = await call(createPiToolMcpServer([slow], { maxToolTurns: 1, wakeDeadline: started + 100 }), "slow", {});
+  assert.equal(signalAbortedDuringCall, true);
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result), /wake deadline/u);
+  assert.equal(/done/u.test(JSON.stringify(result)), false);
+});
+
+test("MCP deadline signal does not fire for a tool that finishes in time", async () => {
+  let signalAbortedDuringCall = false;
+  let signalAbortedAtReturn = false;
+  const fast = defineTool({
+    name: "fast",
+    label: "Fast",
+    description: "Finishes before the deadline.",
+    parameters: Type.Object({}, { additionalProperties: false }),
+    async execute(_id, _params, signal) {
+      signal?.addEventListener("abort", () => { signalAbortedDuringCall = true; }, { once: true });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      signalAbortedAtReturn = signal?.aborted ?? false;
+      return { content: [{ type: "text" as const, text: "done" }], details: undefined };
+    }
+  });
+  const result = await call(createPiToolMcpServer([fast], { maxToolTurns: 1, wakeDeadline: Date.now() + 300 }), "fast", {});
+  assert.notEqual(result.isError, true, JSON.stringify(result));
+  assert.match(JSON.stringify(result), /done/u);
+  assert.equal(signalAbortedAtReturn, false);
+});
+
+test("MCP preserves client cancellation on the tool signal", async () => {
+  let signalAborted = false;
+  const cancellable = defineTool({
+    name: "cancellable",
+    label: "Cancellable",
+    description: "Waits for cancellation.",
+    parameters: Type.Object({}, { additionalProperties: false }),
+    async execute(_id, _params, signal) {
+      signal?.addEventListener("abort", () => { signalAborted = true; }, { once: true });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return { content: [{ type: "text" as const, text: "done" }], details: undefined };
+    }
+  });
+  const server = createPiToolMcpServer([cancellable], { maxToolTurns: 1, wakeDeadline: Date.now() + 10_000 });
+  const client = new Client({ name: "daimon-cancel-client", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const controller = new AbortController();
+  const request = client.callTool({ name: "cancellable", arguments: {} }, undefined, { signal: controller.signal });
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(request);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(signalAborted, true);
+  await client.close();
+  await server.close();
+});
+
 test("MCP mount preserves bound world secrecy in schema and result envelopes", async () => {
   const contextRef: PiWorldToolContextRef = {
     current: {

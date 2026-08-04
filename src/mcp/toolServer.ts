@@ -55,7 +55,8 @@ const toolError = (error: unknown): CallToolResult => ({
 
 // Pi's ExtensionContext has no meaning outside a Pi session. Mounted tools
 // must not read it; this named value documents the explicit absence.
-const NO_PI_EXTENSION_CONTEXT: undefined = undefined;
+// The MCP mount deliberately has no Pi session context; `never` preserves typed positional checks.
+const NO_PI_EXTENSION_CONTEXT = undefined as never;
 
 const validateOptions = (options: PiToolMcpServerOptions): void => {
   if (!Number.isSafeInteger(options.maxToolTurns) || options.maxToolTurns < 1) {
@@ -103,13 +104,32 @@ export const createPiToolMcpServer = (
           throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for tool ${tool.name}`);
         }
         toolTurns += 1;
-        const result = await Reflect.apply(tool.execute, tool, [
-          `mcp-tool-turn-${toolTurns}`,
-          args,
-          extra.signal,
-          undefined,
-          NO_PI_EXTENSION_CONTEXT
-        ]);
+        // Ajv validated this value against this tool's own schema immediately above.
+        const validatedArgs = args as Parameters<typeof tool.execute>[1];
+        const deadlineController = new AbortController();
+        const remainingMs = Math.max(0, options.wakeDeadline - Date.now());
+        const deadlineTimer = setTimeout(() => deadlineController.abort(), remainingMs);
+        const signal = extra.signal === undefined
+          ? deadlineController.signal
+          : AbortSignal.any([extra.signal, deadlineController.signal]);
+        const deadline = new Promise<never>((_resolve, reject) => {
+          deadlineController.signal.addEventListener("abort", () => reject(new McpWakeDeadlineError()), { once: true });
+        });
+        let result: Awaited<ReturnType<typeof tool.execute>>;
+        try {
+          result = await Promise.race([
+            tool.execute(
+              `mcp-tool-turn-${toolTurns}`,
+              validatedArgs,
+              signal,
+              undefined,
+              NO_PI_EXTENSION_CONTEXT
+            ),
+            deadline
+          ]);
+        } finally {
+          clearTimeout(deadlineTimer);
+        }
         return toolResult(result);
       } catch (error) {
         return toolError(error);
