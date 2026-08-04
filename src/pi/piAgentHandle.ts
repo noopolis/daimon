@@ -70,17 +70,22 @@ const cloneWakeEvent = (event: WakeEvent): WakeEvent => ({
 });
 
 export type PiSession = Awaited<ReturnType<typeof createAgentSession>>["session"];
-export type PiSessionCreator = (mode: MemoryWakeMode, sessionDirectory: string) => Promise<PiSession>;
+export interface PiSessionLike {
+  subscribe(listener: Parameters<PiSession["subscribe"]>[0]): () => void;
+  prompt(text: string, options?: Parameters<PiSession["prompt"]>[1]): Promise<void>;
+  dispose(): void;
+}
+export type PiSessionCreator = (mode: MemoryWakeMode, sessionDirectory: string) => Promise<PiSessionLike>;
+export type PiNativeSessionCreator = (mode: MemoryWakeMode, sessionDirectory: string) => Promise<PiSession>;
 
 export type WakeAcceptanceInput = { runWake?: typeof stampTurnInputSubmitted; completeTurn?: typeof stampTurnOutputCompleted; traceTurn?: typeof persistPiTurnTrace; createWakeAcceptance?: (runtimeHomePath: string, agentId: string) => WakeAcceptanceStoreLike; };
 
 type WakeSessionSelection = {
   disposeAfterWake: boolean;
   mode: MemoryWakeMode;
-  session: PiSession;
+  session: PiSessionLike;
   threadId: string;
 };
-
 type QueuedDelivery = { digest: string; promise: Promise<WakeResult> };
 
 export class PiAgentHandle implements AgentHandle {
@@ -95,8 +100,38 @@ export class PiAgentHandle implements AgentHandle {
   private readonly persistTrace: typeof persistPiTurnTrace;
 
   constructor(
+    id: string,
+    session: PiSession,
+    createSession: PiNativeSessionCreator,
+    runtimeHomePath: string,
+    traceModel: PiTurnTraceModel,
+    memory?: MemoryRuntime,
+    memoryToolContext?: PiMemoryToolContextRef,
+    dependencies?: WakeAcceptanceInput,
+    worldToolContext?: PiWorldToolContextRef,
+    rawTrainingCaptureRef?: PiRawTrainingCaptureRef,
+    rawTrainingCaptureOptions?: PiRawTrainingCaptureOptions,
+    worldTrajectoryIdentity?: PiWorldTrajectoryIdentity,
+    rawTrainingCaptureSession?: PiSession
+  );
+  constructor(
+    id: string,
+    session: PiSessionLike,
+    createSession: PiSessionCreator,
+    runtimeHomePath: string,
+    traceModel: PiTurnTraceModel,
+    memory?: MemoryRuntime,
+    memoryToolContext?: PiMemoryToolContextRef,
+    dependencies?: WakeAcceptanceInput,
+    worldToolContext?: PiWorldToolContextRef,
+    rawTrainingCaptureRef?: never,
+    rawTrainingCaptureOptions?: never,
+    worldTrajectoryIdentity?: PiWorldTrajectoryIdentity,
+    rawTrainingCaptureSession?: never
+  );
+  constructor(
     readonly id: string,
-    private readonly session: PiSession,
+    private readonly session: PiSessionLike,
     private readonly createSession: PiSessionCreator,
     private readonly runtimeHomePath: string,
     private readonly traceModel: PiTurnTraceModel,
@@ -106,7 +141,8 @@ export class PiAgentHandle implements AgentHandle {
     private readonly worldToolContext?: PiWorldToolContextRef,
     private readonly rawTrainingCaptureRef?: PiRawTrainingCaptureRef,
     private readonly rawTrainingCaptureOptions?: PiRawTrainingCaptureOptions,
-    private readonly worldTrajectoryIdentity?: PiWorldTrajectoryIdentity
+    private readonly worldTrajectoryIdentity?: PiWorldTrajectoryIdentity,
+    private readonly piSessionForRawCapture?: PiSession
   ) {
     this.stampTurnInputSubmitted = dependencies.runWake ?? stampTurnInputSubmitted;
     this.stampTurnOutputCompleted = dependencies.completeTurn ?? stampTurnOutputCompleted;
@@ -363,7 +399,8 @@ export class PiAgentHandle implements AgentHandle {
           : { worldContextBound: worldContext !== undefined })
       });
       if (rawTrainingCapture !== undefined
-        && this.rawTrainingCaptureOptions !== undefined) {
+        && this.rawTrainingCaptureOptions !== undefined
+        && this.piSessionForRawCapture !== undefined) {
         // Do not retry a partially failed private capture in the catch path.
         // The first failure is authoritative and retrying the same immutable
         // turn path would only mask it with an EEXIST/partial-write error.
@@ -374,7 +411,7 @@ export class PiAgentHandle implements AgentHandle {
           completedAt: new Date(),
           options: this.rawTrainingCaptureOptions,
           runtimeHomePath: this.runtimeHomePath,
-          session: selectedSession.session,
+          session: this.piSessionForRawCapture,
           startedAt,
           status: "completed",
           totalMs: Date.now() - startedAtMs,
@@ -445,6 +482,7 @@ export class PiAgentHandle implements AgentHandle {
       if (!rawTrainingCapturePersistAttempted
         && rawTrainingCapture !== undefined
         && this.rawTrainingCaptureOptions !== undefined
+        && this.piSessionForRawCapture !== undefined
         && selectedSession !== undefined) {
         rawTrainingCapturePersistAttempted = true;
         await persistPiRawTrainingCapture({
@@ -453,7 +491,7 @@ export class PiAgentHandle implements AgentHandle {
           completedAt: new Date(),
           options: this.rawTrainingCaptureOptions,
           runtimeHomePath: this.runtimeHomePath,
-          session: selectedSession.session,
+          session: this.piSessionForRawCapture,
           startedAt,
           status: "failed",
           totalMs: Date.now() - startedAtMs,

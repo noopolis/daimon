@@ -52,18 +52,12 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.79.10",
-    "@earendil-works/pi-coding-agent": "^0.79.10"
-  },
-  "peerDependencies": {
-    "@noopolis/mneme": "^0.1.1"
-  },
-  "peerDependenciesMeta": {
-    "@noopolis/mneme": {
-      "optional": true
-    }
+    "@earendil-works/pi-coding-agent": "^0.79.10",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@noopolis/mneme": "file:../mneme",
+    "ajv": "^8.17.1"
   },
   "devDependencies": {
-    "@noopolis/mneme": "file:../mneme",
     "@types/node": "^24.12.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

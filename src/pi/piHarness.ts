@@ -16,7 +16,7 @@ import { resolvePiHarnessModel } from "./modelConfig.js";
 import { createPiModelRegistry } from "./modelRegistry.js";
 import { createPiMemoryTools, piMemoryToolNames, type PiMemoryToolContextRef } from "./memoryTools.js";
 import { createResourceLoader } from "./prompts.js";
-import { PiAgentHandle, type PiSessionCreator } from "./piAgentHandle.js";
+import { PiAgentHandle, type PiNativeSessionCreator, type PiSessionCreator, type PiSessionLike } from "./piAgentHandle.js";
 import { createPiWorldTools, piWorldToolNames, type PiWorldBinding } from "./worldTools.js";
 import type { PiWorldToolContextRef } from "./worldNudge.js";
 import {
@@ -35,9 +35,8 @@ export type PiThinkingLevel = NonNullable<
   NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"]
 >;
 
-export interface PiHarnessOptions {
+type PiHarnessBaseOptions = {
   authPath: string;
-  sessionFactory?: PiSessionFactory;
   model?: {
     auth?: HarnessModelSpec["auth"];
     endpoint?: HarnessModelSpec["endpoint"];
@@ -53,13 +52,23 @@ export interface PiHarnessOptions {
     runtimeHomePath?: string;
   };
   thinkingLevel?: PiThinkingLevel;
-  rawTrainingCapture?: PiRawTrainingCaptureOptions;
   world?: PiWorldBinding;
-}
+};
+
+export type PiHarnessOptions = PiHarnessBaseOptions & (
+  | {
+    rawTrainingCapture?: PiRawTrainingCaptureOptions;
+    sessionFactory?: never;
+  }
+  | {
+    rawTrainingCapture?: never;
+    sessionFactory: PiSessionFactory;
+  }
+);
 
 export type PiSessionFactory = (
   input: Parameters<typeof createAgentSession>[0]
-) => ReturnType<typeof createAgentSession>;
+) => Promise<{ session: PiSessionLike }>;
 
 export class PiHarnessAdapter implements AgentHarnessAdapter {
   private readonly authStorage: AuthStorage;
@@ -106,7 +115,7 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       this.options.world === undefined ? undefined : {};
     const rawTrainingCaptureRef: PiRawTrainingCaptureRef | undefined =
       this.options.rawTrainingCapture === undefined ? undefined : {};
-    const createSession: PiSessionCreator = async (mode, sessionDirectory) => {
+    const sessionInput = (mode: Parameters<PiSessionCreator>[0], sessionDirectory: string) => {
       const memoryTools = memory === undefined || memoryToolContext === undefined
         ? []
         : createPiMemoryTools({
@@ -127,7 +136,7 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         ...(worldTools === undefined ? [] : piWorldToolNames(worldTools))
       ];
 
-      const { session } = await this.sessionFactory({
+      return {
         cwd: input.workspacePath,
         agentDir: input.runtimeHomePath,
         authStorage: this.authStorage,
@@ -145,13 +154,45 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
           compaction: { enabled: false },
           retry: { enabled: true, maxRetries: 1 }
         })
-      });
-      if (rawTrainingCaptureRef !== undefined) {
-        bindPiRawTrainingCapture(session, rawTrainingCaptureRef);
-      }
-      return session;
+      };
     };
 
+    if (this.options.rawTrainingCapture !== undefined) {
+      const createSession: PiNativeSessionCreator = async (mode, sessionDirectory) => {
+        const { session } = await createAgentSession(sessionInput(mode, sessionDirectory));
+        if (rawTrainingCaptureRef !== undefined) {
+          bindPiRawTrainingCapture(session, rawTrainingCaptureRef);
+        }
+        return session;
+      };
+      const session = await createSession("awake", path.join(input.runtimeHomePath, "sessions"));
+      return new PiAgentHandle(
+        input.id,
+        session,
+        createSession,
+        input.runtimeHomePath,
+        {
+          authMethod: modelSpec.auth?.method ?? "none",
+          model: resolvedModel.name,
+          provider: resolvedModel.provider
+        },
+        memory,
+        memoryToolContext,
+        {},
+        worldToolContext,
+        rawTrainingCaptureRef,
+        this.options.rawTrainingCapture,
+        worldToolContext === undefined
+          ? undefined
+          : { instructions: input.instructions, thinkingLevel: this.options.thinkingLevel ?? "off" },
+        session
+      );
+    }
+
+    const createSession: PiSessionCreator = async (mode, sessionDirectory) => {
+      const { session } = await (this.options.sessionFactory ?? createAgentSession)(sessionInput(mode, sessionDirectory));
+      return session;
+    };
     const session = await createSession("awake", path.join(input.runtimeHomePath, "sessions"));
 
     return new PiAgentHandle(
@@ -168,14 +209,15 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       memoryToolContext,
       {},
       worldToolContext,
-      rawTrainingCaptureRef,
-      this.options.rawTrainingCapture,
+      undefined,
+      undefined,
       worldToolContext === undefined
         ? undefined
         : {
           instructions: input.instructions,
           thinkingLevel: this.options.thinkingLevel ?? "off"
-        }
+        },
+      undefined
     );
   }
 }
