@@ -18,6 +18,13 @@ type CapturedTool = {
 };
 
 const BASE_TOOLS = Object.freeze(["read", "write", "edit", "bash", "grep", "find", "ls"]);
+
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-pi-harness-world-tools";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
 const MEMORY_TOOLS = Object.freeze([
   "memory_search",
   "memory_locate",

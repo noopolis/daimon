@@ -9,12 +9,15 @@ import { WakeAcceptanceError, WakeAcceptanceStore, type WakeAcceptanceStoreState
 
 type Gate = { signal: Promise<void>; release: () => void };
 const roots: string[] = [];
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-wake-acceptance-concurrency";
+});
 const gate = (): Gate => { let release = (): void => {}; const signal = new Promise<void>((resolve) => { release = resolve; }); return { signal, release }; };
 const event = (id: string): WakeEvent => ({ id, kind: "message", from: "sender", text: id, context: { roomId: "room" }, delivery: { eventId: id, sender: "sender", target: "agent", contextId: `ctx-${id}` } });
 const tmp = async (): Promise<string> => { const root = await mkdtemp(path.join(os.tmpdir(), "b34-")); roots.push(root); return root; };
 const incomplete = (value: unknown): boolean => value instanceof WakeAcceptanceError && value.code === "wake_delivery_incomplete";
 const state = async (store: WakeAcceptanceStore): Promise<WakeAcceptanceStoreState> => JSON.parse(await readFile(store.getAcceptanceFilePath(), "utf8")) as WakeAcceptanceStoreState;
-test.afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+test.afterEach(async () => { delete process.env.NOOPOLIS_RUN_ID; await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 test("same-delivery stores permit replay or fixed incomplete, then stable replay", async () => {
   const home = await tmp(); const left = new WakeAcceptanceStore(home, "agent"); const right = new WakeAcceptanceStore(home, "agent");

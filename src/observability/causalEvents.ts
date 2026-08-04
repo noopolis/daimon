@@ -52,18 +52,17 @@ export const TURN_OUTPUT_COMPLETED_TYPE = "turn.output.completed" as const;
 /** Name of the environment variable every Noopolis authority reads `run_id` from. Never model output. */
 export const NOOPOLIS_RUN_ID_ENV = "NOOPOLIS_RUN_ID";
 
-const FALLBACK_RUN_ID = "unset-run";
-
 /**
  * Resolves `run_id` from the `NOOPOLIS_RUN_ID` environment variable, per
  * `specs/CAUSAL.md`. Never derived from a WakeEvent, model output, or any
- * other in-turn data. Falls back to a stable placeholder (rather than
- * throwing) so telemetry stays best-effort in local/dev runs that have not
- * wired the env var yet; a real run's compiled container always sets it.
+ * other in-turn data. A causal event cannot be emitted without a real run id.
  */
 export const resolveRunId = (env: NodeJS.ProcessEnv = process.env): string => {
   const value = env[NOOPOLIS_RUN_ID_ENV];
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : FALLBACK_RUN_ID;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${NOOPOLIS_RUN_ID_ENV} must be set to a non-blank value`);
+  }
+  return value.trim();
 };
 
 export const sha256Hex = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");

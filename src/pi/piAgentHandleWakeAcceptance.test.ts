@@ -22,6 +22,12 @@ type OutputStamp = Parameters<typeof stampTurnOutputCompleted>[0];
 type Options = { memory?: MemoryRuntime; createSession?: PiSessionCreator; fail?: Error; failAt?: "prompt" | "input" | "output" | "trace"; hooks?: Hooks; order?: string[]; inputs?: InputStamp[]; outputs?: OutputStamp[]; traces?: PersistPiTurnTraceInput[]; prompts?: string[] };
 
 const roots: string[] = [];
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-agent-wake-acceptance";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
 const count = (xs: readonly string[], value: string): number => xs.filter((item) => item === value).length;
 const gate = (): Gate => { let release = (): void => {}; const signal = new Promise<void>((resolve) => { release = resolve; }); return { signal, release }; };
 const code = (expected: WakeAcceptanceError["code"]) => (value: unknown): boolean => value instanceof WakeAcceptanceError && value.code === expected;

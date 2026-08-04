@@ -13,7 +13,11 @@ import { WakeAcceptanceStore } from "./wakeAcceptance.js";
 import { WAKE_ACCEPTANCE_VERSION, parseWakeAcceptanceState, type WakeAcceptanceRecord } from "./wakeAcceptanceSchema.js";
 
 const UTF8 = "utf8"; const tempRoots: string[] = [];
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-wake-acceptance-fs";
+});
 test.afterEach(async () => {
+  delete process.env.NOOPOLIS_RUN_ID;
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true })));
 });
 const tempDir = async (): Promise<string> => {

@@ -19,6 +19,13 @@ interface FakePiSessionConfig {
   };
 }
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-pi-harness";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
+
 const makeFakePiSessionFactory = (scripts: string[][]) => {
   const sessions: FakePiSessionConfig[] = [];
   const inputs: Array<Parameters<typeof createAgentSession>[0]> = [];

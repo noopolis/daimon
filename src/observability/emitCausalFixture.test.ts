@@ -8,6 +8,13 @@ import { runCausalFixture } from "./emitCausalFixture.js";
 
 const tempRoots: string[] = [];
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-causal-fixture";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
+
 const tempDir = async (): Promise<string> => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "noopolis-daimon-causal-fixture-"));
   tempRoots.push(directory);
@@ -25,6 +32,7 @@ test("runCausalFixture stamps a turn.input.submitted -> turn.output.completed ch
   const [inputEvent, outputEvent] = events;
 
   assert.equal(inputEvent.type, "turn.input.submitted");
+  assert.equal(inputEvent.run_id, "run-test-causal-fixture");
   assert.equal(inputEvent.principal_id, "agent:fixture-agent");
   assert.equal(outputEvent.type, "turn.output.completed");
   assert.equal(outputEvent.principal_id, "agent:fixture-agent");

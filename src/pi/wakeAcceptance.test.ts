@@ -30,7 +30,11 @@ type WakeAdmission = Awaited<ReturnType<WakeAcceptanceStore["begin"]>>;
 type WakeRunAdmission = Extract<WakeAdmission, { mode: "run" }>;
 const UTF8 = "utf8";
 const tempRoots: string[] = [];
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-wake-acceptance";
+});
 test.afterEach(async () => {
+  delete process.env.NOOPOLIS_RUN_ID;
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true })));
 });
 const tempDir = async (): Promise<string> => {

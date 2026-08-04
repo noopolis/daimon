@@ -19,6 +19,13 @@ interface FakePiSessionConfig {
   };
 }
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-pi-harness-shared-memory";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
+
 const makeFakePiSessionFactory = (scripts: string[][]) => {
   const sessions: FakePiSessionConfig[] = [];
   type SessionResult = Awaited<ReturnType<typeof createAgentSession>>;

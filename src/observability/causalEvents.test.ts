@@ -65,10 +65,10 @@ test("causal seq counter is file-backed: a fresh module instance resumes from ca
   assert.equal(await fresh.nextCausalSeq({ ...stream, runId: "run-2" }), 1);
 });
 
-test("resolveRunId reads NOOPOLIS_RUN_ID and never falls back to model-shaped input", () => {
+test("resolveRunId requires a non-blank NOOPOLIS_RUN_ID", () => {
   assert.equal(resolveRunId({ [NOOPOLIS_RUN_ID_ENV]: "run-42" }), "run-42");
-  assert.equal(resolveRunId({}), "unset-run");
-  assert.equal(resolveRunId({ [NOOPOLIS_RUN_ID_ENV]: "  " }), "unset-run");
+  assert.throws(() => resolveRunId({}), /NOOPOLIS_RUN_ID/u);
+  assert.throws(() => resolveRunId({ [NOOPOLIS_RUN_ID_ENV]: "   " }), /NOOPOLIS_RUN_ID/u);
 });
 
 test("emitTurnInputSubmitted stamps the envelope and payload minimums", async () => {
