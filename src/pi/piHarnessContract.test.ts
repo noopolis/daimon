@@ -12,6 +12,13 @@ import { PiHarnessAdapter, type PiSessionFactory } from "./piHarness.js";
 type PiSessionEvent = { type: string; message?: { content?: string | ReadonlyArray<unknown> } };
 type PiSessionListener = (event: PiSessionEvent) => void;
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-pi-harness-contract";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
+
 interface FakePiSession {
   prompts: string[];
   session: {

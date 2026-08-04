@@ -23,6 +23,13 @@ type FakeTool = {
 
 const tempRoots: string[] = [];
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-pi-harness-turn-trace";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
+
 const tempDir = async (): Promise<string> => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "noopolis-daimon-turn-trace-"));
   tempRoots.push(directory);

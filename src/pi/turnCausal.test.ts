@@ -11,6 +11,13 @@ import { agentPrincipalId, stampTurnInputSubmitted } from "./turnCausal.js";
 
 const tempRoots: string[] = [];
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-turn-causal";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
+
 const tempDir = async (): Promise<string> => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "noopolis-daimon-turncausal-"));
   tempRoots.push(directory);

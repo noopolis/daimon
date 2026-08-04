@@ -12,7 +12,7 @@ import type { AgentStartInput, WakeEvent } from "../core/types.js";
 export const formatWakePrompt = (event: WakeEvent): string => `Wake event:
 - id: ${event.id}
 - kind: ${event.kind}
-- from: ${event.from ?? "operator"}
+- from: ${event.from === undefined ? "[no attribution supplied] (absence)" : event.from}
 
 ${event.text}`;
 

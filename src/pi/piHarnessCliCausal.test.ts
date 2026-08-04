@@ -7,6 +7,13 @@ import test from "node:test";
 import { PiHarnessAdapter, type PiSessionFactory } from "./piHarness.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-pi-harness-cli";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
+
 const readEvents = async (runtimeHomePath: string): Promise<Array<{ type: string; payload: { turn_id: string } }>> => {
   const raw = await readFile(path.join(runtimeHomePath, "telemetry", "causal.jsonl"), "utf8");
   return raw.split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type: string; payload: { turn_id: string } });

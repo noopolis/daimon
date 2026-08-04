@@ -16,6 +16,13 @@ type SessionResult = Awaited<ReturnType<typeof createAgentSession>>;
 
 const tempRoots: string[] = [];
 
+test.beforeEach(() => {
+  process.env[NOOPOLIS_RUN_ID_ENV] = "run-test-pi-harness-causal";
+});
+test.afterEach(() => {
+  delete process.env[NOOPOLIS_RUN_ID_ENV];
+});
+
 const tempDir = async (): Promise<string> => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "noopolis-daimon-causal-turn-"));
   tempRoots.push(directory);

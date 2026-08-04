@@ -7,6 +7,8 @@ const session: PiSessionLike = {
 };
 const createSession: PiSessionCreator = async () => session;
 
+process.env.NOOPOLIS_RUN_ID = "run-test-agent-handle-types";
+
 // @ts-expect-error Raw Pi capture requires a concrete Pi AgentSession, not a CLI session.
 const invalidCaptureHandle: PiAgentHandle = new PiAgentHandle(
   "agent",
@@ -23,3 +25,5 @@ const invalidCaptureHandle: PiAgentHandle = new PiAgentHandle(
 );
 
 void invalidCaptureHandle;
+
+delete process.env.NOOPOLIS_RUN_ID;
