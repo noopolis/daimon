@@ -162,7 +162,7 @@ test("a world-only agent omits unrelated memory and coding tools", async () => {
   await handle.stop();
 });
 
-test("a world binding appends exact Pi tools and reads only its named bearer when called", async () => {
+test("a world binding appends exact token-free Pi tools and fails closed outside a wake", async () => {
   const root = await tempDir();
   const captured = capturingFactory();
   const tokenEnv = "B29_PI_WORLD_TOKEN";
@@ -207,19 +207,15 @@ test("a world binding appends exact Pi tools and reads only its named bearer whe
     process.env[tokenEnv] = "late-red-bearer";
     const status = customTools.find((tool) => tool.name === "world_status");
     assert.ok(status);
-    const output = await status.execute(
-      "world-call",
-      { decision_token: "decision-red" },
-      undefined,
-      undefined,
-      {}
+    for (const tool of customTools.filter((candidate) => candidate.name.startsWith("world_"))) {
+      assert.equal(JSON.stringify(tool.parameters).includes("decision_token"), false);
+      assert.equal(JSON.stringify(tool.parameters).includes("decision_id"), false);
+    }
+    await assert.rejects(
+      status.execute("world-call", {}, undefined, undefined, {}),
+      { name: "PiWorldToolError", code: "world_request_invalid" }
     );
-    assert.deepEqual(output.details, { ready: true });
-    assert.deepEqual(requests, [{
-      authorization: "Bearer late-red-bearer",
-      body: '{"decision_token":"decision-red"}',
-      url: "http://simfile-world:19972/v1/world/status"
-    }]);
+    assert.deepEqual(requests, []);
   } finally {
     if (handle !== undefined) await handle.stop();
     globalThis.fetch = priorFetch;

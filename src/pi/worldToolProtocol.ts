@@ -28,12 +28,11 @@ export const createWorldClaimRequestBody = (
 export const createWorldRequestBody = (
   operation: Exclude<PiWorldProtocolOperation, "claim">,
   params: Record<string, unknown>,
-  context?: PiWorldTurnContext,
+  context: PiWorldTurnContext | undefined,
 ): Record<string, unknown> | undefined => {
-  const decisionToken = context?.decisionToken ?? params.decision_token;
-  if (!text(decisionToken, 512)
-    || context !== undefined && params.decision_token !== undefined
-      && params.decision_token !== context.decisionToken) return undefined;
+  const decisionToken = context?.decisionToken;
+  if (context === undefined || !text(decisionToken, 512) || params.decision_token !== undefined
+    || params.request_id !== undefined) return undefined;
   if (operation === "status" || operation === "capabilities" || operation === "affordances") {
     return { decision_token: decisionToken };
   }
@@ -41,10 +40,9 @@ export const createWorldRequestBody = (
     ? { decision_token: decisionToken, sense: params.sense }
     : undefined;
   if (operation === "act") {
-    const requestId = context?.requestId ?? params.request_id;
+    const requestId = context.requestId;
     if (!text(requestId) || !text(params.affordance) || !text(params.target)
-      || context !== undefined && params.request_id !== undefined
-        && params.request_id !== context.requestId) return undefined;
+    ) return undefined;
     return { decision_token: decisionToken, request_id: requestId,
       affordance: params.affordance, target: params.target, input: params.input };
   }

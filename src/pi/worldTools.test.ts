@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createPiWorldTools,
+  type CreatePiWorldToolsInput,
   PI_WORLD_TOOL_NAMES,
   PiWorldToolError,
   type PiWorldFetch,
@@ -33,48 +34,39 @@ const promptly = <T>(promise: Promise<T>, maximumMs = 250): Promise<T> => new Pr
     (error: unknown) => { clearTimeout(timer); reject(error); }
   );
 });
+const createBoundTools = (
+  input: Omit<CreatePiWorldToolsInput, "contextRef">,
+  authority = "decision-red",
+): WorldTool[] => createPiWorldTools({
+  ...input,
+  contextRef: {
+    current: Object.freeze({
+      decisionToken: authority,
+      requestId: "request-bound",
+      wakeId: "wake-bound",
+    }),
+  },
+});
 
-test("preserves the exact six unbound tools and projects each call onto the base JSON contract", async () => {
-  const calls: Array<{ url: string; authorization: string; body: unknown }> = [];
+test("preserves six token-free unbound tools that fail closed without private wake context", async () => {
+  let fetchCalls = 0;
   let environmentReads = 0;
-  const fetch: PiWorldFetch = async (url, init) => {
-    const authorization = new Headers(init?.headers).get("authorization") ?? "";
-    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    calls.push({ url: String(url), authorization, body });
-    return response({ operation: String(url).split("/").at(-1) });
-  };
   const tools = createPiWorldTools({
     world: { url: "http://simfile-world:19972/v1/world", tokenEnv: "RED_WORLD_TOKEN" },
     readEnvironment: (name) => { environmentReads += 1; return name === "RED_WORLD_TOKEN" ? "red-bearer" : undefined; },
-    fetch
+    fetch: async () => { fetchCalls += 1; return response({ ok: true }); },
   });
   assert.deepEqual(tools.map((candidate) => candidate.name),
     PI_WORLD_TOOL_NAMES.filter((name) => name !== "world_claim"));
-
-  const cases: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
-    ["world_status", { decision_token: "decision-red" }, { decision_token: "decision-red" }],
-    ["world_capabilities", { decision_token: "decision-red" }, { decision_token: "decision-red" }],
-    ["world_observe", { decision_token: "decision-red", sense: "world://pitch/sense/vision" }, { decision_token: "decision-red", sense: "world://pitch/sense/vision" }],
-    ["world_affordances", { decision_token: "decision-red" }, { decision_token: "decision-red" }],
-    ["world_act", { decision_token: "decision-red", request_id: "request-1", affordance: "world://pitch/affordance/kick", target: "world://pitch/entity/ball", input: { force: 1 } },
-      { decision_token: "decision-red", request_id: "request-1", affordance: "world://pitch/affordance/kick", target: "world://pitch/entity/ball", input: { force: 1 } }],
-    ["world_ledger", { decision_token: "decision-red", limit: 10 }, { decision_token: "decision-red", version: WORLD_ACTION_RESULT_PAGE_REQUEST_VERSION, limit: 10 }]
-  ];
-  for (const [name, params] of cases) {
-    const output = await execute(tool(tools, name), params);
-    assert.equal(output.content[0]?.type, "text");
-    assert.equal((output.details as { operation: string }).operation, name.slice("world_".length));
-  }
-  assert.equal(environmentReads, cases.length);
-  assert.deepEqual(calls.map((call) => call.url), cases.map(([name]) => `http://simfile-world:19972/v1/world/${name.slice("world_".length)}`));
-  assert.ok(calls.every((call) => call.authorization === "Bearer red-bearer"));
-  assert.deepEqual(calls.map((call) => call.body), cases.map((entry) => entry[2]));
   for (const candidate of tools) {
     const properties = (candidate.parameters as unknown as { properties: Record<string, unknown> }).properties;
-    for (const forbidden of ["principal", "actor", "url", "token", "tokenEnv", "authorization"]) {
+    for (const forbidden of ["principal", "actor", "url", "token", "tokenEnv", "authorization", "decision_token", "decision_id"]) {
       assert.equal(Object.hasOwn(properties, forbidden), false);
     }
+    await assert.rejects(execute(candidate, {}), rejectedCode("world_request_denied"));
   }
+  assert.equal(environmentReads, 0);
+  assert.equal(fetchCalls, 0);
 });
 
 test("claims schedule-wake authority without exposing the returned token", async () => {
@@ -100,7 +92,7 @@ test("claims schedule-wake authority without exposing the returned token", async
   assert.deepEqual(Object.keys((claim.parameters as { properties: object }).properties), []);
   await assert.rejects(execute(status, {}), rejectedCode("world_request_invalid"));
   const output = await execute(claim, {});
-  assert.deepEqual(output.details, { claimed: true, decision_id: "decision-1",
+  assert.deepEqual(output.details, { claimed: true,
     issued_at_tick: 8, valid_through_tick: 30_008 });
   assert.equal(JSON.stringify(output).includes("opaque-decision-1"), false);
   assert.equal(contextRef.current?.decisionToken, "opaque-decision-1");
@@ -181,7 +173,7 @@ test("accepts only an exact canonical world base and named environment binding",
   ];
   for (const world of invalid) {
     assert.throws(
-      () => createPiWorldTools({ world: world as never, fetch: async () => response({ ok: true }) }),
+      () => createBoundTools({ world: world as never, fetch: async () => response({ ok: true }) }),
       { name: "TypeError", message: "invalid Pi world tool configuration" }
     );
   }
@@ -194,11 +186,11 @@ test("reads the named bearer at call time and isolates per-agent bindings", asyn
     seen.push(new Headers(init?.headers).get("authorization") ?? "");
     return response({ ok: true });
   };
-  const red = createPiWorldTools({ world: { url: "http://world/v1/world", tokenEnv: "RED_WORLD_TOKEN" }, fetch, readEnvironment: (name) => environment[name] });
-  const blue = createPiWorldTools({ world: { url: "http://world/v1/world", tokenEnv: "BLUE_WORLD_TOKEN" }, fetch, readEnvironment: (name) => environment[name] });
+  const red = createBoundTools({ world: { url: "http://world/v1/world", tokenEnv: "RED_WORLD_TOKEN" }, fetch, readEnvironment: (name) => environment[name] });
+  const blue = createBoundTools({ world: { url: "http://world/v1/world", tokenEnv: "BLUE_WORLD_TOKEN" }, fetch, readEnvironment: (name) => environment[name] });
   environment.RED_WORLD_TOKEN = "red-second";
-  await execute(tool(red, "world_status"), { decision_token: "red-decision" });
-  await execute(tool(blue, "world_status"), { decision_token: "blue-decision" });
+  await execute(tool(red, "world_status"), {});
+  await execute(tool(blue, "world_status"), {});
   assert.deepEqual(seen, ["Bearer red-second", "Bearer blue-only"]);
 });
 
@@ -206,7 +198,7 @@ test("retries one ambiguous transport failure with identical act bytes and no cr
   const bodies: string[] = [];
   const headers: string[] = [];
   let attempts = 0, reads = 0;
-  const tools = createPiWorldTools({
+  const tools = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
     readEnvironment: () => { reads += 1; return "stable-bearer"; },
     fetch: async (_url, init) => {
@@ -218,8 +210,6 @@ test("retries one ambiguous transport failure with identical act bytes and no cr
     }
   });
   const output = await execute(tool(tools, "world_act"), {
-    decision_token: "decision-red",
-    request_id: "stable-request-1",
     affordance: "world://pitch/affordance/kick",
     target: "world://pitch/entity/ball",
     input: { force: 1 }
@@ -234,7 +224,7 @@ test("retries one ambiguous transport failure with identical act bytes and no cr
 test("retries one HTTP 408 act response with the exact same serialized request", async () => {
   const bodies: string[] = [];
   let attempts = 0;
-  const tools = createPiWorldTools({
+  const tools = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
     readEnvironment: () => "stable-bearer",
     fetch: async (_url, init) => {
@@ -244,8 +234,6 @@ test("retries one HTTP 408 act response with the exact same serialized request",
     }
   });
   const output = await execute(tool(tools, "world_act"), {
-    decision_token: "decision-red",
-    request_id: "stable-request-408",
     affordance: "world://pitch/affordance/kick",
     target: "world://pitch/entity/ball",
     input: { force: 1 }
@@ -259,22 +247,22 @@ test("never retries HTTP rejection and never exposes bearer, response, or transp
   const bearer = "secret-bearer-canary";
   const responseCanary = "secret-response-canary";
   let calls = 0;
-  const rejected = createPiWorldTools({
+  const rejected = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
     readEnvironment: () => bearer,
     fetch: async () => { calls += 1; return new Response(responseCanary, { status: 401 }); }
   });
-  await assert.rejects(execute(tool(rejected, "world_status"), { decision_token: "decision-red" }),
+  await assert.rejects(execute(tool(rejected, "world_status"), {}),
     rejectedCode("world_request_denied", [bearer, responseCanary]));
   assert.equal(calls, 1);
 
   calls = 0;
-  const unavailable = createPiWorldTools({
+  const unavailable = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
     readEnvironment: () => bearer,
     fetch: async () => { calls += 1; throw new TypeError("secret-transport-canary"); }
   });
-  await assert.rejects(execute(tool(unavailable, "world_status"), { decision_token: "decision-red" }),
+  await assert.rejects(execute(tool(unavailable, "world_status"), {}),
     rejectedCode("world_transport_unavailable", [bearer, "secret-transport-canary"]));
   assert.equal(calls, 1);
 });
@@ -285,32 +273,32 @@ test("honors caller cancellation and an overall timeout without retry", async ()
     calls += 1;
     return new Promise<Response>(() => {});
   };
-  const cancelledTools = createPiWorldTools({
+  const cancelledTools = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" }, fetch: waitingFetch, readEnvironment: () => "bearer"
   });
   const caller = new AbortController();
-  const cancelled = execute(tool(cancelledTools, "world_status"), { decision_token: "decision-red" }, caller.signal);
+  const cancelled = execute(tool(cancelledTools, "world_status"), {}, caller.signal);
   caller.abort();
   await assert.rejects(cancelled, rejectedCode("world_request_cancelled", ["secret-canary"]));
   assert.equal(calls, 1);
 
   calls = 0;
-  const timedTools = createPiWorldTools({
+  const timedTools = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" }, fetch: waitingFetch,
     readEnvironment: () => "bearer", timeoutMs: 10
   });
-  await assert.rejects(execute(tool(timedTools, "world_status"), { decision_token: "decision-red" }),
+  await assert.rejects(execute(tool(timedTools, "world_status"), {}),
     rejectedCode("world_request_timeout", ["secret-canary"]));
   assert.equal(calls, 1);
 });
 
 test("fails closed for missing auth and oversized or malformed successful responses", async () => {
   let calls = 0;
-  const missing = createPiWorldTools({
+  const missing = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" }, readEnvironment: () => undefined,
     fetch: async () => { calls += 1; return response({ ok: true }); }
   });
-  await assert.rejects(execute(tool(missing, "world_status"), { decision_token: "decision-red" }), rejectedCode("world_auth_unavailable"));
+  await assert.rejects(execute(tool(missing, "world_status"), {}), rejectedCode("world_auth_unavailable"));
   assert.equal(calls, 0);
 
   for (const value of [
@@ -318,24 +306,27 @@ test("fails closed for missing auth and oversized or malformed successful respon
     new Response("secret-response-canary", { headers: { "content-type": "application/json" } }),
     new Response("{}", { headers: { "content-type": "application/jsonx" } })
   ]) {
-    const tools = createPiWorldTools({
+    const tools = createBoundTools({
       world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" }, readEnvironment: () => "bearer",
       maxResponseBytes: 128, fetch: async () => value
     });
-    await assert.rejects(execute(tool(tools, "world_status"), { decision_token: "decision-red" }),
+    await assert.rejects(execute(tool(tools, "world_status"), {}),
       rejectedCode("world_response_invalid", ["secret-response-canary"]));
   }
 });
 
-test("fails closed when a successful response echoes the call-time bearer", async () => {
+test("fails closed when a successful response echoes the bearer or private authority", async () => {
   const bearer = "secret-bearer-canary";
-  const tools = createPiWorldTools({
-    world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
-    readEnvironment: () => bearer,
-    fetch: async () => response({ result: { authorization: `Bearer ${bearer}` } })
-  });
-  await assert.rejects(execute(tool(tools, "world_status"), { decision_token: "decision-red" }),
-    rejectedCode("world_response_invalid", [bearer, `Bearer ${bearer}`]));
+  const authority = "secret-private-authority-canary";
+  for (const leaked of [`Bearer ${bearer}`, authority]) {
+    const tools = createBoundTools({
+      world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
+      readEnvironment: () => bearer,
+      fetch: async () => response({ result: { leaked } })
+    }, authority);
+    await assert.rejects(execute(tool(tools, "world_status"), {}),
+      rejectedCode("world_response_invalid", [bearer, authority]));
+  }
 });
 
 test("turns hostile response inspection and a locked successful body into fixed diagnostics", async () => {
@@ -347,23 +338,23 @@ test("turns hostile response inspection and a locked successful body into fixed 
       return Reflect.get(target, property, receiver);
     }
   });
-  const hostileTools = createPiWorldTools({
+  const hostileTools = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
     readEnvironment: () => bearer,
     fetch: async () => hostile
   });
-  await assert.rejects(execute(tool(hostileTools, "world_status"), { decision_token: "decision-red" }),
+  await assert.rejects(execute(tool(hostileTools, "world_status"), {}),
     rejectedCode("world_response_invalid", [bearer, hostileCanary]));
 
   const locked = response({ ok: true });
   const reader = locked.body?.getReader();
   assert.ok(reader);
-  const lockedTools = createPiWorldTools({
+  const lockedTools = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
     readEnvironment: () => bearer,
     fetch: async () => locked
   });
-  await assert.rejects(execute(tool(lockedTools, "world_status"), { decision_token: "decision-red" }),
+  await assert.rejects(execute(tool(lockedTools, "world_status"), {}),
     rejectedCode("world_response_invalid", [bearer, "locked"]));
   reader.releaseLock();
 });
@@ -374,23 +365,23 @@ test("caller abort and timeout settle while hostile response cancellation remain
     pull: () => new Promise<void>(() => {}),
     cancel: () => { cancelCalls += 1; return new Promise<void>(() => {}); }
   }), { headers: { "content-type": "application/json" } });
-  const cancelledTools = createPiWorldTools({
+  const cancelledTools = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
     readEnvironment: () => "bearer",
     fetch: async () => hostileResponse()
   });
   const caller = new AbortController();
-  const executing = execute(tool(cancelledTools, "world_status"), { decision_token: "decision-red" }, caller.signal);
+  const executing = execute(tool(cancelledTools, "world_status"), {}, caller.signal);
   setImmediate(() => caller.abort());
   await assert.rejects(promptly(executing), rejectedCode("world_request_cancelled", ["locked", "release"]));
 
-  const timedTools = createPiWorldTools({
+  const timedTools = createBoundTools({
     world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
     readEnvironment: () => "bearer",
     fetch: async () => hostileResponse(),
     timeoutMs: 10
   });
-  await assert.rejects(promptly(execute(tool(timedTools, "world_status"), { decision_token: "decision-red" })),
+  await assert.rejects(promptly(execute(tool(timedTools, "world_status"), {})),
     rejectedCode("world_request_timeout", ["locked", "release"]));
   assert.equal(cancelCalls, 2);
 });
