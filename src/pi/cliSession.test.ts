@@ -117,7 +117,7 @@ test("CLI adapter mounts the harness tool objects and preserves the causal wake 
     assert.equal(JSON.stringify(result).includes(decisionToken), false);
     assert.equal(JSON.stringify(result).includes(bearer), false);
     assert.deepEqual(captured[0]?.customTools?.map((tool) => tool.name).filter((name) => name.startsWith("world_")), [
-      "world_status", "world_capabilities", "world_observe", "world_affordances", "world_act", "world_ledger"
+      "world_claim", "world_status", "world_capabilities", "world_observe", "world_affordances", "world_act", "world_ledger"
     ]);
     assert.strictEqual(mounted[0], captured[0]?.customTools);
     assert.equal(calls.length, 2);
