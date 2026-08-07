@@ -4,6 +4,7 @@ import test from "node:test";
 import type { WakeEvent } from "../core/types.js";
 import {
   formatWorldWakePrompt,
+  worldWakeContext,
   worldTurnContext,
   WORLD_NUDGE_VERSION
 } from "./worldNudge.js";
@@ -18,6 +19,19 @@ const event = (text: string): WakeEvent => ({
     sender: "world",
     target: "red",
     contextId: "dm:red:world"
+  }
+});
+
+test("synthesizes readonly claim identity for manual, message, and schedule wakes", () => {
+  for (const kind of ["manual", "message", "schedule"] as const) {
+    const context = worldWakeContext({ id: `${kind}-wake`, kind, text: "strategy" });
+    assert.equal(context.wakeId, `${kind}-wake`);
+    assert.match(context.requestId, /^daimon-[a-f0-9]{64}$/u);
+    assert.equal(context.decisionToken, undefined);
+    assert.equal(Object.isFrozen(context), true);
+    const prompt = formatWorldWakePrompt(context);
+    assert.match(prompt, /Call world_claim/u);
+    assert.doesNotMatch(prompt, /decision_token|Bearer/u);
   }
 });
 

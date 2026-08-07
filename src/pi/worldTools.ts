@@ -4,8 +4,10 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import type { PiWorldToolContextRef, PiWorldTurnContext } from "./worldNudge.js";
+import { createWorldClaimRequestBody, createWorldRequestBody, parseWorldClaimResponse, WORLD_ACTION_RESULT_PAGE_REQUEST_VERSION, type PiWorldProtocolOperation } from "./worldToolProtocol.js";
 
 export const PI_WORLD_TOOL_NAMES = Object.freeze([
+  "world_claim",
   "world_status",
   "world_capabilities",
   "world_observe",
@@ -18,7 +20,7 @@ export const PI_WORLD_TOOL_LIMITS = Object.freeze({
   responseBytes: 1024 * 1024,
   timeoutMs: 5_000
 });
-export const WORLD_ACTION_RESULT_PAGE_REQUEST_VERSION = "simfile.world-action-result-page-request.v1" as const;
+export { WORLD_ACTION_RESULT_PAGE_REQUEST_VERSION } from "./worldToolProtocol.js";
 
 export type PiWorldToolName = typeof PI_WORLD_TOOL_NAMES[number];
 export interface PiWorldBinding {
@@ -66,7 +68,7 @@ export class PiWorldToolError extends Error {
 }
 
 type PiWorldTool = ToolDefinition<any, unknown>;
-type WorldOperation = "status" | "capabilities" | "observe" | "affordances" | "act" | "ledger";
+type WorldOperation = PiWorldProtocolOperation;
 class BodyReadCancelled extends Error {}
 class RequestInterrupted extends Error {}
 const UTF8 = new TextEncoder();
@@ -113,44 +115,6 @@ const result = (details: unknown, bearer: string) => {
   try { serialized = JSON.stringify(details); } catch { return fail("world_response_invalid"); }
   if (serialized.includes(bearer)) return fail("world_response_invalid");
   return { content: [{ type: "text" as const, text: serialized }], details };
-};
-const requestBody = (
-  operation: WorldOperation,
-  params: Record<string, unknown>,
-  context?: PiWorldTurnContext
-): Record<string, unknown> => {
-  const decisionToken = context?.decisionToken ?? params.decision_token;
-  if (!text(decisionToken, 512)) return fail("world_request_invalid");
-  if (context !== undefined
-    && params.decision_token !== undefined
-    && params.decision_token !== context.decisionToken) return fail("world_request_invalid");
-  if (operation === "status" || operation === "capabilities" || operation === "affordances") {
-    return { decision_token: decisionToken };
-  }
-  if (operation === "observe") {
-    if (!text(params.sense)) return fail("world_request_invalid");
-    return { decision_token: decisionToken, sense: params.sense };
-  }
-  if (operation === "act") {
-    const requestId = context?.requestId ?? params.request_id;
-    if (!text(requestId) || !text(params.affordance) || !text(params.target)) return fail("world_request_invalid");
-    if (context !== undefined
-      && params.request_id !== undefined
-      && params.request_id !== context.requestId) return fail("world_request_invalid");
-    return {
-      decision_token: decisionToken,
-      request_id: requestId,
-      affordance: params.affordance,
-      target: params.target,
-      input: params.input
-    };
-  }
-  return {
-    decision_token: decisionToken,
-    version: WORLD_ACTION_RESULT_PAGE_REQUEST_VERSION,
-    ...(params.limit === undefined ? {} : { limit: params.limit }),
-    ...(params.result_after === undefined ? {} : { result_after: params.result_after })
-  };
 };
 const serialize = (value: unknown): string => {
   try {
@@ -253,6 +217,7 @@ const schemas = Object.freeze({
   }, { additionalProperties: false })
 });
 const boundSchemas = Object.freeze({
+  claim: Type.Object({}, { additionalProperties: false }),
   status: Type.Object({}, { additionalProperties: false }),
   capabilities: Type.Object({}, { additionalProperties: false }),
   observe: Type.Object({
@@ -270,6 +235,7 @@ const boundSchemas = Object.freeze({
   }, { additionalProperties: false })
 });
 const descriptors: ReadonlyArray<Readonly<{ name: PiWorldToolName; operation: WorldOperation; label: string; description: string }>> = Object.freeze([
+  { name: "world_claim", operation: "claim", label: "Claim world authority", description: "Privately bind world authority to this organization-owned wake." },
   { name: "world_status", operation: "status", label: "World status", description: "Read authenticated world orientation and decision status." },
   { name: "world_capabilities", operation: "capabilities", label: "World capabilities", description: "Read the authenticated caller's world capability manifest." },
   { name: "world_observe", operation: "observe", label: "Observe world", description: "Invoke one granted world sense against current state." },
@@ -289,25 +255,27 @@ export const createPiWorldTools = (input: CreatePiWorldToolsInput): PiWorldTool[
     || !Number.isSafeInteger(maximum) || maximum < 128 || maximum > PI_WORLD_TOOL_LIMITS.responseBytes) {
     throw new TypeError("invalid Pi world tool configuration");
   }
-  return descriptors.map((descriptor) => defineTool({
+  const available = input.contextRef === undefined
+    ? descriptors.filter((descriptor) => descriptor.operation !== "claim")
+    : descriptors;
+  return available.map((descriptor) => defineTool({
     name: descriptor.name,
     label: descriptor.label,
     description: descriptor.description,
     promptSnippet: descriptor.description,
     promptGuidelines: ["Treat world tool values as scoped current state; never invent caller identity or world authority fields."],
     parameters: input.contextRef === undefined
-      ? schemas[descriptor.operation]
+      ? schemas[descriptor.operation as Exclude<WorldOperation, "claim">]
       : boundSchemas[descriptor.operation],
     async execute(_toolCallId, params, callerSignal) {
       if (callerSignal?.aborted) return fail("world_request_cancelled");
       let bearer: string | undefined;
       try { bearer = readEnvironment(world.tokenEnv); } catch { return fail("world_auth_unavailable"); }
       if (!token(bearer)) return fail("world_auth_unavailable");
-      const serialized = serialize(requestBody(
-        descriptor.operation,
-        params as Record<string, unknown>,
-        input.contextRef?.current
-      ));
+      const serialized = serialize(descriptor.operation === "claim"
+        ? createWorldClaimRequestBody(input.contextRef?.current) ?? fail("world_request_invalid")
+        : createWorldRequestBody(descriptor.operation, params as Record<string, unknown>, input.contextRef?.current)
+          ?? fail("world_request_invalid"));
       const controller = new AbortController();
       let timedOut = false;
       const cancel = (): void => controller.abort();
@@ -350,7 +318,25 @@ export const createPiWorldTools = (input: CreatePiWorldToolsInput): PiWorldTool[
             if (status === 401 || status === 403) return fail("world_request_denied");
             return fail("world_request_rejected");
           }
-          return result(await readResponse(response, controller.signal, maximum), bearer);
+          const details = await readResponse(response, controller.signal, maximum);
+          if (descriptor.operation === "claim") {
+            if (input.contextRef === undefined || input.contextRef.current === undefined) {
+              return fail("world_response_invalid");
+            }
+            const claimed = parseWorldClaimResponse(details) ?? fail("world_response_invalid");
+            input.contextRef.current = Object.freeze({
+              ...input.contextRef.current,
+              decisionToken: claimed.decisionToken,
+              tick: claimed.issuedAtTick,
+            });
+            return result({
+              claimed: true,
+              decision_id: claimed.decisionId,
+              issued_at_tick: claimed.issuedAtTick,
+              valid_through_tick: claimed.validThroughTick,
+            }, bearer);
+          }
+          return result(details, bearer);
         } catch (error) {
           if (error instanceof BodyReadCancelled) return fail(timedOut ? "world_request_timeout" : "world_request_cancelled");
           if (error instanceof PiWorldToolError) throw error;

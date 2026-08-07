@@ -40,7 +40,7 @@ import {
 } from "./rawTrainingCapture.js";
 import {
   formatWorldWakePrompt,
-  worldTurnContext,
+  worldWakeContext,
   type PiWorldToolContextRef
 } from "./worldNudge.js";
 import {
@@ -250,11 +250,11 @@ export class PiAgentHandle implements AgentHandle {
     });
     const worldContext = this.worldToolContext === undefined
       ? undefined
-      : worldTurnContext(event);
+      : worldWakeContext(event);
     const safeWakeText = worldContext === undefined
       ? event.text
       : formatWorldWakePrompt(worldContext);
-    const worldTrajectory = worldContext === undefined
+    const worldTrajectory = worldContext?.decisionToken === undefined
       ? undefined
       : createPiWorldTrajectoryCapture();
     const request = {

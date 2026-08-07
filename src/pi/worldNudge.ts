@@ -5,10 +5,10 @@ import type { WakeEvent } from "../core/types.js";
 export const WORLD_NUDGE_VERSION = "simfile.world-nudge.v1" as const;
 
 export interface PiWorldTurnContext {
-  readonly decisionToken: string;
+  readonly decisionToken?: string;
   readonly requestId: string;
-  readonly runId: string;
-  readonly tick: number;
+  readonly runId?: string;
+  readonly tick?: number;
   readonly wakeId: string;
 }
 
@@ -61,11 +61,20 @@ export const worldTurnContext = (event: WakeEvent): PiWorldTurnContext | undefin
   });
 };
 
+/** Creates claimable turn-local identity for every organization-owned wake. */
+export const worldWakeContext = (event: WakeEvent): PiWorldTurnContext =>
+  worldTurnContext(event) ?? Object.freeze({
+    requestId: `daimon-${createHash("sha256").update(event.id).digest("hex")}`,
+    wakeId: event.id,
+  });
+
 export const formatWorldWakePrompt = (context: PiWorldTurnContext): string => [
-  "World decision wake:",
-  `- run_id: ${context.runId}`,
-  `- tick: ${context.tick}`,
+  context.decisionToken === undefined ? "World-capable organization wake:" : "World decision wake:",
+  ...(context.runId === undefined ? [] : [`- run_id: ${context.runId}`]),
+  ...(context.tick === undefined ? [] : [`- tick: ${context.tick}`]),
   "",
-  "The harness already bound this wake's authority to the world tools.",
+  context.decisionToken === undefined
+    ? "Call world_claim before using the other world tools. The harness keeps authority private."
+    : "The harness already bound this wake's authority to the world tools.",
   "Observe current state and perform one allowed action now."
 ].join("\n");

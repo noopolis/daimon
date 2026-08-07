@@ -34,7 +34,7 @@ const promptly = <T>(promise: Promise<T>, maximumMs = 250): Promise<T> => new Pr
   );
 });
 
-test("exposes the exact six tools and projects each call onto the B25 JSON contract", async () => {
+test("preserves the exact six unbound tools and projects each call onto the base JSON contract", async () => {
   const calls: Array<{ url: string; authorization: string; body: unknown }> = [];
   let environmentReads = 0;
   const fetch: PiWorldFetch = async (url, init) => {
@@ -48,7 +48,8 @@ test("exposes the exact six tools and projects each call onto the B25 JSON contr
     readEnvironment: (name) => { environmentReads += 1; return name === "RED_WORLD_TOKEN" ? "red-bearer" : undefined; },
     fetch
   });
-  assert.deepEqual(tools.map((candidate) => candidate.name), PI_WORLD_TOOL_NAMES);
+  assert.deepEqual(tools.map((candidate) => candidate.name),
+    PI_WORLD_TOOL_NAMES.filter((name) => name !== "world_claim"));
 
   const cases: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
     ["world_status", { decision_token: "decision-red" }, { decision_token: "decision-red" }],
@@ -74,6 +75,45 @@ test("exposes the exact six tools and projects each call onto the B25 JSON contr
       assert.equal(Object.hasOwn(properties, forbidden), false);
     }
   }
+});
+
+test("claims schedule-wake authority without exposing the returned token", async () => {
+  const bodies: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const contextRef: PiWorldToolContextRef = {
+    current: Object.freeze({ requestId: "request-schedule-1", wakeId: "schedule-red-1" }),
+  };
+  const tools = createPiWorldTools({
+    world: { url: "http://world/v1/world", tokenEnv: "WORLD_TOKEN" },
+    contextRef,
+    readEnvironment: () => "principal-red-bearer",
+    fetch: async (url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push({ url: String(url), body });
+      return String(url).endsWith("/claim")
+        ? response({ decision_id: "decision-1", decision_token: "opaque-decision-1",
+          issued_at_tick: 8, valid_through_tick: 30_008 })
+        : response({ ok: true });
+    },
+  });
+  const claim = tool(tools, "world_claim");
+  const status = tool(tools, "world_status");
+  assert.deepEqual(Object.keys((claim.parameters as { properties: object }).properties), []);
+  await assert.rejects(execute(status, {}), rejectedCode("world_request_invalid"));
+  const output = await execute(claim, {});
+  assert.deepEqual(output.details, { claimed: true, decision_id: "decision-1",
+    issued_at_tick: 8, valid_through_tick: 30_008 });
+  assert.equal(JSON.stringify(output).includes("opaque-decision-1"), false);
+  assert.equal(contextRef.current?.decisionToken, "opaque-decision-1");
+  assert.equal(contextRef.current?.requestId, "request-schedule-1");
+  assert.equal(contextRef.current?.wakeId, "schedule-red-1");
+  await execute(status, {});
+  await assert.rejects(execute(claim, {}), rejectedCode("world_request_invalid"));
+  assert.deepEqual(bodies, [
+    { url: "http://world/v1/world/claim",
+      body: { request_id: "request-schedule-1", wake_id: "schedule-red-1" } },
+    { url: "http://world/v1/world/status",
+      body: { decision_token: "opaque-decision-1" } },
+  ]);
 });
 
 test("binds wake authority outside the model-visible schemas", async () => {
