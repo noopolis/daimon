@@ -80,8 +80,9 @@ FROM ${NODE_IMAGE} AS local-verify
 ARG RUNTIME_ROOT
 
 COPY --from=local-runtime ${RUNTIME_ROOT} ${RUNTIME_ROOT}
+COPY verifyRuntimeImage.mjs /usr/local/lib/daimon/verifyRuntimeImage.mjs
 
-CMD ["node", "--input-type=module", "-e", "const fs = await import('node:fs/promises'); const root = process.env.RUNTIME_ROOT ?? '/opt/spawnfile/runtime-installs/daimon'; const world = await fs.readFile(root + '/node_modules/@noopolis/daimon/dist/pi/worldTrajectory.js', 'utf8'); const causal = await fs.readFile(root + '/node_modules/@noopolis/mneme/dist/contract/causal.js', 'utf8'); const worldLiteral = 'record?.isError === true\\n        ? record?.result\\n        : resultRecord?.details ?? record?.result'; const worldOk = world.includes(worldLiteral); const mnemeOk = !causal.includes('unset-run'); console.log('world-trajectory failed-result capture: ' + (worldOk ? 'PASS (local discriminator present)' : 'FAIL (cannot distinguish from published 0.1.2)')); console.log('mneme causal.js unset-run: ' + (mnemeOk ? 'PASS (absent)' : 'FAIL (published 0.1.1 likely installed)')); if (!worldOk || !mnemeOk) process.exitCode = 1;"]
+CMD ["node", "--no-warnings", "/usr/local/lib/daimon/verifyRuntimeImage.mjs"]
 
 # Keep registry mode as the Dockerfile's default target.
 FROM scratch AS runtime
