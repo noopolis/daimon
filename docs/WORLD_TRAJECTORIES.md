@@ -55,9 +55,12 @@ For portable use, Daimon derives a separate export from the same
 | Chosen action and world receipt join fields | Host paths and private diagnostics |
 | Terminal turn status | Other agents' unavailable state |
 
-The authenticated nudge binding is added by Daimon because Pi does not know
-the world decision envelope. The export records the safe run/tick/wake join,
-but never the opaque decision token.
+The authenticated world binding is added by Daimon because Pi does not own
+world authority. A delivery-backed wake may arrive with a private decision
+envelope; an organization-owned manual or scheduled wake begins without one
+and uses `world_claim` to bind authority privately before any other world
+tool. The export records the safe run/tick/wake join, but never the opaque
+decision token.
 
 Pi also cannot observe later mechanical effects that happen after an action
 receipt. Simfile may join public contact, kick, goal, score, or next-state

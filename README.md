@@ -5,9 +5,19 @@ Daimon is the Noopolis-native per-agent runtime harness.
 It defines a small per-agent contract and currently implements that contract on
 top of Pi. A Daimon runs one harnessed agent inside a caller-prepared workspace.
 
-Spawnfile should own orgs, nested teams, schedules, Moltnet wiring, workspace
-resource compilation, and the app that starts many harnessed agents. This package
-should not know what an org is.
+Spawnfile compiles and deploys orgs, nested teams, member-owned schedules,
+Moltnet wiring, and workspace resources. Daimon executes one agent runtime: it
+accepts a wake selected by that runtime's organization policy and runs one
+turn. It does not know the org graph, schedule other agents, or let Simfile or
+a world service trigger cognition.
+
+For a world-capable `kind: every` wake, the harness starts without a decision
+token and privately calls `world_claim` before exposing any other world tool.
+The claim binds authority to the schedule wake's run/request/wake identity; the
+opaque token stays inside the harness. Subsequent observe/affordance/action
+calls carry it without placing it in the model prompt or tool schema. Optional
+world recommendations are ordinary observation fields discovered after the
+independent wake and claim—they are never Daimon wake inputs.
 
 ## Install
 
