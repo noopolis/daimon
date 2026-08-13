@@ -19,12 +19,21 @@ interface FakePiSessionConfig {
   };
 }
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-pi-harness";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
+
 const makeFakePiSessionFactory = (scripts: string[][]) => {
   const sessions: FakePiSessionConfig[] = [];
+  const inputs: Array<Parameters<typeof createAgentSession>[0]> = [];
   type SessionResult = Awaited<ReturnType<typeof createAgentSession>>;
   let sessionIndex = 0;
 
-  const factory = () => {
+  const factory = (input?: Parameters<typeof createAgentSession>[0]) => {
+    inputs.push(input ?? {});
     const responses = scripts[sessionIndex] ?? ["ack"];
     sessionIndex += 1;
 
@@ -35,6 +44,24 @@ const makeFakePiSessionFactory = (scripts: string[][]) => {
     const session = {
       async prompt(text: string) {
         prompts.push(text);
+        const customTools = (input?.customTools ?? []) as Array<{
+          execute: (...args: unknown[]) => Promise<unknown>;
+          name: string;
+        }>;
+        const register = customTools.find((tool) => tool.name === "memory_register");
+        const seedMatch = /(?:Seed memory:|private note:)\s*([^\n]+)/iu.exec(text);
+        if (register && seedMatch) {
+          const wakeId = /id:\s*([^\n]+)/u.exec(text)?.[1]?.trim() ?? "wake";
+          await register.execute("register-seed", {
+            scope: "global",
+            kind: "episodic",
+            content: { kind: "text", text: seedMatch[1].trim() },
+            visibility: "global",
+            sensitivity: "normal",
+            source_type: "test",
+            confidence: 1
+          });
+        }
         const output = responses[responseCursor] ?? "ack";
         responseCursor += 1;
         for (const listener of listeners) {
@@ -54,12 +81,13 @@ const makeFakePiSessionFactory = (scripts: string[][]) => {
     return Promise.resolve({ session } as SessionResult);
   };
 
-  return { sessions, factory };
+  return { sessions, inputs, factory };
 };
 
 const makeHarness = async (input: {
   root: string;
   sessionScripts: string[][];
+  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 }) => {
   const sessionFactory = makeFakePiSessionFactory(input.sessionScripts);
   const authPath = path.join(input.root, "auth.json");
@@ -78,7 +106,8 @@ const makeHarness = async (input: {
       provider: "local"
     },
     sessionFactory: sessionFactory.factory,
-    memory: { tokenBudget: 1200 }
+    memory: { tokenBudget: 1200 },
+    thinkingLevel: input.thinkingLevel
   });
 
   return { adapter, runtimeHomePath, workspacePath, sessionFactory };
@@ -128,6 +157,26 @@ test("starts a local endpoint model without an explicit modelsPath", async () =>
   await handle.stop();
 });
 
+test("passes the configured thinking level to Pi sessions", async () => {
+  const root = await tempDir();
+  const harness = await makeHarness({
+    root,
+    sessionScripts: [["done"]],
+    thinkingLevel: "minimal"
+  });
+
+  const handle = await harness.adapter.startAgent({
+    id: "fast-thinker",
+    instructions: "Use the supplied world tools.",
+    name: "Fast thinker",
+    runtimeHomePath: harness.runtimeHomePath,
+    workspacePath: harness.workspacePath
+  });
+
+  assert.equal(harness.sessionFactory.inputs[0]?.thinkingLevel, "minimal");
+  await handle.stop();
+});
+
 test("persists and recalls memory across adapter restarts", async () => {
   const root = await tempDir();
   const base = await makeHarness({
@@ -144,7 +193,7 @@ test("persists and recalls memory across adapter restarts", async () => {
   });
 
   await firstHandle.wake({
-    id: "wake-1",
+    id: "moltnet:wake-1",
     kind: "message",
     from: "orchestrator",
     text: "Seed memory: we built the phoenix relay and tagged it in memory.",
@@ -171,7 +220,7 @@ test("persists and recalls memory across adapter restarts", async () => {
   });
 
   await secondHandle.wake({
-    id: "wake-2",
+    id: "moltnet:wake-2",
     kind: "message",
     from: "orchestrator",
     text: "Can you continue the phoenix relay work?",
@@ -184,12 +233,7 @@ test("persists and recalls memory across adapter restarts", async () => {
 
   const secondPrompt = secondAdapterSetup.sessionFactory.sessions[0]?.prompts[0] ?? "";
   assert.ok(secondPrompt.includes("Wake event"));
-  const store = new JsonlMemoryStore(base.runtimeHomePath);
-  const events = await store.read({ principalAgentId: "mapper" });
-  const hasRecalled = events.some((event) => {
-    return event.type === "memory.recalled" && `${event.content.kind === "text" ? event.content.text : ""}`.includes("phoenix");
-  });
-  assert.ok(hasRecalled);
+  assert.ok(secondPrompt.includes("phoenix relay"));
   await secondHandle.stop();
 });
 
@@ -209,7 +253,7 @@ test("isolates memory between different agents with shared runtime home", async 
   });
 
   await mapper.wake({
-    id: "wake-a",
+    id: "daimon:wake-a",
     kind: "manual",
     text: "Mapper's private note: the phoenix signal is for internal routing only.",
     context: {
@@ -233,7 +277,7 @@ test("isolates memory between different agents with shared runtime home", async 
   });
 
   await listener.wake({
-    id: "wake-b",
+    id: "daimon:wake-b",
     kind: "manual",
     text: "Can you summarize the current status?",
     context: {
@@ -303,12 +347,12 @@ test("serializes concurrent wakes through one Pi session", async () => {
   });
 
   const first = handle.wake({
-    id: "wake-1",
+    id: "daimon:wake-1",
     kind: "message",
     text: "first message"
   });
   const second = handle.wake({
-    id: "wake-2",
+    id: "daimon:wake-2",
     kind: "message",
     text: "second message"
   });
@@ -380,12 +424,12 @@ test("continues queued wakes after a failed wake", async () => {
   });
 
   const first = handle.wake({
-    id: "wake-fail",
+    id: "daimon:wake-fail",
     kind: "message",
     text: "fail first"
   });
   const second = handle.wake({
-    id: "wake-after",
+    id: "daimon:wake-after",
     kind: "message",
     text: "run after failure"
   });

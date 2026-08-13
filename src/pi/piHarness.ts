@@ -4,39 +4,39 @@ import path from "node:path";
 import {
   AuthStorage,
   createAgentSession,
-  createExtensionRuntime,
-  ModelRegistry,
-  type ResourceLoader,
+  type ModelRegistry,
   SessionManager,
   SettingsManager
 } from "@earendil-works/pi-coding-agent";
+import { createMemoryRuntime, type MemoryAuthorityConfig } from "@noopolis/mneme";
 
-import type {
-  AgentHandle,
-  AgentHarnessAdapter,
-  AgentStartInput,
-  AgentStatus,
-  HarnessModelSpec,
-  WakeEvent,
-  WakeResult
-} from "../core/types.js";
+import type { AgentHandle, AgentHarnessAdapter, AgentStartInput, HarnessModelSpec } from "../core/types.js";
 
 import { resolvePiHarnessModel } from "./modelConfig.js";
+import { createPiModelRegistry } from "./modelRegistry.js";
 import { createPiMemoryTools, piMemoryToolNames, type PiMemoryToolContextRef } from "./memoryTools.js";
+import { createResourceLoader } from "./prompts.js";
+import { PiAgentHandle, type PiNativeSessionCreator, type PiSessionCreator, type PiSessionLike } from "./piAgentHandle.js";
+import { createPiWorldTools, piWorldToolNames, type PiWorldBinding } from "./worldTools.js";
+import type { PiWorldToolContextRef } from "./worldNudge.js";
 import {
-  createMemoryRuntime,
-  memoryScopeId,
-  readMemoryContext,
-  type MemoryPacket,
-  type MemoryPrepareTurnResult,
-  type MemoryRuntime
-} from "@noopolis/mneme";
+  bindPiRawTrainingCapture,
+  validatePiRawTrainingCaptureOptions,
+  type PiRawTrainingCaptureOptions,
+  type PiRawTrainingCaptureRef
+} from "./rawTrainingCapture.js";
 
-type TextBlock = { type: "text"; text: string };
+type HarnessMemoryEmbeddingProvider = {
+  dimensions?: number;
+  embed(text: string): Promise<number[]>;
+};
 
-export interface PiHarnessOptions {
+export type PiThinkingLevel = NonNullable<
+  NonNullable<Parameters<typeof createAgentSession>[0]>["thinkingLevel"]
+>;
+
+type PiHarnessBaseOptions = {
   authPath: string;
-  sessionFactory?: PiSessionFactory;
   model?: {
     auth?: HarnessModelSpec["auth"];
     endpoint?: HarnessModelSpec["endpoint"];
@@ -45,260 +45,32 @@ export interface PiHarnessOptions {
   };
   modelsPath?: string;
   memory?: {
+    authority?: MemoryAuthorityConfig;
+    embeddingProvider?: HarnessMemoryEmbeddingProvider;
     source?: string;
     tokenBudget?: number;
+    runtimeHomePath?: string;
   };
-}
-
-export type PiSessionFactory = (
-  input: Parameters<typeof createAgentSession>[0]
-) => ReturnType<typeof createAgentSession>;
-
-const createModelRegistry = (
-  authStorage: AuthStorage,
-  options: PiHarnessOptions
-): ModelRegistry => {
-  const registry = options.modelsPath
-    ? ModelRegistry.create(authStorage, options.modelsPath)
-    : ModelRegistry.inMemory(authStorage);
-
-  if (!options.modelsPath && options.model?.endpoint) {
-    const { modelsConfig } = resolvePiHarnessModel(options.model);
-    for (const [provider, config] of Object.entries(modelsConfig.providers)) {
-      registry.registerProvider(provider, {
-        api: config.api,
-        apiKey: config.apiKey,
-        baseUrl: config.baseUrl,
-        models: config.models
-      });
-    }
-  }
-
-  return registry;
+  thinkingLevel?: PiThinkingLevel;
+  world?: PiWorldBinding;
 };
 
-const fallbackPacket = (input: WakeEvent): MemoryPacket => ({
-  principal: {
-    agentId: "unknown",
-    scope: "global"
-  },
-  sections: [{ heading: "Wake event", text: formatWakePrompt(input) }],
-  rawHint: "memory bypass active"
-});
-
-const extractOutputText = (chunks: string[]): string => chunks.join("\n").trim();
-
-class PiAgentHandle implements AgentHandle {
-  private state: AgentStatus["state"] = "idle";
-  private lastWakeAt: string | undefined;
-  private lastError: string | undefined;
-  private wakeQueue: Promise<void> = Promise.resolve();
-
-  constructor(
-    readonly id: string,
-    private readonly session: Awaited<ReturnType<typeof createAgentSession>>["session"],
-    private readonly memory?: MemoryRuntime,
-    private readonly memoryToolContext?: PiMemoryToolContextRef
-  ) {}
-
-  async wake(event: WakeEvent): Promise<WakeResult> {
-    const queued = this.wakeQueue.then(
-      () => this.runWake(event),
-      () => this.runWake(event)
-    );
-    this.wakeQueue = queued.then(
-      () => undefined,
-      () => undefined
-    );
-    return queued;
+export type PiHarnessOptions = PiHarnessBaseOptions & (
+  | {
+    rawTrainingCapture?: PiRawTrainingCaptureOptions;
+    sessionFactory?: never;
   }
-
-  private async runWake(event: WakeEvent): Promise<WakeResult> {
-    const startedAt = Date.now();
-    const chunks: string[] = [];
-    const toolEvents: unknown[] = [];
-    this.state = "running";
-    this.lastWakeAt = new Date().toISOString();
-    this.lastError = undefined;
-
-    const unsubscribe = this.session.subscribe((piEvent) => {
-      if (piEvent && typeof piEvent === "object" && "type" in piEvent && piEvent.type !== "turn_end") {
-        toolEvents.push(piEvent);
-      }
-
-      if (piEvent.type !== "turn_end") {
-        return;
-      }
-      const message = piEvent.message as { content?: unknown };
-      const content = message.content;
-      if (typeof content === "string") {
-        chunks.push(content);
-      } else if (Array.isArray(content)) {
-        chunks.push(
-          content
-            .filter((item): item is TextBlock => {
-              const candidate = item as Partial<TextBlock>;
-              return candidate.type === "text" && typeof candidate.text === "string";
-            })
-            .map((item) => item.text)
-            .join("")
-        );
-      }
-    });
-
-    const memoryContext = readMemoryContext({
-      kind: event.kind,
-      id: event.id,
-      from: event.from,
-      text: event.text,
-      context: event.context
-    });
-    const request = {
-      eventId: event.id,
-      kind: event.kind,
-      text: event.text,
-      from: event.from,
-      context: memoryContext
-    };
-
-    let prepared: MemoryPrepareTurnResult | undefined;
-    let promptText = formatWakePrompt(event);
-
-    try {
-      if (this.memory) {
-        prepared = await this.memory.prepareTurn(request);
-        promptText = prepared.promptText;
-        if (this.memoryToolContext) {
-          this.memoryToolContext.current = {
-            wakeId: event.id,
-            threadId: `${memoryContext.networkId ?? "local"}:${memoryContext.roomId ?? event.from ?? "manual"}`,
-            principal: prepared.principal,
-            conversationScope: memoryScopeId(prepared.principal),
-            audienceKey: memoryContext.roomId ?? event.from ?? this.id,
-            transport: "in_process"
-          };
-        }
-      }
-
-      await this.session.prompt(promptText, { expandPromptTemplates: false });
-      this.state = "idle";
-      const outputText = extractOutputText(chunks);
-
-      if (this.memory) {
-        const promptPacket = prepared?.packet ?? fallbackPacket(event);
-        await this.memory.recordTurn({
-          principal: {
-            agentId: this.id,
-            scope: prepared?.principal.scope ?? "global",
-            qualifier: prepared?.principal.qualifier
-          },
-          prompt: {
-            ...promptPacket,
-            principal: {
-              agentId: this.id,
-              scope: prepared?.principal.scope ?? "global",
-              qualifier: prepared?.principal.qualifier
-            }
-          },
-          request,
-          recall: prepared?.recall,
-          result: "completed",
-          outputText,
-          toolEvents
-        });
-      }
-
-      return {
-        agentId: this.id,
-        text: outputText,
-        durationMs: Date.now() - startedAt
-      };
-    } catch (error) {
-      this.state = "failed";
-      this.lastError = error instanceof Error ? error.message : String(error);
-
-      if (this.memory) {
-        try {
-          const promptPacket = prepared?.packet ?? fallbackPacket(event);
-          await this.memory.recordTurn({
-            principal: {
-              agentId: this.id,
-              scope: prepared?.principal.scope ?? "global",
-              qualifier: prepared?.principal.qualifier
-            },
-            prompt: {
-              ...promptPacket,
-              principal: {
-                agentId: this.id,
-                scope: prepared?.principal.scope ?? "global",
-                qualifier: prepared?.principal.qualifier
-              }
-            },
-            request,
-            recall: prepared?.recall,
-            result: "failed",
-            outputText: extractOutputText(chunks),
-            toolEvents,
-            error: this.lastError
-          });
-        } catch {
-          // Memory write-back is best-effort when waking fails.
-        }
-      }
-
-      throw error;
-    } finally {
-      if (this.memoryToolContext) {
-        this.memoryToolContext.current = undefined;
-      }
-      unsubscribe();
-    }
+  | {
+    rawTrainingCapture?: never;
+    sessionFactory: PiSessionFactory;
   }
+);
 
-  status(): AgentStatus {
-    return {
-      agentId: this.id,
-      state: this.state,
-      lastWakeAt: this.lastWakeAt,
-      lastError: this.lastError
-    };
-  }
-
-  async stop(): Promise<void> {
-    this.session.dispose();
-    this.state = "stopped";
-  }
-}
-
-const formatWakePrompt = (event: WakeEvent): string => `Wake event:
-- id: ${event.id}
-- kind: ${event.kind}
-- from: ${event.from ?? "operator"}
-
-${event.text}`;
-
-const createResourceLoader = (input: AgentStartInput): ResourceLoader => {
-  const systemPrompt = [
-    `You are ${input.name} (${input.id}).`,
-    input.instructions,
-    "You are running inside a harnessed workspace prepared by the caller.",
-    "Use the available coding tools when asked to read, write, edit, or inspect files.",
-    "Use memory_search, memory_locate, memory_register, memory_summarize, and memory_forget when scoped memory matters.",
-    "Keep responses brief and report the exact files you created or modified."
-  ].join("\n\n");
-
-  return {
-    getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-    getSkills: () => ({ skills: [], diagnostics: [] }),
-    getPrompts: () => ({ prompts: [], diagnostics: [] }),
-    getThemes: () => ({ themes: [], diagnostics: [] }),
-    getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () => systemPrompt,
-    getAppendSystemPrompt: () => [],
-    extendResources: () => {},
-    reload: async () => {}
-  };
+export type PiSessionFactoryInput = Exclude<Parameters<typeof createAgentSession>[0], undefined> & {
+  daimonSecretEnvironmentNames?: readonly string[];
 };
+
+export type PiSessionFactory = (input: PiSessionFactoryInput) => Promise<{ session: PiSessionLike }>;
 
 export class PiHarnessAdapter implements AgentHarnessAdapter {
   private readonly authStorage: AuthStorage;
@@ -307,13 +79,16 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
 
   constructor(private readonly options: PiHarnessOptions) {
     this.authStorage = AuthStorage.create(options.authPath);
-    this.modelRegistry = createModelRegistry(this.authStorage, options);
+    this.modelRegistry = createPiModelRegistry(this.authStorage, options);
     this.sessionFactory = options.sessionFactory ?? createAgentSession;
   }
 
   async startAgent(input: AgentStartInput): Promise<AgentHandle> {
+    validatePiRawTrainingCaptureOptions(this.options.rawTrainingCapture);
     await mkdir(input.runtimeHomePath, { recursive: true });
     await mkdir(input.workspacePath, { recursive: true });
+    const memoryRuntimeHomePath = this.options.memory?.runtimeHomePath ?? input.runtimeHomePath;
+    await mkdir(memoryRuntimeHomePath, { recursive: true });
     const modelSpec = this.options.model ?? {
       auth: { method: "codex" as const },
       provider: "openai",
@@ -324,40 +99,128 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
     if (!model) {
       throw new Error(`Pi model not found: ${resolvedModel.provider}/${resolvedModel.name}`);
     }
-    const memory = createMemoryRuntime({
-      agentId: input.id,
-      runtimeHomePath: input.runtimeHomePath,
-      source: this.options.memory?.source,
-      tokenBudget: this.options.memory?.tokenBudget
-    });
-    const memoryToolContext: PiMemoryToolContextRef = {};
-    const memoryTools = createPiMemoryTools({
-      agentId: input.id,
+    const memory = this.options.memory === undefined
+      ? undefined
+      : createMemoryRuntime({
+        agentId: input.id,
+        authority: this.options.memory.authority,
+        embeddingProvider: this.options.memory.embeddingProvider,
+        runtimeHomePath: memoryRuntimeHomePath,
+        source: this.options.memory.source,
+        tokenBudget: this.options.memory.tokenBudget
+      } as Parameters<typeof createMemoryRuntime>[0] & {
+        embeddingProvider?: HarnessMemoryEmbeddingProvider;
+      });
+    const memoryToolContext: PiMemoryToolContextRef | undefined =
+      memory === undefined ? undefined : {};
+    const worldToolContext: PiWorldToolContextRef | undefined =
+      this.options.world === undefined ? undefined : {};
+    const rawTrainingCaptureRef: PiRawTrainingCaptureRef | undefined =
+      this.options.rawTrainingCapture === undefined ? undefined : {};
+    const sessionInput = (mode: Parameters<PiSessionCreator>[0], sessionDirectory: string) => {
+      const memoryTools = memory === undefined || memoryToolContext === undefined
+        ? []
+        : createPiMemoryTools({
+          agentId: input.id,
+          memory,
+          contextRef: memoryToolContext,
+          mode
+        });
+      const worldTools = this.options.world === undefined
+        ? undefined
+        : createPiWorldTools({
+          world: this.options.world,
+          contextRef: worldToolContext
+        });
+      const toolNames = [
+        ...(input.tools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"]),
+        ...piMemoryToolNames(memoryTools),
+        ...(worldTools === undefined ? [] : piWorldToolNames(worldTools))
+      ];
+
+      return {
+        cwd: input.workspacePath,
+        agentDir: input.runtimeHomePath,
+        daimonSecretEnvironmentNames: this.options.world === undefined ? [] : [this.options.world.tokenEnv],
+        authStorage: this.authStorage,
+        modelRegistry: this.modelRegistry,
+        model,
+        thinkingLevel: this.options.thinkingLevel ?? "off",
+        resourceLoader: createResourceLoader(input, mode, {
+          memory: memory !== undefined,
+          world: worldTools !== undefined
+        }),
+        tools: [...new Set(toolNames)],
+        customTools: worldTools === undefined ? memoryTools : [...memoryTools, ...worldTools],
+        sessionManager: SessionManager.create(input.workspacePath, sessionDirectory),
+        settingsManager: SettingsManager.inMemory({
+          compaction: { enabled: false },
+          retry: { enabled: true, maxRetries: 1 }
+        })
+      };
+    };
+
+    if (this.options.rawTrainingCapture !== undefined) {
+      const createSession: PiNativeSessionCreator = async (mode, sessionDirectory) => {
+        const { session } = await createAgentSession(sessionInput(mode, sessionDirectory));
+        if (rawTrainingCaptureRef !== undefined) {
+          bindPiRawTrainingCapture(session, rawTrainingCaptureRef);
+        }
+        return session;
+      };
+      const session = await createSession("awake", path.join(input.runtimeHomePath, "sessions"));
+      return new PiAgentHandle(
+        input.id,
+        session,
+        createSession,
+        input.runtimeHomePath,
+        {
+          authMethod: modelSpec.auth?.method ?? "none",
+          model: resolvedModel.name,
+          provider: resolvedModel.provider
+        },
+        memory,
+        memoryToolContext,
+        {},
+        worldToolContext,
+        rawTrainingCaptureRef,
+        this.options.rawTrainingCapture,
+        worldToolContext === undefined
+          ? undefined
+          : { instructions: input.instructions, thinkingLevel: this.options.thinkingLevel ?? "off" },
+        session
+      );
+    }
+
+    const createSession: PiSessionCreator = async (mode, sessionDirectory) => {
+      const { session } = await (this.options.sessionFactory ?? createAgentSession)(sessionInput(mode, sessionDirectory));
+      return session;
+    };
+    const session = await createSession("awake", path.join(input.runtimeHomePath, "sessions"));
+
+    return new PiAgentHandle(
+      input.id,
+      session,
+      createSession,
+      input.runtimeHomePath,
+      {
+        authMethod: modelSpec.auth?.method ?? "none",
+        model: resolvedModel.name,
+        provider: resolvedModel.provider
+      },
       memory,
-      contextRef: memoryToolContext
-    });
-    const toolNames = [
-      ...(input.tools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"]),
-      ...piMemoryToolNames(memoryTools)
-    ];
-
-    const { session } = await this.sessionFactory({
-      cwd: input.workspacePath,
-      agentDir: input.runtimeHomePath,
-      authStorage: this.authStorage,
-      modelRegistry: this.modelRegistry,
-      model,
-      thinkingLevel: "off",
-      resourceLoader: createResourceLoader(input),
-      tools: [...new Set(toolNames)],
-      customTools: memoryTools,
-      sessionManager: SessionManager.create(input.workspacePath, path.join(input.runtimeHomePath, "sessions")),
-      settingsManager: SettingsManager.inMemory({
-        compaction: { enabled: false },
-        retry: { enabled: true, maxRetries: 1 }
-      })
-    });
-
-    return new PiAgentHandle(input.id, session, memory, memoryToolContext);
+      memoryToolContext,
+      {},
+      worldToolContext,
+      undefined,
+      undefined,
+      worldToolContext === undefined
+        ? undefined
+        : {
+          instructions: input.instructions,
+          thinkingLevel: this.options.thinkingLevel ?? "off"
+        },
+      undefined
+    );
   }
 }

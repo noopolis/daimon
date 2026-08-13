@@ -12,6 +12,13 @@ import { PiHarnessAdapter, type PiSessionFactory } from "./piHarness.js";
 type PiSessionEvent = { type: string; message?: { content?: string | ReadonlyArray<unknown> } };
 type PiSessionListener = (event: PiSessionEvent) => void;
 
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-pi-harness-contract";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
+
 interface FakePiSession {
   prompts: string[];
   session: {
@@ -23,7 +30,17 @@ interface FakePiSession {
 
 type FakePiAdapterSetup = { adapter: PiHarnessAdapter; runtimeHomePath: string; sessions: FakePiSession[] };
 
-type OnPrompt = (input: { text: string; sessionIndex: number; emit: (event: PiSessionEvent) => void }) => void;
+type FakeMemoryTool = {
+  execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string; type: string }> }>;
+  name: string;
+};
+
+type OnPrompt = (input: {
+  customTools: FakeMemoryTool[];
+  text: string;
+  sessionIndex: number;
+  emit: (event: PiSessionEvent) => void;
+}) => void | Promise<void>;
 
 const makeFakePiSessionFactory = (
   responses: string[][],
@@ -35,18 +52,20 @@ const makeFakePiSessionFactory = (
   const listeners = new Set<PiSessionListener>();
   let index = 0;
 
-  const factory: PiSessionFactory = () => {
+  const factory: PiSessionFactory = (input) => {
     const output = responses[index] ?? ["ok"];
     const sessionIndex = index;
     index += 1;
 
     const prompts: string[] = [];
     let cursor = 0;
+    const customTools = (input?.customTools ?? []) as FakeMemoryTool[];
 
     const session = {
       async prompt(text: string) {
         prompts.push(text);
-        options?.onPrompt?.({
+        await options?.onPrompt?.({
+          customTools,
           text,
           sessionIndex,
           emit(event) {
@@ -175,7 +194,7 @@ test("prompt excludes forbidden private pair context for room wakes", async () =
   });
 
   await handle.wake({
-    id: "wake-room",
+    id: "daimon:wake-room",
     kind: "manual",
     text: "How should we handle alignment in public?",
     context: {
@@ -196,7 +215,26 @@ test("fake sessions can recall prior turn memory without live provider calls", a
   const root = await tempDir();
   const setup = await makeHarness({
     root,
-    responses: [["first-turn"], ["second-turn"]]
+    responses: [["first-turn"], ["second-turn"]],
+    onPrompt: async ({ customTools, text }) => {
+      if (!text.includes("SESSION_TOOL_MARKER") || !text.includes("id: moltnet:wake-1")) {
+        return;
+      }
+      const register = customTools.find((tool) => tool.name === "memory_register");
+      assert.ok(register);
+      await register.execute("register-session-marker", {
+        scope: "current",
+        kind: "episodic",
+        content: {
+          kind: "text",
+          text: "SESSION_TOOL_MARKER relay route set to amber."
+        },
+        visibility: "room",
+        sensitivity: "normal",
+        source_type: "test",
+        confidence: 1
+      });
+    }
   });
 
   const handle = await setup.adapter.startAgent({
@@ -208,7 +246,7 @@ test("fake sessions can recall prior turn memory without live provider calls", a
   });
 
   await handle.wake({
-    id: "wake-1",
+    id: "moltnet:wake-1",
     kind: "message",
     from: "operator",
     text: "Register this marker: SESSION_TOOL_MARKER relay route set to amber.",
@@ -220,7 +258,7 @@ test("fake sessions can recall prior turn memory without live provider calls", a
   });
 
   await handle.wake({
-    id: "wake-2",
+    id: "moltnet:wake-2",
     kind: "message",
     from: "operator",
     text: "What was the relay marker?",
@@ -253,19 +291,17 @@ test("fake Moltnet-style pair and room wakes show scoped behavior", async () => 
   });
 
   await handle.wake({
-    id: "wake-pair",
+    id: "moltnet:wake-pair",
     kind: "message",
     from: "inner-shadow",
     text: "Who handled shadow memory last?",
     context: {
-      networkId: "noopolis",
-      roomId: "agora",
       pairPeers: ["inner-shadow"]
     }
   });
 
   await handle.wake({
-    id: "wake-room",
+    id: "daimon:wake-room",
     kind: "manual",
     text: "Summarize public room context only.",
     context: {
@@ -277,55 +313,6 @@ test("fake Moltnet-style pair and room wakes show scoped behavior", async () => 
 
   assert.ok((setup.sessions[0]?.prompts[0] ?? "").includes("PRIVATE_PAIR_MARKER"));
   assert.equal((setup.sessions[0]?.prompts[1] ?? "").includes("PRIVATE_PAIR_MARKER"), false);
-
-  await handle.stop();
-});
-
-test("tool result boundaries stay redacted in activity summary", async () => {
-  const root = await tempDir();
-  const setup = await makeHarness({
-    root,
-    responses: [["ok"]],
-    onPrompt: ({ emit }) => {
-      emit({
-        type: "tool_event",
-        message: {
-          content: "PUBLIC_TOOL_PAYLOAD_MARKER should not be copied to activity"
-        }
-      });
-    }
-  });
-
-  const handle = await setup.adapter.startAgent({
-    id: "mapper",
-    name: "Mapper",
-    instructions: "Use memory tools when necessary.",
-    runtimeHomePath: setup.runtimeHomePath,
-    workspacePath: path.join(root, "workspace")
-  });
-
-  await handle.wake({
-    id: "wake-tool",
-    kind: "manual",
-    text: "Check tool boundary test.",
-    context: {
-      networkId: "noopolis",
-      roomId: "agora",
-      teamId: "ops"
-    }
-  });
-
-  const runtimeStore = new JsonlMemoryStore(setup.runtimeHomePath);
-  const summaryEvents = await runtimeStore.read({
-    principalAgentId: "mapper",
-    types: ["memory.summarized"]
-  });
-
-  assert.equal(summaryEvents.length, 1);
-  assert.equal(summaryEvents[0].content.kind, "text");
-  const summaryText = summaryEvents[0].content.text;
-  assert.ok(summaryText.includes("Observed 1 tool event(s) during turn."));
-  assert.ok(!summaryText.includes("PUBLIC_TOOL_PAYLOAD_MARKER"));
 
   await handle.stop();
 });
@@ -349,7 +336,7 @@ test("memory activity can be reloaded through Pi adapter across turns", async ()
       rawHint: "seeded"
     },
     request: {
-      eventId: "seed-legacy",
+      eventId: "daimon:seed-legacy",
       kind: "manual",
       text: "seed legacy event for continuity",
       context: {}
@@ -367,7 +354,7 @@ test("memory activity can be reloaded through Pi adapter across turns", async ()
   });
 
   await handle.wake({
-    id: "wake-continuation",
+    id: "daimon:wake-continuation",
     kind: "manual",
     text: "Continue from seeded activity.",
     context: {
@@ -381,7 +368,7 @@ test("memory activity can be reloaded through Pi adapter across turns", async ()
   assert.ok(secondPrompt.includes("Legacy activity context.") || secondPrompt.includes("seed legacy event for continuity"));
 
   const events = await runtime.prepareTurn({
-    eventId: "noop-wake",
+    eventId: "daimon:noop-wake",
     kind: "manual",
     text: "continuation check",
     context: {

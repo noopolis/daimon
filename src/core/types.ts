@@ -24,9 +24,16 @@ export interface HarnessModelSpec {
   provider: string;
 }
 
+export interface WakeDeliveryMetadata {
+  eventId: string;
+  sender: string;
+  target: string;
+  contextId: string;
+}
+
 export interface WakeEvent {
   id: string;
-  kind: "manual" | "message" | "schedule";
+  kind: "manual" | "message" | "schedule" | "dream";
   from?: string;
   text: string;
   context?: {
@@ -39,6 +46,9 @@ export interface WakeEvent {
     pairPeers?: string[];
     artifactPaths?: string[];
   };
+  delivery?: WakeDeliveryMetadata;
+  /** Exact transport body retained outside the runtime-enriched model prompt. */
+  transportText?: string;
 }
 
 export interface WakeResult {

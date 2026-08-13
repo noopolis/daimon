@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 
-import { memoryScopeId } from "@noopolis/mneme";
+import { memoryAuthorityRuntimeId, memoryScopeId } from "@noopolis/mneme";
 import { JsonlMemoryStore } from "@noopolis/mneme";
 import { PiHarnessAdapter, type PiSessionFactory } from "./piHarness.js";
 
@@ -15,6 +15,13 @@ type PiSessionListener = (event: PiSessionEvent) => void;
 type SessionResult = Awaited<ReturnType<typeof createAgentSession>>;
 
 const tempRoots: string[] = [];
+
+test.beforeEach(() => {
+  process.env.NOOPOLIS_RUN_ID = "run-test-pi-harness-memory-tools";
+});
+test.afterEach(() => {
+  delete process.env.NOOPOLIS_RUN_ID;
+});
 
 const tempDir = async (): Promise<string> => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "noopolis-daimon-pi-memory-tools-"));
@@ -95,7 +102,14 @@ test("Pi sessions receive provider-safe memory custom tools with active wake con
       provider: "local"
     },
     sessionFactory: factory,
-    memory: { tokenBudget: 1200 }
+    memory: {
+      authority: {
+        bankId: "mapper",
+        runtimeId: memoryAuthorityRuntimeId(runtimeHomePath),
+        secret: "test-only-memory-authority"
+      },
+      tokenBudget: 1200
+    }
   });
   const handle = await adapter.startAgent({
     id: "mapper",
@@ -110,7 +124,7 @@ test("Pi sessions receive provider-safe memory custom tools with active wake con
   assert.ok(toolNames.includes("memory_register"));
 
   await handle.wake({
-    id: "wake-tool-search",
+    id: "daimon:wake-tool-search",
     kind: "manual",
     text: "Use memory_search for room context.",
     context: { networkId: "noopolis", roomId: "agora", teamId: "ops" }
@@ -119,6 +133,105 @@ test("Pi sessions receive provider-safe memory custom tools with active wake con
   assert.ok(toolResultText.includes("memory.search"));
   assert.ok(toolResultText.includes("PI_CUSTOM_TOOL_MARKER"));
 
+  const searchAfterWake = (calls[0]?.customTools as Array<{
+    execute: (...args: unknown[]) => Promise<unknown>;
+    name: string;
+  }>).find((tool) => tool.name === "memory_search");
+  assert.ok(searchAfterWake);
+  await assert.rejects(
+    searchAfterWake.execute("late-call", { scope: "current", query: "PI_CUSTOM_TOOL_MARKER" }),
+    /active trusted turn context/u
+  );
+
   await handle.stop();
 });
 
+test("dream wakes use fresh dream sessions without replacing the awake session", async () => {
+  const root = await tempDir();
+  const runtimeHomePath = path.join(root, "runtime");
+  const workspacePath = path.join(root, "workspace");
+  const calls: Array<Parameters<PiSessionFactory>[0]> = [];
+  const prompts: string[][] = [];
+  const disposed: boolean[] = [];
+
+  const factory: PiSessionFactory = async (input) => {
+    const index = calls.length;
+    const listeners = new Set<PiSessionListener>();
+    calls.push(input);
+    prompts.push([]);
+    disposed.push(false);
+
+    return {
+      session: {
+        async prompt(text: string) {
+          prompts[index]?.push(text);
+          for (const listener of listeners) {
+            listener({ type: "turn_end", message: { content: `reply-${index}` } });
+          }
+        },
+        subscribe(listener: PiSessionListener) {
+          listeners.add(listener);
+          return () => void listeners.delete(listener);
+        },
+        dispose() {
+          disposed[index] = true;
+          listeners.clear();
+        }
+      }
+    } as unknown as SessionResult;
+  };
+
+  const adapter = new PiHarnessAdapter({
+    authPath: path.join(root, "auth.json"),
+    model: {
+      auth: { method: "none" },
+      endpoint: { baseUrl: "http://127.0.0.1:11434/v1", compatibility: "openai" },
+      name: "llama3.2",
+      provider: "local"
+    },
+    sessionFactory: factory,
+    memory: { tokenBudget: 1200 }
+  });
+  const handle = await adapter.startAgent({
+    id: "dreamer",
+    name: "Dreamer",
+    instructions: "Use Mneme memory deliberately.",
+    runtimeHomePath,
+    workspacePath
+  });
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]?.resourceLoader?.getSystemPrompt?.() ?? "", /# Mneme Memory/u);
+
+  await handle.wake({
+    id: "daimon:dream-check",
+    kind: "dream",
+    text: "Consolidate memory now."
+  });
+  await handle.wake({
+    id: "daimon:dream-check",
+    kind: "dream",
+    text: "Consolidate memory again."
+  });
+  await handle.wake({
+    id: "daimon:manual-check",
+    kind: "manual",
+    text: "Return to normal work."
+  });
+
+  assert.equal(calls.length, 3);
+  assert.match(calls[1]?.resourceLoader?.getSystemPrompt?.() ?? "", /# Mneme Dream/u);
+  assert.match(calls[2]?.resourceLoader?.getSystemPrompt?.() ?? "", /# Mneme Dream/u);
+  assert.match(prompts[1]?.[0] ?? "", /## Dream Mode/u);
+  assert.match(prompts[1]?.[0] ?? "", /dream_thread: dream:daimon-dream-check-[a-f0-9]{8}/u);
+  assert.match(prompts[2]?.[0] ?? "", /dream_thread: dream:daimon-dream-check-[a-f0-9]{8}/u);
+  assert.notEqual(
+    /dream_thread: (dream:[^\n]+)/u.exec(prompts[1]?.[0] ?? "")?.[1],
+    /dream_thread: (dream:[^\n]+)/u.exec(prompts[2]?.[0] ?? "")?.[1]
+  );
+  assert.equal(prompts[0]?.some((prompt) => prompt.includes("Return to normal work.")), true);
+  assert.deepEqual(disposed, [false, true, true]);
+
+  await handle.stop();
+  assert.equal(disposed[0], true);
+});

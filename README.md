@@ -5,15 +5,27 @@ Daimon is the Noopolis-native per-agent runtime harness.
 It defines a small per-agent contract and currently implements that contract on
 top of Pi. A Daimon runs one harnessed agent inside a caller-prepared workspace.
 
-Spawnfile should own orgs, nested teams, schedules, Moltnet wiring, workspace
-resource compilation, and the app that starts many harnessed agents. This package
-should not know what an org is.
+Spawnfile compiles and deploys orgs, nested teams, member-owned schedules,
+Moltnet wiring, and workspace resources. Daimon executes one agent runtime: it
+accepts a wake selected by that runtime's organization policy and runs one
+turn. It does not know the org graph, schedule other agents, or let Simfile or
+a world service trigger cognition.
+
+For a world-capable `kind: every` wake, the harness starts without a decision
+token and privately calls `world_claim` before exposing any other world tool.
+The claim binds authority to the schedule wake's run/request/wake identity; the
+opaque token stays inside the harness. Subsequent observe/affordance/action
+calls carry it without placing it in the model prompt or tool schema. Optional
+world recommendations are ordinary observation fields discovered after the
+independent wake and claim—they are never Daimon wake inputs.
 
 ## Install
 
 ```bash
 npm install @noopolis/daimon
 ```
+
+The latest published version is 0.1.1; this README describes the source tree (0.1.2).
 
 For Pi agents with memory enabled, install Mneme too:
 
@@ -37,10 +49,31 @@ Pi-specific exports live under the Pi subpath:
 import { PiHarnessAdapter } from "@noopolis/daimon/pi";
 ```
 
+By default, the in-process Mneme runtime uses the same path as each agent's
+`runtimeHomePath`. If you need agents to keep separate Pi/runtime directories but
+share one memory bank, pass an explicit `memory.runtimeHomePath` in
+`PiHarnessOptions`.
+
+```ts
+const adapter = new PiHarnessAdapter({
+  authPath: "/tmp/daimon-auth.json",
+  memory: {
+    runtimeHomePath: "/shared/memory/bank"
+  }
+});
+```
+
+Pi agents receive Mneme tools in awake mode for normal work. Dream wakes use a
+fresh one-off Pi session under `sessions/dream/<wake-id>-<random>` and inject
+the Mneme dream guidance instead. Daimon does not automatically record every
+turn as memory; agents write memories only by calling Mneme tools such as
+`memory_register`, `memory_summarize`, and `memory_forget`.
+
 ## Tests
 
-The package has a non-live test suite for auth seeding and Pi model config
-generation:
+The package has a non-live test suite covering auth seeding, Pi model config
+generation, the harness contract, memory tool wiring, wake and turn traces, and
+the org observer:
 
 ```bash
 npm test
@@ -67,6 +100,10 @@ upstream-documented dummy `ollama` value.
 
 The Pi E2E uses the local Codex CLI subscription auth file to seed an ignored Pi
 `auth.json` under `.runtime/`.
+
+These are live runs: they spend real tokens and require local engine auth
+(`~/.codex/auth.json` for Pi/Codex; mixed-engine and triad additionally need
+authenticated `grok` and `agy` CLIs on PATH). They are not part of `npm test`.
 
 ```bash
 npm install
@@ -107,8 +144,9 @@ archetype gets consulted.
 ## Design Notes
 
 - `MEMORY-SYSTEM.md` describes the implemented scoped memory runtime.
-- `ENGINE-SYSTEM.md` describes the next engine abstraction plan: Pi, Ollama,
-  API providers, and CLI-backed engines such as `agy`, `grok`, and `gemini`.
+- `ENGINE-SYSTEM.md` describes the engine abstraction plan: Pi, local/API
+  model providers, and CLI-backed engines such as `codex`, `claude`, `grok`,
+  and `agy`.
 - Mneme is a sibling package, `@noopolis/mneme`, published separately and used
   by Daimon in-process for Pi agents. Other runtimes can use Mneme through its
   MCP server. The agent-facing tools stay named `memory_search`,
@@ -117,16 +155,22 @@ archetype gets consulted.
 
 ## Runtime Artifact Image
 
-Daimon can build a local copy-only runtime artifact image for Spawnfile:
+Daimon defines a local copy-only runtime artifact image build for Spawnfile:
 
 ```bash
 npm run image:runtime:local
 ```
 
+Status: this build currently fails against the public npm registry. The
+Dockerfile pins `@noopolis/daimon@0.1.2` and `@noopolis/mneme@0.1.1`, and
+neither is published yet (registry has daimon 0.1.1 and mneme 0.1.0). Works
+only after those versions publish or against a registry that has them. Treat
+as pending publish.
+
 This creates:
 
 ```text
-noopolis/spawnfile-runtime-daimon:0.1.1-local
+noopolis/spawnfile-runtime-daimon:0.1.2-local
 ```
 
 The image is not a full organization image and is not intended to be run
@@ -139,7 +183,7 @@ directly. It contains only:
 Spawnfile can copy that path into generated organization images:
 
 ```bash
-SPAWNFILE_DAIMON_RUNTIME_IMAGE=noopolis/spawnfile-runtime-daimon:0.1.1-local \
+SPAWNFILE_DAIMON_RUNTIME_IMAGE=noopolis/spawnfile-runtime-daimon:0.1.2-local \
   spawnfile build ./agentic-org
 ```
 
