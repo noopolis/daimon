@@ -140,7 +140,9 @@ export class PiAgentHandle implements AgentHandle {
       : worldWakeContext(event);
     const safeWakeText = worldContext === undefined
       ? event.text
-      : formatWorldWakePrompt(worldContext);
+      : event.kind === "message" && event.delivery !== undefined && event.transportText !== undefined
+        ? `${formatWorldWakePrompt(worldContext)}\n\n${formatWakePrompt(event)}`
+        : formatWorldWakePrompt(worldContext);
     const worldTrajectory = worldContext?.decisionToken === undefined
       ? undefined
       : createPiWorldTrajectoryCapture();

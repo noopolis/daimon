@@ -19,7 +19,7 @@ type Gate = { signal: Promise<void>; release: () => void };
 type Hooks = Partial<Record<"begin" | "invoking" | "completed" | "incomplete", () => Promise<void>>>;
 type InputStamp = Parameters<typeof stampTurnInputSubmitted>[0];
 type OutputStamp = Parameters<typeof stampTurnOutputCompleted>[0];
-type Options = { memory?: MemoryRuntime; createSession?: PiSessionCreator; fail?: Error; failAt?: "prompt" | "input" | "output" | "trace"; hooks?: Hooks; order?: string[]; inputs?: InputStamp[]; outputs?: OutputStamp[]; traces?: PersistPiTurnTraceInput[]; prompts?: string[] };
+type Options = { memory?: MemoryRuntime; createSession?: PiSessionCreator; fail?: Error; failAt?: "prompt" | "input" | "output" | "trace"; hooks?: Hooks; order?: string[]; inputs?: InputStamp[]; outputs?: OutputStamp[]; traces?: PersistPiTurnTraceInput[]; prompts?: string[]; world?: boolean };
 
 const roots: string[] = [];
 test.beforeEach(() => {
@@ -70,7 +70,7 @@ const harness = async (home: string, options: Options = {}): Promise<{ handle: P
     runWake: async (input) => { order.push("causal input"); options.inputs?.push(input); if (options.failAt === "input") throw options.fail; return stampTurnInputSubmitted(input); },
     completeTurn: async (input) => { order.push("causal output"); options.outputs?.push(input); if (options.failAt === "output") throw options.fail; return stampTurnOutputCompleted(input); },
     traceTurn: async (input) => { order.push("trace"); options.traces?.push(input); if (options.failAt === "trace") throw options.fail; }
-  });
+  }, options.world ? {} : undefined);
   return { handle, order };
 };
 
@@ -79,6 +79,30 @@ test("accepted delivery has the exact successful global order", async () => {
   assert.equal((await handle.wake(event("ordered"))).text, "done");
   assert.deepEqual(order.filter((value) => value !== "candidate"), ["begin", "accepted", "causal input", "invoking", "prompt", "causal output", "trace", "completed"]);
   await assertState(home, "completed"); await handle.stop();
+});
+
+test("world-capable delivery prompts retain authenticated teammate communication", async () => {
+  const home = await tmp(); const prompts: string[] = []; const { handle } = await harness(home, { prompts, world: true });
+  const teammateCall = {
+    ...event("team-call", [
+      "Authenticated Moltnet delivery:",
+      "- sender: blue-wing",
+      "- room: blue-team",
+      "",
+      "Message body:",
+      "@blue-keeper Ball is low. Shade the upper half."
+    ].join("\n")),
+    delivery: { eventId: "moltnet:team-call", sender: "blue-wing", target: "agent", contextId: "ctx-team-call" },
+    from: "blue-wing",
+    transportText: "exact private transport bytes"
+  };
+  await handle.wake(teammateCall);
+  assert.match(prompts[0] ?? "", /World-capable organization wake:/u);
+  assert.match(prompts[0] ?? "", /kind: message[\s\S]*from: "blue-wing"/u);
+  assert.match(prompts[0] ?? "", /Authenticated Moltnet delivery:[\s\S]*sender: blue-wing[\s\S]*room: blue-team/u);
+  assert.match(prompts[0] ?? "", /@blue-keeper Ball is low\. Shade the upper half\./u);
+  assert.equal((prompts[0] ?? "").includes("exact private transport bytes"), false);
+  await handle.stop();
 });
 
 test("two handles permit only the valid replay-or-incomplete loser outcome", async () => {
