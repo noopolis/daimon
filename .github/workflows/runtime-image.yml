@@ -25,7 +25,7 @@ concurrency:
 
 env:
   IMAGE_NAME: noopolis/spawnfile-runtime-daimon
-  MNEME_VERSION: 0.1.0
+  MNEME_VERSION: 0.1.1
   PI_VERSION: 0.79.10
 
 jobs:

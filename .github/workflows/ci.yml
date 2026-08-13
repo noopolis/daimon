@@ -38,48 +38,39 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Read package version
-        id: package
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build runtime artifact image from release-shaped packages
         shell: bash
         run: |
           set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          context="$(mktemp -d)"
+          trap 'rm -rf "$context"' EXIT
 
-      - name: Wait for npm packages
-        shell: bash
-        run: |
-          set -euo pipefail
+          daimon_tarball="$(npm pack --pack-destination "$context" --silent)"
+          mneme_tarball="$(npm pack @noopolis/mneme@0.1.1 --pack-destination "$context" --silent)"
+          mv "$context/$daimon_tarball" "$context/daimon.tgz"
+          mv "$context/$mneme_tarball" "$context/mneme.tgz"
+          cp Dockerfile.runtime "$context/Dockerfile.runtime"
 
-          version="${{ steps.package.outputs.version }}"
-          for attempt in $(seq 1 24); do
-            if npm view "@noopolis/daimon@${version}" version >/dev/null 2>&1 \
-              && npm view "@noopolis/mneme@0.1.0" version >/dev/null 2>&1; then
-              exit 0
-            fi
-            echo "Waiting for npm registry propagation (${attempt}/24)."
-            sleep 5
-          done
-
-          npm view "@noopolis/daimon@${version}" version
-          npm view "@noopolis/mneme@0.1.0" version
-
-      - name: Build runtime artifact image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.runtime
-          load: true
-          tags: noopolis/spawnfile-runtime-daimon:ci
-          build-args: |
-            DAIMON_VERSION=${{ steps.package.outputs.version }}
-            MNEME_VERSION=0.1.0
-            PI_VERSION=0.79.10
-          cache-from: type=gha,scope=daimon-runtime-image
-          cache-to: type=gha,scope=daimon-runtime-image,mode=max
+          docker buildx build \
+            --file "$context/Dockerfile.runtime" \
+            --target local-runtime \
+            --tag noopolis/spawnfile-runtime-daimon:ci \
+            --build-arg PI_VERSION=0.79.10 \
+            --load \
+            "$context"
 
       - name: Verify runtime artifact contents
         shell: bash
