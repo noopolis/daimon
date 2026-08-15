@@ -31,8 +31,6 @@ source tree and the public npm registry. Status values:
 | C13 | `npm run e2e:jungian-play-org` | runs (live, preflight-gated) | `npm run e2e:jungian-play-org` | README.md L86-98, L115-119; requires `~/.codex/auth.json`; not in `npm test` |
 | C14 | `npm run e2e:jungian-triad-org` (Codex/Grok/Pi) | runs (live, preflight-gated) | `npm run e2e:jungian-triad-org` | README.md L86-98, L121-125; requires `~/.codex/auth.json` plus authenticated `grok` and `agy` CLIs on PATH; not in `npm test` |
 | C15 | `MEMORY-SYSTEM.md` describes the implemented memory runtime; `ENGINE-SYSTEM.md` describes the engine abstraction plan | runs | manual review | README.md L127-137; MEMORY-SYSTEM.md; ENGINE-SYSTEM.md |
-| C16 | `npm run image:runtime:local` builds a local copy-only runtime artifact image | broken (pending publish) | `npm run image:runtime:local` | Dockerfile.runtime (pins `@noopolis/daimon@0.1.2` and `@noopolis/mneme@0.1.1`); `npm view @noopolis/daimon@0.1.2 version` -> E404; `npm view @noopolis/mneme@0.1.1 version` -> E404; README.md L139-158 (pending-publish status note) |
-| C17 | `SPAWNFILE_DAIMON_RUNTIME_IMAGE` env contract for `spawnfile build` | runs | `SPAWNFILE_DAIMON_RUNTIME_IMAGE=noopolis/spawnfile-runtime-daimon:0.1.2-local spawnfile build ./agentic-org` (run from spawnfile repo root) | README.md L160-169; src/runtime/container.ts (root spawnfile repo, implements the contract) |
 
 ## Validation run (2026-07-10)
 
