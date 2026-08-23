@@ -200,7 +200,7 @@ test("a world binding appends exact token-free Pi tools and fails closed outside
     assert.ok(input);
     assert.deepEqual(input.tools, [...BASE_TOOLS, ...MEMORY_TOOLS, ...PI_WORLD_TOOL_NAMES]);
     const customTools = input.customTools as CapturedTool[];
-    assert.deepEqual(customTools.map((tool) => tool.name), [...MEMORY_TOOLS, ...PI_WORLD_TOOL_NAMES]);
+    assert.deepEqual(customTools.map((tool) => tool.name), ["bash", ...MEMORY_TOOLS, ...PI_WORLD_TOOL_NAMES]);
     assert.deepEqual(world, { url: "http://simfile-world:19972/v1/world", tokenEnv });
     assert.equal(requests.length, 0);
 

@@ -3,10 +3,12 @@ import path from "node:path";
 
 import {
   AuthStorage,
+  createBashTool,
   createAgentSession,
   type ModelRegistry,
   SessionManager,
-  SettingsManager
+  SettingsManager,
+  type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
 import { createMemoryRuntime, type MemoryAuthorityConfig } from "@noopolis/mneme";
 
@@ -44,6 +46,8 @@ type PiHarnessBaseOptions = {
     name: string;
   };
   modelsPath?: string;
+  /** Host-only names removed from every engine and Pi bash child environment. */
+  protectedEnvironmentNames?: readonly string[];
   memory?: {
     authority?: MemoryAuthorityConfig;
     embeddingProvider?: HarnessMemoryEmbeddingProvider;
@@ -68,6 +72,8 @@ export type PiHarnessOptions = PiHarnessBaseOptions & (
 
 export type PiSessionFactoryInput = Exclude<Parameters<typeof createAgentSession>[0], undefined> & {
   daimonSecretEnvironmentNames?: readonly string[];
+  /** The isolated runtime home assigned by Daimon to this one agent. */
+  runtimeHomePath?: string;
 };
 
 export type PiSessionFactory = (input: PiSessionFactoryInput) => Promise<{ session: PiSessionLike }>;
@@ -85,7 +91,14 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
 
   async startAgent(input: AgentStartInput): Promise<AgentHandle> {
     validatePiRawTrainingCaptureOptions(this.options.rawTrainingCapture);
-    await mkdir(input.runtimeHomePath, { recursive: true });
+    await Promise.all([
+      input.runtimeHomePath,
+      `${input.runtimeHomePath}/.config`,
+      `${input.runtimeHomePath}/.local/share`,
+      `${input.runtimeHomePath}/.local/state`,
+      `${input.runtimeHomePath}/.cache`,
+      `${input.runtimeHomePath}/.tmp`
+    ].map((directory) => mkdir(directory, { recursive: true })));
     await mkdir(input.workspacePath, { recursive: true });
     const memoryRuntimeHomePath = this.options.memory?.runtimeHomePath ?? input.runtimeHomePath;
     await mkdir(memoryRuntimeHomePath, { recursive: true });
@@ -132,6 +145,15 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
           world: this.options.world,
           contextRef: worldToolContext
         });
+      // Every child tool inherits the same denylist: host control values,
+      // Daimon-held world/model secrets, and caller-protected names.
+      const protectedNames = [...new Set([
+        ...(this.options.protectedEnvironmentNames ?? []),
+        ...(this.options.world === undefined ? [] : [this.options.world.tokenEnv])
+      ])];
+      const protectedBash = protectedNames.length === 0 || input.tools?.includes("bash") === false
+        ? []
+        : [createProtectedBashTool(input.workspacePath, input.runtimeHomePath, protectedNames)];
       const toolNames = [
         ...(input.tools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"]),
         ...piMemoryToolNames(memoryTools),
@@ -141,6 +163,7 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       return {
         cwd: input.workspacePath,
         agentDir: input.runtimeHomePath,
+        runtimeHomePath: input.runtimeHomePath,
         daimonSecretEnvironmentNames: this.options.world === undefined ? [] : [this.options.world.tokenEnv],
         authStorage: this.authStorage,
         modelRegistry: this.modelRegistry,
@@ -151,7 +174,9 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
           world: worldTools !== undefined
         }),
         tools: [...new Set(toolNames)],
-        customTools: worldTools === undefined ? memoryTools : [...memoryTools, ...worldTools],
+        customTools: worldTools === undefined
+          ? [...protectedBash, ...memoryTools]
+          : [...protectedBash, ...memoryTools, ...worldTools],
         sessionManager: SessionManager.create(input.workspacePath, sessionDirectory),
         settingsManager: SettingsManager.inMemory({
           compaction: { enabled: false },
@@ -223,4 +248,32 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       undefined
     );
   }
+}
+
+function createProtectedBashTool(workspacePath: string, runtimeHomePath: string, protectedNames: readonly string[]): ToolDefinition {
+  const bash = createBashTool(workspacePath, {
+    spawnHook: (context) => ({
+      ...context,
+      env: {
+        ...Object.fromEntries(Object.entries(context.env).filter(([name]) => !protectedNames.includes(name))),
+        HOME: runtimeHomePath,
+        XDG_CONFIG_HOME: `${runtimeHomePath}/.config`,
+        XDG_DATA_HOME: `${runtimeHomePath}/.local/share`,
+        XDG_STATE_HOME: `${runtimeHomePath}/.local/state`,
+        XDG_CACHE_HOME: `${runtimeHomePath}/.cache`,
+        TMPDIR: `${runtimeHomePath}/.tmp`
+      }
+    })
+  });
+  return {
+    name: bash.name,
+    label: bash.label,
+    description: bash.description,
+    parameters: bash.parameters,
+    ...(bash.prepareArguments === undefined ? {} : { prepareArguments: bash.prepareArguments }),
+    ...(bash.executionMode === undefined ? {} : { executionMode: bash.executionMode }),
+    async execute(toolCallId, params, signal, onUpdate) {
+      return bash.execute(toolCallId, params as Parameters<typeof bash.execute>[1], signal, onUpdate);
+    }
+  } as ToolDefinition;
 }

@@ -1,5 +1,4 @@
 import type { AgentHandle, AgentStatus, WakeEvent, WakeResult } from "../core/types.js";
-
 import { createTrustedPiMemoryToolContext, type PiMemoryToolContextRef } from "./memoryTools.js";
 import { formatWakePrompt } from "./prompts.js";
 import {
@@ -20,6 +19,7 @@ import { formatWorldWakePrompt, worldWakeContext, type PiWorldToolContextRef } f
 import { createPiWorldTrajectoryCapture, type PiWorldTrajectoryIdentity } from "./worldTrajectory.js";
 import {
   cloneWakeEvent,
+  disposePiSession,
   persistPiTurnArtifacts,
   PiWakeDeliveryQueue,
   selectPiSessionForWake,
@@ -31,11 +31,8 @@ import {
   type WakeSessionSelection
 } from "./piAgentWakeSupport.js";
 import { readMemoryContext, type MemoryPrepareTurnResult, type MemoryRuntime } from "@noopolis/mneme";
-
 export type { PiSession, PiSessionLike, PiSessionCreator, PiNativeSessionCreator } from "./piAgentWakeSupport.js";
-
 export type WakeAcceptanceInput = { runWake?: typeof stampTurnInputSubmitted; completeTurn?: typeof stampTurnOutputCompleted; traceTurn?: typeof persistPiTurnTrace; createWakeAcceptance?: (runtimeHomePath: string, agentId: string) => WakeAcceptanceStoreLike; };
-
 export class PiAgentHandle implements AgentHandle {
   private state: AgentStatus["state"] = "idle";
   private lastWakeAt: string | undefined;
@@ -44,7 +41,6 @@ export class PiAgentHandle implements AgentHandle {
   private readonly stampTurnInputSubmitted: typeof stampTurnInputSubmitted;
   private readonly stampTurnOutputCompleted: typeof stampTurnOutputCompleted;
   private readonly persistTrace: typeof persistPiTurnTrace;
-
   constructor(
     id: string,
     session: PiSession,
@@ -98,7 +94,6 @@ export class PiAgentHandle implements AgentHandle {
       new WakeAcceptanceStore(runtimeHomePath, id);
     this.wakeDeliveryQueue = new PiWakeDeliveryQueue(id, wakeAcceptance);
   }
-
   async wake(event: WakeEvent): Promise<WakeResult> {
     const wakeEvent = cloneWakeEvent(event);
     return this.wakeDeliveryQueue.wake(
@@ -106,7 +101,6 @@ export class PiAgentHandle implements AgentHandle {
       (queuedEvent, transition) => this.runWake(queuedEvent, transition)
     );
   }
-
   private async runWake(
     event: WakeEvent,
     transitionToInvoking?: () => Promise<WakeAcceptanceCapability>
@@ -123,11 +117,9 @@ export class PiAgentHandle implements AgentHandle {
     let unsubscribe: (() => void) | undefined;
     let stage = "select_session";
     let prepared: MemoryPrepareTurnResult | undefined;
-
     this.state = "running";
     this.lastWakeAt = new Date().toISOString();
     this.lastError = undefined;
-
     const memoryContext = readMemoryContext({
       kind: event.kind,
       id: event.id,
@@ -153,7 +145,6 @@ export class PiAgentHandle implements AgentHandle {
       from: event.from,
       context: memoryContext
     };
-
     let promptText = worldContext === undefined
       ? formatWakePrompt(event)
       : safeWakeText;
@@ -181,7 +172,6 @@ export class PiAgentHandle implements AgentHandle {
         tools,
         worldTrajectory
       });
-
       if (this.memory !== undefined) {
         stage = "memory_prepare";
         const memoryStartedAt = Date.now();
@@ -194,7 +184,6 @@ export class PiAgentHandle implements AgentHandle {
           };
           throw error;
         }
-
         memoryPrepare = {
           durationMs: Date.now() - memoryStartedAt,
           prepared,
@@ -214,11 +203,9 @@ export class PiAgentHandle implements AgentHandle {
           });
         }
       }
-
       if (selectedSession.mode === "dream") {
         promptText = formatDreamPrompt(promptText, selectedSession.threadId);
       }
-
       stage = "causal_input";
       const turnInput = await this.stampTurnInputSubmitted({
         agentId: this.id,
@@ -227,12 +214,10 @@ export class PiAgentHandle implements AgentHandle {
         promptText,
         runtimeHomePath: this.runtimeHomePath
       } satisfies StampTurnInputSubmittedInput);
-
       stage = "invoking";
       if (transitionToInvoking !== undefined) {
         await transitionToInvoking();
       }
-
       stage = "engine_prompt";
       const engineStartedAt = Date.now();
       await selectedSession.session.prompt(promptText, { expandPromptTemplates: false });
@@ -240,7 +225,6 @@ export class PiAgentHandle implements AgentHandle {
 
       this.state = "idle";
       const outputText = chunks.join("\n").trim();
-
       stage = "causal_output";
       await this.stampTurnOutputCompleted({
         agentId: this.id,
@@ -272,9 +256,6 @@ export class PiAgentHandle implements AgentHandle {
       if (rawTrainingCapture !== undefined
         && this.rawTrainingCaptureOptions !== undefined
         && this.piSessionForRawCapture !== undefined) {
-        // Do not retry a partially failed private capture in the catch path.
-        // The first failure is authoritative and retrying the same immutable
-        // turn path would only mask it with an EEXIST/partial-write error.
         rawTrainingCapturePersistAttempted = true;
       }
       await persistPiTurnArtifacts({
@@ -294,7 +275,6 @@ export class PiAgentHandle implements AgentHandle {
         worldTrajectory,
         worldTrajectoryIdentity: this.worldTrajectoryIdentity
       });
-
       return {
         agentId: this.id,
         text: outputText,
@@ -389,9 +369,10 @@ export class PiAgentHandle implements AgentHandle {
       lastError: this.lastError
     };
   }
-
   async stop(): Promise<void> {
-    this.session.dispose();
+    // CLI-backed sessions may own a process group, while native Pi remains
+    // source-compatible through the synchronous dispose() hook.
+    await disposePiSession(this.session);
     this.state = "stopped";
   }
 }

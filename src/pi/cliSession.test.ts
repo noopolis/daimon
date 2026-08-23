@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, Server } from "node:http";
+import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { PiHarnessAdapter, type PiSessionFactory } from "./piHarness.js";
-import { createCliSessionFactory, readChild, renderCodexArgs, spawnEngine } from "./cliSession.js";
+import { CLI_ENGINE_MAX_OUTPUT_BYTES, createCliSessionFactory, readChild, renderCodexArgs, spawnEngine } from "./cliSession.js";
 import { formatWorldWakePrompt } from "./worldNudge.js";
 
 const require = createRequire(import.meta.url);
@@ -194,6 +194,38 @@ test("CLI engine failures include bounded redacted diagnostics", async () => {
   }
 });
 
+test("CLI output cap counts combined multibyte stdout and stderr and quiesces descendants", async (context) => {
+  if (!requirePosixProcessGroups(context)) return;
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-output-cap-"));
+  const pidFile = path.join(root, "descendant.pid");
+  const engine = path.join(root, "overflow.mjs");
+  await writeFile(engine, [
+    "import { spawn } from 'node:child_process';",
+    "import { writeFileSync } from 'node:fs';",
+    `const child = spawn(process.execPath, ['-e', ${JSON.stringify("process.on('SIGTERM', () => undefined); setInterval(() => undefined, 1000)")}], { stdio: 'ignore' });`,
+    `writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));`,
+    "process.on('SIGTERM', () => undefined);",
+    "const output = '🐙'.repeat(2 * 1024 * 1024);",
+    "process.stdout.write(output); process.stderr.write(output);",
+    "setInterval(() => undefined, 1000);"
+  ].join("\n"));
+  try {
+    const child = spawnEngine({
+      command: process.execPath, commandArgs: [engine], engine: "agy", maxToolTurns: 1, timeoutMs: 10_000, toolAccess: "none"
+    }, "overflow", { cwd: root }, undefined);
+    await assert.rejects(readChild(child, 10_000, []), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, `CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`);
+      assert.ok(error.message.length < 120);
+      return true;
+    });
+    const descendantPid = Number(await readFile(pidFile, "utf8"));
+    assert.throws(() => process.kill(descendantPid, 0), { code: "ESRCH" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("codex child stdin EPIPE does not replace the engine exit diagnostic", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-epipe-"));
   const stub = path.join(root, "early-exit-engine.mjs");
@@ -215,3 +247,152 @@ test("codex child stdin EPIPE does not replace the engine exit diagnostic", asyn
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("protected host control variables never reach Codex, Grok, or AGY children", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-control-token-"));
+  const controlEnv = "DAIMON_HOST_CONTROL_TOKEN_CANARY";
+  const controlToken = "must-never-reach-engine";
+  const unrelatedEnv = "DAIMON_UNRELATED_HOST_CANARY";
+  const modelEnv = "OPENAI_API_KEY";
+  process.env[controlEnv] = controlToken;
+  process.env[unrelatedEnv] = "must-never-reach-engine";
+  process.env[modelEnv] = "must-never-reach-engine";
+  const probe = path.join(root, "probe.mjs");
+  await writeFile(probe, `#!/usr/bin/env node\nprocess.stdout.write([process.env.${controlEnv} ?? "absent", process.env.${unrelatedEnv} ?? "absent", process.env.${modelEnv} ?? "absent", process.env.CODEX_HOME ?? process.env.GROK_HOME ?? process.env.ANTIGRAVITY_CLI_HOME ?? "missing"].join("|"));`);
+  await chmod(probe, 0o700);
+  try {
+    for (const engine of ["codex", "grok", "agy"] as const) {
+      const engineHomePath = path.join(root, engine, engine === "codex" ? ".codex" : engine === "grok" ? ".grok" : ".antigravity-cli");
+      const options = engine === "agy"
+        ? { engine, command: probe, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000, toolAccess: "none" as const, redactedEnvironmentNames: [controlEnv], engineHomePath }
+        : { engine, command: probe, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000, redactedEnvironmentNames: [controlEnv], engineHomePath };
+      const { session } = await createCliSessionFactory(options)({ cwd: root, runtimeHomePath: path.join(root, engine) });
+      let output = "";
+      session.subscribe((event) => {
+        if (event.type === "turn_end" && "content" in event.message && Array.isArray(event.message.content)) {
+          output = event.message.content.filter((item) => item.type === "text").map((item) => item.text).join("");
+        }
+      });
+      await session.prompt("probe");
+      assert.equal(output, `absent|absent|absent|${engineHomePath}`);
+      await session.disposeAsync?.();
+    }
+  } finally {
+    delete process.env[controlEnv];
+    delete process.env[unrelatedEnv];
+    delete process.env[modelEnv];
+    await rm(root, { recursive: true, force: true });
+  }
+  void context;
+});
+
+test("disposing a CLI session kills a stubborn process group before returning", async (context) => {
+  if (!requirePosixProcessGroups(context)) return;
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-stop-"));
+  const stubborn = path.join(root, "stubborn.mjs");
+  const ready = path.join(root, "ready");
+  await writeFile(stubborn, `#!/usr/bin/env node\nimport { writeFileSync } from 'node:fs'; process.on('SIGTERM', () => undefined); writeFileSync(${JSON.stringify(ready)}, 'ready'); setInterval(() => undefined, 1000);`);
+  await chmod(stubborn, 0o700);
+  try {
+    const { session } = await createCliSessionFactory({
+      engine: "agy", command: stubborn, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000, toolAccess: "none"
+    })({ cwd: root });
+    const running = session.prompt("hold");
+    void running.catch(() => undefined);
+    await waitForFile(ready);
+    const started = Date.now();
+    await session.disposeAsync?.();
+    assert.ok(Date.now() - started >= 900);
+    await assert.rejects(running);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("disposing during MCP setup prevents an engine process from spawning", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-mcp-cancel-"));
+  const marker = path.join(root, "engine-started");
+  const engine = path.join(root, "engine.mjs");
+  await writeFile(engine, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "started");`);
+  try {
+    let session: Awaited<ReturnType<ReturnType<typeof createCliSessionFactory>>>["session"] | undefined;
+    const factory = createCliSessionFactory({
+      command: process.execPath, commandArgs: [engine], engine: "codex", maxToolTurns: 1, timeoutMs: 10_000,
+      onToolsMounted: () => session?.dispose()
+    });
+    ({ session } = await factory({ cwd: root }));
+    await assert.rejects(session.prompt("cancel"), /cancelled|disposed/);
+    await session.disposeAsync?.();
+    await assert.rejects(access(marker));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("disposing from a Server.prototype.listen interleaving never leaves an MCP listener", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-mcp-listen-race-"));
+  const prototype = Server.prototype as unknown as {
+    listen: (this: Server, ...args: unknown[]) => Server;
+  };
+  const originalListen = prototype.listen;
+  let activeSession: Awaited<ReturnType<ReturnType<typeof createCliSessionFactory>>>["session"] | undefined;
+  let intercepted: Server | undefined;
+  prototype.listen = function (this: Server, ...args: unknown[]): Server {
+    intercepted = this;
+    activeSession?.dispose();
+    return originalListen.apply(this, args);
+  };
+  try {
+    for (let attempt = 0; attempt < 32; attempt += 1) {
+      const { session } = await createCliSessionFactory({
+        command: process.execPath, commandArgs: ["-e", "process.exit(0)"], engine: "codex", maxToolTurns: 1, timeoutMs: 10_000
+      })({ cwd: root });
+      activeSession = session;
+      intercepted = undefined;
+      await assert.rejects(session.prompt(`cancel-${attempt}`), /cancelled|disposed/);
+      await session.disposeAsync?.();
+      const mounted = intercepted as Server | undefined;
+      assert.ok(mounted, "MCP listener was not intercepted");
+      assert.equal(mounted.listening, false);
+      assert.equal(mounted.address(), null);
+    }
+  } finally {
+    prototype.listen = originalListen;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("disposing during Grok registration terminates setup before the engine starts", async (context) => {
+  if (!requirePosixProcessGroups(context)) return;
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-grok-cancel-"));
+  const ready = path.join(root, "add-ready");
+  const marker = path.join(root, "engine-started");
+  const grok = path.join(root, "grok.mjs");
+  await writeFile(grok, `import { writeFileSync } from "node:fs"; const args = process.argv.slice(2); if (args.includes("add")) { writeFileSync(${JSON.stringify(ready)}, "ready"); process.on("SIGTERM", () => undefined); setInterval(() => undefined, 1000); } else if (args.includes("remove")) process.exit(0); else writeFileSync(${JSON.stringify(marker)}, "started");`);
+  try {
+    const { session } = await createCliSessionFactory({
+      command: process.execPath, commandArgs: [grok], engine: "grok", maxToolTurns: 1, timeoutMs: 10_000
+    })({ cwd: root });
+    const pending = session.prompt("cancel");
+    void pending.catch(() => undefined);
+    await waitForFile(ready);
+    await session.disposeAsync?.();
+    await assert.rejects(pending);
+    await assert.rejects(access(marker));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function waitForFile(filePath: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try { await access(filePath); return; } catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
+  }
+  throw new Error("child did not become ready");
+}
+
+function requirePosixProcessGroups(context: { skip(message?: string): void }): boolean {
+  if (process.platform !== "win32") return true;
+  context.skip("detached process groups are not available on Windows");
+  return false;
+}
