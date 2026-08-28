@@ -8,8 +8,11 @@ top of Pi. A Daimon runs one harnessed agent inside a caller-prepared workspace.
 Spawnfile compiles and deploys orgs, nested teams, member-owned schedules,
 Moltnet wiring, and workspace resources. Daimon executes one agent runtime: it
 accepts a wake selected by that runtime's organization policy and runs one
-turn. It does not know the org graph, schedule other agents, or let Simfile or
-a world service trigger cognition.
+turn. Its strict organization-runtime v2 host owns each configured agent's
+durable `cron`, `every`, or `disabled` schedule without learning the Spawnfile
+org graph. Simfile and world services do not trigger cognition.
+
+Spawnfile may also compile per-agent production MCP and Moltnet capabilities into this config. Daimon lists each MCP server at startup, mounts only its declared tool allowlist into Codex/Grok cognition turns, and bounds calls to 10 seconds and 64 KiB. Moltnet exposes one scoped natural-language send tool whose deterministic delivery id derives from the active wake, agent, target, and text. Accepted tool receipts are fsynced under the agent runtime home and replayed after restart; transport policy remains Spawnfile/Moltnet-owned.
 
 For a world-capable `kind: every` wake, the harness starts without a decision
 token and privately calls `world_claim` before exposing any other world tool.
@@ -77,9 +80,16 @@ const config = parseOrganizationRuntimeConfig({
 });
 ```
 
-It intentionally contains no teams, roles, parent/member links, schedules,
-wake policies, deployment settings, Moltnet data, commands, argument arrays,
-environment maps, or credentials. `controlTokenEnv` is only the safe name of a
+The package also includes the canonical runtime contract at
+`dist/runtime/contract-manifest.json` and its exact-byte SHA-256 sidecar at
+`dist/runtime/contract-manifest.sha256`. Every build regenerates both from the
+same data-only constants exported as `RUNTIME_CONTRACT_MANIFEST`; the digest is
+encoded as `sha256:<lowercase hex>`.
+
+It intentionally contains no teams, roles, parent/member links, wake policies,
+deployment settings, Moltnet data, commands, argument arrays, environment maps,
+or credentials. V2 agents carry one normalized native schedule; durable state
+and acceptance provide restart-safe occurrence execution. `controlTokenEnv` is only the safe name of a
 variable; the token value is never serialized. The only organization-host
 engine intents are `codex`, `grok`, and `agy`; Pi remains available through the
 separate one-agent `@noopolis/daimon/pi` API.
@@ -192,13 +202,22 @@ not be group/other writable. Daimon never creates or removes these roots.
 
 For a production CLI engine, Daimon resolves the engine from `PATH` once,
 pins its canonical executable identity, probes only `--version`, and rechecks
-that identity before every child process. Codex and Grok use caller-provisioned
-private `.codex/auth.json` and `.grok/auth.json` refresh-token files beneath
-each agent's `runtimeHomePath`. Their children receive only the matching
-engine home, runtime/XDG paths, locale/timezone, and a PATH sufficient for the
-already pinned executable. They never inherit arbitrary host variables.
-Missing, replaced, malformed, or unsafe engine authority prevents startup or
-fails the affected wake without publishing credential contents or file paths.
+that identity before every child process. Codex uses a caller-provisioned
+private `.codex/auth.json` refresh credential beneath each agent's
+`runtimeHomePath`. Grok instead uses one host-wide durable subscription realm:
+a read-only operator bootstrap seeds the authority, and Daimon serializes
+turns while staging and reconciling the rotating credential into each private
+agent home. Sessions and non-auth state remain isolated per agent. Engine
+children receive only the matching engine home, runtime/XDG paths,
+locale/timezone, and a PATH sufficient for the already pinned executable.
+Before every Grok process, Daimon rewrites its exact custom sandbox profile and
+requires a fresh kernel-enforcement receipt covering the durable realm,
+read-only bootstrap, and every peer workspace/runtime home. A fail-open
+Landlock/Seatbelt warning, missing deny path, or profile mutation fails the
+wake before cognition.
+They never inherit arbitrary host variables. Missing, replaced, malformed,
+stale, or unsafe engine authority prevents startup or fails the affected wake
+without publishing credential contents or file paths.
 
 AGY subscription authentication is different: it uses OS-native secure
 storage. Daimon supervises one private D-Bus plus Secret Service realm for all
