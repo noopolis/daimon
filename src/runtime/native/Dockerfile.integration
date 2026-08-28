@@ -1,0 +1,10 @@
+FROM gcc:14-bookworm@sha256:5e927c284bf55a7dc796262e311a0703344f62f41f5621eb56843111b1d37e15
+COPY . /src/
+RUN mkdir -p /opt/daimon/bin \
+ && gcc -std=c17 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 -o /opt/daimon/bin/daimon-engine-broker /src/engineBrokerLauncher.c -Wl,-Bstatic -lcrypto -Wl,-Bdynamic \
+ && gcc -std=c17 -Wall -Wextra -Werror -O2 -o /usr/local/bin/grok /src/fixtureWorker.c \
+ && gcc -std=c17 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 -o /integration /src/engineBrokerLauncher.integration.c -Wl,-Bstatic -lcrypto -Wl,-Bdynamic \
+ && groupadd -g 2000 daimon-org && useradd -u 2000 -g 2000 daimon-org \
+ && groupadd -g 2100 daimon-broker && useradd -u 2100 -g 2100 daimon-broker \
+ && groupadd -g 2200 daimon-worker && useradd -u 2200 -g 2200 daimon-worker
+CMD ["/integration"]
