@@ -1,6 +1,10 @@
 {
   "extends": "./tsconfig.json",
   "exclude": [
-    "src/**/*.test.ts"
+    "src/**/*.test.ts",
+    "src/runtime/testRuntimeMoltnetActions.ts",
+    "src/runtime/testRuntimeMcpActions.ts",
+    "src/runtime/fixtures/testMcpServer.mjs",
+    "src/runtime/testRuntimeSubprocess.ts"
   ]
 }
