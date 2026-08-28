@@ -19,6 +19,8 @@ import { createPiModelRegistry } from "./modelRegistry.js";
 import { createPiMemoryTools, piMemoryToolNames, type PiMemoryToolContextRef } from "./memoryTools.js";
 import { createResourceLoader } from "./prompts.js";
 import { PiAgentHandle, type PiNativeSessionCreator, type PiSessionCreator, type PiSessionLike } from "./piAgentHandle.js";
+import { type PiWakeEnvironmentContextRef } from "./piAgentWakeSupport.js";
+import { DAIMON_WAKE_ID_ENV } from "./cliEnvironment.js";
 import { createPiWorldTools, piWorldToolNames, type PiWorldBinding } from "./worldTools.js";
 import type { PiWorldToolContextRef } from "./worldNudge.js";
 import {
@@ -57,6 +59,8 @@ type PiHarnessBaseOptions = {
   };
   thinkingLevel?: PiThinkingLevel;
   world?: PiWorldBinding;
+  productionTools?: readonly ToolDefinition[];
+  wakeEnvironmentContext?: PiWakeEnvironmentContextRef;
 };
 
 export type PiHarnessOptions = PiHarnessBaseOptions & (
@@ -97,7 +101,8 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       `${input.runtimeHomePath}/.local/share`,
       `${input.runtimeHomePath}/.local/state`,
       `${input.runtimeHomePath}/.cache`,
-      `${input.runtimeHomePath}/.tmp`
+      `${input.runtimeHomePath}/.tmp`,
+      `${input.runtimeHomePath}/tool-state`
     ].map((directory) => mkdir(directory, { recursive: true })));
     await mkdir(input.workspacePath, { recursive: true });
     const memoryRuntimeHomePath = this.options.memory?.runtimeHomePath ?? input.runtimeHomePath;
@@ -130,6 +135,7 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       this.options.world === undefined ? undefined : {};
     const rawTrainingCaptureRef: PiRawTrainingCaptureRef | undefined =
       this.options.rawTrainingCapture === undefined ? undefined : {};
+    const wakeEnvironmentContext: PiWakeEnvironmentContextRef = this.options.wakeEnvironmentContext ?? {};
     const sessionInput = (mode: Parameters<PiSessionCreator>[0], sessionDirectory: string) => {
       const memoryTools = memory === undefined || memoryToolContext === undefined
         ? []
@@ -153,11 +159,12 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
       ])];
       const protectedBash = protectedNames.length === 0 || input.tools?.includes("bash") === false
         ? []
-        : [createProtectedBashTool(input.workspacePath, input.runtimeHomePath, protectedNames)];
+        : [createProtectedBashTool(input.workspacePath, input.runtimeHomePath, protectedNames, wakeEnvironmentContext)];
       const toolNames = [
         ...(input.tools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"]),
         ...piMemoryToolNames(memoryTools),
         ...(worldTools === undefined ? [] : piWorldToolNames(worldTools))
+        ,...(this.options.productionTools ?? []).map((tool) => tool.name)
       ];
 
       return {
@@ -175,8 +182,8 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         }),
         tools: [...new Set(toolNames)],
         customTools: worldTools === undefined
-          ? [...protectedBash, ...memoryTools]
-          : [...protectedBash, ...memoryTools, ...worldTools],
+          ? [...protectedBash, ...memoryTools, ...(this.options.productionTools ?? [])]
+          : [...protectedBash, ...memoryTools, ...worldTools, ...(this.options.productionTools ?? [])],
         sessionManager: SessionManager.create(input.workspacePath, sessionDirectory),
         settingsManager: SettingsManager.inMemory({
           compaction: { enabled: false },
@@ -213,7 +220,8 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         worldToolContext === undefined
           ? undefined
           : { instructions: input.instructions, thinkingLevel: this.options.thinkingLevel ?? "off" },
-        session
+        session,
+        wakeEnvironmentContext
       );
     }
 
@@ -245,12 +253,18 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
           instructions: input.instructions,
           thinkingLevel: this.options.thinkingLevel ?? "off"
         },
-      undefined
+      undefined,
+      wakeEnvironmentContext
     );
   }
 }
 
-function createProtectedBashTool(workspacePath: string, runtimeHomePath: string, protectedNames: readonly string[]): ToolDefinition {
+function createProtectedBashTool(
+  workspacePath: string,
+  runtimeHomePath: string,
+  protectedNames: readonly string[],
+  wakeEnvironmentContext: PiWakeEnvironmentContextRef
+): ToolDefinition {
   const bash = createBashTool(workspacePath, {
     spawnHook: (context) => ({
       ...context,
@@ -261,7 +275,10 @@ function createProtectedBashTool(workspacePath: string, runtimeHomePath: string,
         XDG_DATA_HOME: `${runtimeHomePath}/.local/share`,
         XDG_STATE_HOME: `${runtimeHomePath}/.local/state`,
         XDG_CACHE_HOME: `${runtimeHomePath}/.cache`,
-        TMPDIR: `${runtimeHomePath}/.tmp`
+        TMPDIR: `${runtimeHomePath}/.tmp`,
+        ...(wakeEnvironmentContext.current === undefined
+          ? {}
+          : { [DAIMON_WAKE_ID_ENV]: wakeEnvironmentContext.current })
       }
     })
   });

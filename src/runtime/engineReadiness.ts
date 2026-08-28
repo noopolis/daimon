@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 
 import { cliChildEnvironment } from "../pi/cliEnvironment.js";
 import type { OrganizationRuntimeAgentConfig } from "./organizationRuntime.js";
+import { hasRefreshablePortableCredential, portableCredentialSecretValues } from "./portableCredentialAuth.js";
 
 const MAX_AUTH_BYTES = 64 * 1024;
 const MAX_PROBE_BYTES = 8 * 1024;
@@ -135,29 +136,64 @@ async function verifyEngineAuth(
 async function verifyPortableEngineAuth(agentId: string, engine: "codex" | "grok", engineHomePath: string): Promise<void> {
   const authPath = engineAuthFile(engine, engineHomePath);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let buffer: Buffer | undefined;
   try {
     const home = await lstat(engineHomePath);
     if (!home.isDirectory() || home.isSymbolicLink() || home.uid !== process.getuid?.() || (home.mode & 0o777) !== 0o700) {
       throw new Error("unsafe engine home");
     }
     const entry = await lstat(authPath);
-    if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== process.getuid?.() || (entry.mode & 0o777) !== 0o600 || entry.size > MAX_AUTH_BYTES) {
-      throw new Error("unsafe auth artifact");
-    }
+    assertPrivateAuthEntry(entry);
     handle = await open(authPath, constants.O_RDONLY | noFollow());
     const opened = await handle.stat();
-    if (!sameIdentity(identity(entry), identity(opened)) || opened.size > MAX_AUTH_BYTES) throw new Error("auth artifact changed");
-    const buffer = Buffer.alloc(Number(opened.size));
-    await handle.read(buffer, 0, buffer.length, 0);
-    const value: unknown = JSON.parse(buffer.toString("utf8"));
-    const tokens = tokenPair(value);
-    if (tokens.access === undefined || tokens.refresh === undefined) throw new Error("unsupported auth artifact");
-    const expiry = expiryAt(value);
-    if (expiry !== undefined && expiry <= Date.now() && !tokens.refresh) throw new Error("expired auth artifact");
+    assertPrivateAuthEntry(opened);
+    if (!sameIdentity(identity(entry), identity(opened))) throw new Error("auth artifact changed");
+    buffer = await handle.readFile();
+    const after = await handle.stat();
+    assertPrivateAuthEntry(after);
+    if (!sameIdentity(identity(opened), identity(after))) throw new Error("auth artifact changed");
+    if (!hasRefreshablePortableCredential(engine, buffer)) throw new Error("unsupported auth artifact");
   } catch {
     throw unavailable(agentId, engine, "subscription authentication is not ready; provision the supported local credential and retry");
   } finally {
+    buffer?.fill(0);
     await handle?.close().catch(() => undefined);
+  }
+}
+
+/** Securely rereads the currently staged provider credential for exact output redaction. */
+export async function readPortableEngineCredentialSecrets(
+  agentId: string,
+  engine: "codex" | "grok",
+  engineHomePath: string
+): Promise<readonly string[]> {
+  const authPath = engineAuthFile(engine, engineHomePath);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let buffer: Buffer | undefined;
+  try {
+    const home = await lstat(engineHomePath);
+    if (!home.isDirectory() || home.isSymbolicLink() || home.uid !== process.getuid?.() || (home.mode & 0o777) !== 0o700) throw new Error("unsafe");
+    const before = await lstat(authPath); assertPrivateAuthEntry(before);
+    handle = await open(authPath, constants.O_RDONLY | noFollow());
+    const opened = await handle.stat(); assertPrivateAuthEntry(opened);
+    if (!sameIdentity(identity(before), identity(opened))) throw new Error("changed");
+    buffer = await handle.readFile();
+    const after = await handle.stat(); assertPrivateAuthEntry(after);
+    if (!sameIdentity(identity(opened), identity(after)) || !hasRefreshablePortableCredential(engine, buffer)) throw new Error("changed");
+    return portableCredentialSecretValues(engine, buffer);
+  } catch {
+    throw unavailable(agentId, engine, "subscription authentication is not ready");
+  } finally {
+    buffer?.fill(0);
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function assertPrivateAuthEntry(entry: Awaited<ReturnType<typeof lstat>>): void {
+  if (!entry.isFile() || entry.isSymbolicLink() || Number(entry.uid) !== process.getuid?.()
+    || Number(entry.nlink) !== 1 || (Number(entry.mode) & 0o777) !== 0o600
+    || Number(entry.size) < 1 || Number(entry.size) > MAX_AUTH_BYTES) {
+    throw new Error("unsafe auth artifact");
   }
 }
 
@@ -187,33 +223,6 @@ export async function verifyAgySubscriptionEnrollment(
       else reject(unavailable(agentId, "agy", "subscription enrollment is required; run the Daimon AGY bootstrap command"));
     });
   });
-}
-function tokenPair(value: unknown): { access?: string; refresh?: string } {
-  const source = object(value);
-  const nested = object(source?.tokens) ?? source;
-  return {
-    access: firstString(nested, ["access_token", "accessToken", "token"]),
-    refresh: firstString(nested, ["refresh_token", "refreshToken"])
-  };
-}
-
-function expiryAt(value: unknown): number | undefined {
-  const candidate = firstNumber(object(value), ["expires_at", "expiresAt", "expiry"])
-    ?? firstNumber(object(object(value)?.tokens), ["expires_at", "expiresAt", "expiry"]);
-  if (candidate === undefined) return undefined;
-  return candidate < 10_000_000_000 ? candidate * 1_000 : candidate;
-}
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-function firstString(value: Record<string, unknown> | undefined, names: readonly string[]): string | undefined {
-  for (const name of names) if (typeof value?.[name] === "string" && value[name]!.length > 0) return value[name] as string;
-  return undefined;
-}
-function firstNumber(value: Record<string, unknown> | undefined, names: readonly string[]): number | undefined {
-  for (const name of names) if (typeof value?.[name] === "number" && Number.isFinite(value[name])) return value[name] as number;
-  return undefined;
 }
 function noFollow(): number { return (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0; }
 function identity(value: Awaited<ReturnType<typeof stat>>): FileIdentity {

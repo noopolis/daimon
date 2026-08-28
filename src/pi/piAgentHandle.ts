@@ -28,6 +28,7 @@ import {
   type PiSession,
   type PiSessionCreator,
   type PiSessionLike,
+  type PiWakeEnvironmentContextRef,
   type WakeSessionSelection
 } from "./piAgentWakeSupport.js";
 import { readMemoryContext, type MemoryPrepareTurnResult, type MemoryRuntime } from "@noopolis/mneme";
@@ -54,7 +55,8 @@ export class PiAgentHandle implements AgentHandle {
     rawTrainingCaptureRef?: PiRawTrainingCaptureRef,
     rawTrainingCaptureOptions?: PiRawTrainingCaptureOptions,
     worldTrajectoryIdentity?: PiWorldTrajectoryIdentity,
-    rawTrainingCaptureSession?: PiSession
+    rawTrainingCaptureSession?: PiSession,
+    wakeEnvironmentContext?: PiWakeEnvironmentContextRef
   );
   constructor(
     id: string,
@@ -69,7 +71,8 @@ export class PiAgentHandle implements AgentHandle {
     rawTrainingCaptureRef?: never,
     rawTrainingCaptureOptions?: never,
     worldTrajectoryIdentity?: PiWorldTrajectoryIdentity,
-    rawTrainingCaptureSession?: never
+    rawTrainingCaptureSession?: never,
+    wakeEnvironmentContext?: PiWakeEnvironmentContextRef
   );
   constructor(
     readonly id: string,
@@ -84,7 +87,8 @@ export class PiAgentHandle implements AgentHandle {
     private readonly rawTrainingCaptureRef?: PiRawTrainingCaptureRef,
     private readonly rawTrainingCaptureOptions?: PiRawTrainingCaptureOptions,
     private readonly worldTrajectoryIdentity?: PiWorldTrajectoryIdentity,
-    private readonly piSessionForRawCapture?: PiSession
+    private readonly piSessionForRawCapture?: PiSession,
+    private readonly wakeEnvironmentContext?: PiWakeEnvironmentContextRef
   ) {
     this.stampTurnInputSubmitted = dependencies.runWake ?? stampTurnInputSubmitted;
     this.stampTurnOutputCompleted = dependencies.completeTurn ?? stampTurnOutputCompleted;
@@ -149,6 +153,9 @@ export class PiAgentHandle implements AgentHandle {
       ? formatWakePrompt(event)
       : safeWakeText;
     try {
+      if (this.wakeEnvironmentContext !== undefined) {
+        this.wakeEnvironmentContext.current = event.id;
+      }
       if (this.worldToolContext !== undefined) {
         this.worldToolContext.current = worldContext;
       }
@@ -220,6 +227,7 @@ export class PiAgentHandle implements AgentHandle {
       }
       stage = "engine_prompt";
       const engineStartedAt = Date.now();
+      selectedSession.session.bindWake?.(event);
       await selectedSession.session.prompt(promptText, { expandPromptTemplates: false });
       enginePromptMs = Date.now() - engineStartedAt;
 
@@ -344,6 +352,10 @@ export class PiAgentHandle implements AgentHandle {
 
       throw error;
     } finally {
+      selectedSession?.session.bindWake?.();
+      if (this.wakeEnvironmentContext !== undefined) {
+        this.wakeEnvironmentContext.current = undefined;
+      }
       if (this.memoryToolContext !== undefined) {
         this.memoryToolContext.current = undefined;
         this.memoryToolContext.observeTool = undefined;

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { startOrganizationRuntimeEngine } from "./engineDispatcher.js";
+import { grokSandboxProtectedPaths, startOrganizationRuntimeEngine } from "./engineDispatcher.js";
+import { AGY_SUBSCRIPTION_REALM, GROK_SUBSCRIPTION_REALM } from "./contractManifest.js";
+import type { EngineBrokerTurnClient } from "./engineBrokerControlClient.js";
 import { ORGANIZATION_RUNTIME_VERSION, type OrganizationRuntimeAgentConfig } from "./organizationRuntime.js";
 
 const rootConfig = (root: string, kind: OrganizationRuntimeAgentConfig["engine"]["kind"]): OrganizationRuntimeAgentConfig => ({
@@ -13,11 +15,35 @@ const rootConfig = (root: string, kind: OrganizationRuntimeAgentConfig["engine"]
   engine: { kind }
 });
 
+test("Grok sandbox protects the shared realm and every peer agent root", () => {
+  const current = rootConfig("/private/org", "grok");
+  const peer: OrganizationRuntimeAgentConfig = {
+    ...rootConfig("/private/org", "codex"),
+    id: "peer-agent"
+  };
+  const agy: OrganizationRuntimeAgentConfig = {
+    ...rootConfig("/private/org", "agy"),
+    id: "secure-agent"
+  };
+  const acceptanceStore = "/private/org/shared/wake-acceptance";
+  assert.deepEqual(grokSandboxProtectedPaths(current.id, [current, peer, agy], [acceptanceStore]), [
+    GROK_SUBSCRIPTION_REALM.bootstrapMountPath,
+    GROK_SUBSCRIPTION_REALM.durableMountPath,
+    AGY_SUBSCRIPTION_REALM.unlockMountPath,
+    AGY_SUBSCRIPTION_REALM.durableMountPath,
+    acceptanceStore,
+    peer.runtimeHomePath,
+    peer.workspacePath,
+    agy.runtimeHomePath,
+    agy.workspacePath
+  ]);
+});
+
 test("production dispatcher starts each closed engine intent through Daimon", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-"));
   const priorPath = process.env.PATH;
   const priorRun = process.env.NOOPOLIS_RUN_ID;
-  const stub = `#!/usr/bin/env node\nconst args = process.argv.slice(2); if (args.includes("mcp")) process.stdout.write("ok"); else process.stdout.write(process.env.DAIMON_DISPATCH_CONTROL ?? "absent");`;
+  const stub = `#!/usr/bin/env node\nconst args = process.argv.slice(2); const text = process.env.DAIMON_DISPATCH_CONTROL ?? "absent"; const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); if (args.includes("mcp")) process.stdout.write("ok"); else process.stdout.write(args.includes("--single") ? stream(text) : text);`;
   try {
     for (const name of ["codex", "grok", "agy"]) {
       const file = path.join(root, name);
@@ -73,6 +99,37 @@ test("production dispatcher waits for active engine quiescence during shutdown",
   }
 });
 
+test("production Grok dispatcher routes every wake through the broker without agent credentials", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-grok-realm-"));
+  const priorPath = process.env.PATH;
+  const priorRun = process.env.NOOPOLIS_RUN_ID;
+  const executable = path.join(root, "grok");
+  const config = rootConfig(root, "grok") as OrganizationRuntimeAgentConfig & { engine: { kind: "grok" } };
+  const auth = path.join(config.runtimeHomePath, ".grok", "auth.json");
+  let turns = 0;
+  try {
+    await mkdir(path.dirname(auth), { recursive: true, mode: 0o700 });
+    await mkdir(config.workspacePath, { recursive: true, mode: 0o700 });
+    await writeFile(executable, "#!/usr/bin/env node\nconst a=process.argv.slice(2); const s=v=>[{type:'assistant',parent_tool_use_id:null,session_id:'x',message:{role:'assistant',stop_reason:'end_turn',content:[{type:'text',text:v}]}},{type:'result',subtype:'success',is_error:false,result:v,stop_reason:'end_turn',session_id:'x'}].map(JSON.stringify).join('\\n'); if(a.includes('mcp')) process.stdout.write('ok'); else process.stdout.write(s('leased'));", { mode: 0o700 });
+    await chmod(executable, 0o700);
+    process.env.PATH = `${root}${path.delimiter}${priorPath ?? ""}`;
+    process.env.NOOPOLIS_RUN_ID = "dispatcher-grok-realm-test";
+    const broker: EngineBrokerTurnClient = {
+      async turn(agentId,wakeId,prompt,endpoint,signal) { turns += 1;assert.equal(agentId,config.id);assert.match(wakeId,/^(first|second)$/u);assert.match(prompt,/work/u);assert.match(endpoint,/^http:\/\/127\.0\.0\.1:\d+\/mcp$/u);assert.equal(signal?.aborted,false);return "brokered"; }
+    };
+    const handle = await startOrganizationRuntimeEngine(config, "DAIMON_UNUSED_CONTROL", undefined, undefined, broker);
+    assert.equal((await handle.wake({ id: "first", kind: "manual", text: "work" })).text, "brokered");
+    assert.equal((await handle.wake({ id: "second", kind: "manual", text: "work" })).text, "brokered");
+    assert.equal(turns, 2);
+    await assert.rejects(access(auth));
+    await handle.stop();
+  } finally {
+    if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
+    if (priorRun === undefined) delete process.env.NOOPOLIS_RUN_ID; else process.env.NOOPOLIS_RUN_ID = priorRun;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Daimon frames one escaped identity envelope for every production engine", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-identity-"));
   const priorPath = process.env.PATH;
@@ -81,8 +138,9 @@ test("Daimon frames one escaped identity envelope for every production engine", 
   const cliStub = [
     "#!/usr/bin/env node",
     "const args = process.argv.slice(2);",
+    "const stream = (value) => [{ type: 'assistant', parent_tool_use_id: null, session_id: 'fake', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: value }] } }, { type: 'result', subtype: 'success', is_error: false, result: value, stop_reason: 'end_turn', session_id: 'fake' }].map(JSON.stringify).join('\\n');",
     "if (args.includes('mcp')) process.stdout.write('ok');",
-    "else if (args.includes('--single')) process.stdout.write(args[args.indexOf('--single') + 1]);",
+    "else if (args.includes('--single')) { const text = args[args.indexOf('--single') + 1]; process.stdout.write(stream(text)); }",
     "else if (args.includes('--print')) process.stdout.write(args[args.indexOf('--print') + 1]);",
     "else { const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk); process.stdout.write(Buffer.concat(chunks).toString('utf8')); }"
   ].join("\n");
@@ -103,6 +161,8 @@ test("Daimon frames one escaped identity envelope for every production engine", 
       const envelope = JSON.stringify({ id: config.id, name: identity.name, instructions: identity.instructions });
       assert.equal(result.text.split(envelope).length - 1, 1);
       assert.match(result.text, /<daimon-agent-identity>/);
+      assert.match(result.text, /caller owns delivery to the source conversation/u);
+      assert.match(result.text, /Do not seek transport credentials or invoke a transport CLI/u);
       assert.match(result.text, /payload/);
       await handle.stop();
     }
@@ -127,6 +187,9 @@ async function seedAuth(root: string, kind: "codex" | "grok" | "agy"): Promise<v
   await mkdir(path.join(root, "workspace", kind), { recursive: true, mode: 0o700 });
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const file = path.join(directory, kind === "agy" ? "antigravity-oauth-token" : "auth.json");
-  await writeFile(file, JSON.stringify({ tokens: { access_token: "test-access", refresh_token: "test-refresh" } }), { mode: 0o600 });
+  const credential = kind === "grok"
+    ? { "https://auth.x.ai::test": { key: "test-access", refresh_token: "test-refresh", expires_at: "2099-01-01T00:00:00.000Z" } }
+    : { tokens: { access_token: "test-access", refresh_token: "test-refresh" } };
+  await writeFile(file, JSON.stringify(credential), { mode: 0o600 });
   await chmod(file, 0o600);
 }
