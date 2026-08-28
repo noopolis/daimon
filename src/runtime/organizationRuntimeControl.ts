@@ -8,9 +8,12 @@ import {
   type OrganizationRuntimeWakeRequest
 } from "./organizationRuntime.js";
 import { createOrganizationRuntimeHost } from "./organizationRuntimeHost.js";
+import { createScheduleController, type ScheduleController, type ScheduleControllerOptions } from "./schedule.js";
 import { WakeAcceptanceConflictError, WakeAcceptanceStore, WakeExecutionClaimLostError, publicAcceptance, type WakeAcceptanceStoreTestOptions } from "./wakeAcceptanceStore.js";
 import {
   parseWakeAcceptanceRequest,
+  ACTIVITY_V2_VERSION,
+  type OrganizationRuntimeActivityV2,
   type OrganizationRuntimeWakeAcceptanceRequest,
   type OrganizationRuntimeWakeAcceptanceResult,
   type OrganizationRuntimeWakeReceiptStatus
@@ -19,9 +22,13 @@ import {
 export type OrganizationRuntimeControlHost = OrganizationRuntimeHost & Readonly<{
   accept(request: unknown): Promise<OrganizationRuntimeWakeAcceptanceResult>;
   wakeReceipt(token: string | undefined, acceptanceId: string): Promise<OrganizationRuntimeWakeReceiptStatus | undefined>;
+  activityV2(token: string | undefined): Promise<OrganizationRuntimeActivityV2 | undefined>;
 }>;
 export type OrganizationRuntimeControlOptions = Readonly<{ acceptanceStorePath: string; controlToken?: string }>;
-type TestControlOptions = OrganizationRuntimeControlOptions & Readonly<{ storeOptions?: WakeAcceptanceStoreTestOptions }>;
+type TestControlOptions = OrganizationRuntimeControlOptions & Readonly<{
+  scheduleOptions?: Pick<ScheduleControllerOptions, "clearTimer" | "now" | "setTimer">;
+  storeOptions?: WakeAcceptanceStoreTestOptions;
+}>;
 type CoreHost = OrganizationRuntimeHost;
 type AcceptanceRecord = Awaited<ReturnType<WakeAcceptanceStore["accept"]>>["record"];
 
@@ -31,7 +38,9 @@ type AcceptanceRecord = Awaited<ReturnType<WakeAcceptanceStore["accept"]>>["reco
  */
 export function createOrganizationRuntimeControlHost(config: unknown, options: OrganizationRuntimeControlOptions): OrganizationRuntimeControlHost {
   const parsed = parseOrganizationRuntimeConfig(config);
-  return createControl(parsed, createOrganizationRuntimeHost(parsed), options);
+  return createControl(parsed, createOrganizationRuntimeHost(parsed, {
+    sharedProtectedPaths: [options.acceptanceStorePath]
+  }), options);
 }
 
 /** @internal Test seam; intentionally absent from the public runtime barrel. */
@@ -39,40 +48,100 @@ export function createOrganizationRuntimeControlHostWithCoreForTest(config: unkn
   return createControl(parseOrganizationRuntimeConfig(config), host, options, options.storeOptions);
 }
 
-function createControl(config: OrganizationRuntimeConfig, host: CoreHost, options: OrganizationRuntimeControlOptions, storeOptions?: WakeAcceptanceStoreTestOptions): OrganizationRuntimeControlHost {
+function createControl(config: OrganizationRuntimeConfig, host: CoreHost, options: TestControlOptions, storeOptions?: WakeAcceptanceStoreTestOptions): OrganizationRuntimeControlHost {
   const expectedToken = options.controlToken ?? process.env[config.host.controlTokenEnv];
   const knownAgents = new Set(config.agents.map((agent) => agent.id));
   const ownerId = randomUUID();
   const inFlight = new Map<string, Promise<void>>();
+  const agentTails = new Map<string, Promise<void>>();
+  const acceptanceTails = new Map<string, Promise<void>>();
+  const retryWaiters = new Set<() => void>();
   let store: WakeAcceptanceStore | undefined;
+  let schedules: ScheduleController | undefined;
   let started = false;
   let stopping = false;
+
+  const waitUntil = async (timestamp: string): Promise<void> => {
+    if (stopping) return;
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = (): void => { if (settled) return; settled = true; clearTimeout(timer); retryWaiters.delete(finish); resolve(); };
+      timer = setTimeout(finish, Math.max(1, Date.parse(timestamp) - Date.now()));
+      retryWaiters.add(finish);
+    });
+  };
+
+  const serializeAcceptance = async <T>(agentId: string, operation: () => Promise<T>): Promise<T> => {
+    const prior = acceptanceTails.get(agentId) ?? Promise.resolve();
+    const result = prior.catch(() => undefined).then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    acceptanceTails.set(agentId, tail);
+    try { return await result; } finally { if (acceptanceTails.get(agentId) === tail) acceptanceTails.delete(agentId); }
+  };
 
   const dispatch = (record: AcceptanceRecord): void => {
     if (inFlight.has(record.acceptance_id) || store === undefined) return;
     const activeStore = store;
-    const work = (async () => {
-      const claim = await activeStore.acquireClaim(record.acceptance_id, ownerId);
-      if (claim.state !== "acquired") return;
-      const current = await activeStore.transitionClaimed(record.acceptance_id, claim.claim, "running");
-      if (current.state !== "running") return;
-      const request: OrganizationRuntimeWakeRequest = {
-        token: expectedToken,
-        agentId: current.agent_id,
-        event: { version: "noopolis.daimon.wake.v1", id: current.delivery_id, kind: current.event.kind, text: current.event.text, occurredAt: current.event.occurred_at }
-      };
-      const result = await host.wake(request);
-      if (result.status === "completed") await activeStore.transitionClaimed(current.acceptance_id, claim.claim, "completed");
-      else if (result.status === "failed") await activeStore.transitionClaimed(current.acceptance_id, claim.claim, "failed", "engine_failed");
-      else if (result.status === "stopped") await activeStore.transitionClaimed(current.acceptance_id, claim.claim, "stopped", result.code === "host_stopped" ? "host_stopped" : "host_stopping");
-      else await activeStore.transitionClaimed(current.acceptance_id, claim.claim, "failed", result.code === "queue_full" ? "queue_full" : result.code === "unknown_agent" ? "unknown_agent" : "host_stopped");
-    })().catch(async (error: unknown) => {
-      if (error instanceof WakeExecutionClaimLostError) return;
-      const claim = await activeStore.acquireClaim(record.acceptance_id, ownerId).catch(() => undefined);
-      if (claim?.state === "acquired") await activeStore.transitionClaimed(record.acceptance_id, claim.claim, "failed", "engine_failed").catch(() => undefined);
-    }).finally(() => { inFlight.delete(record.acceptance_id); });
+    const execute = async (): Promise<void> => {
+      while (!stopping) {
+        const acquired = await activeStore.acquireClaim(record.acceptance_id, ownerId);
+        if (acquired.state === "terminal") return;
+        if (acquired.state === "held") { await waitUntil(acquired.retry_at); continue; }
+        let activeClaim = acquired.claim;
+        try {
+          const current = await activeStore.transitionClaimed(record.acceptance_id, activeClaim, "running");
+          if (current.state !== "running") return;
+          let renewal: Promise<void> = Promise.resolve();
+          const heartbeat = setInterval(() => {
+            renewal = renewal.then(async () => {
+              activeClaim = await activeStore.renewClaim(current.acceptance_id, activeClaim);
+              await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "running");
+            });
+          }, activeStore.claimHeartbeatIntervalMs());
+          const request: OrganizationRuntimeWakeRequest = {
+            token: expectedToken, agentId: current.agent_id,
+            event: { version: "noopolis.daimon.wake.v1", id: current.delivery_id, kind: current.event.kind, text: current.event.text, occurredAt: current.event.occurred_at }
+          };
+          let result;
+          try { result = await host.wake(request); } catch {
+            clearInterval(heartbeat); await renewal;
+            await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "failed", "engine_failed"); return;
+          }
+          clearInterval(heartbeat); await renewal;
+          // A crash here retries at least once with the same delivery/wake id.
+          if (result.status === "completed") await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "completed", undefined, result.text);
+          else if (result.status === "failed") await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "failed", "engine_failed");
+          else if (result.status === "stopped") await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "stopped", result.code === "host_stopped" ? "host_stopped" : "host_stopping");
+          else await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "failed", result.code === "queue_full" ? "queue_full" : result.code === "unknown_agent" ? "unknown_agent" : "host_stopped");
+          return;
+        } catch (error) {
+          if (!(error instanceof WakeExecutionClaimLostError)) await waitUntil(activeClaim.expires_at);
+        }
+      }
+    };
+    const prior = agentTails.get(record.agent_id) ?? Promise.resolve();
+    const work = prior.catch(() => undefined).then(execute).finally(() => {
+      inFlight.delete(record.acceptance_id);
+      if (agentTails.get(record.agent_id) === work) {
+        agentTails.delete(record.agent_id);
+        void schedules?.drain(record.agent_id);
+      }
+    });
     inFlight.set(record.acceptance_id, work);
+    agentTails.set(record.agent_id, work);
   };
+
+  const persistRequest = async (request: OrganizationRuntimeWakeAcceptanceRequest): Promise<OrganizationRuntimeWakeAcceptanceResult> => {
+      try {
+        const accepted = await store!.accept(request); dispatch(accepted.record); return publicAcceptance(accepted.record);
+      } catch (error) {
+        if (error instanceof WakeAcceptanceConflictError) return { version: "noopolis.daimon.wake-acceptance.v2", state: "rejected", code: "delivery_conflict" };
+        throw error;
+      }
+  };
+  const acceptRequest = async (request: OrganizationRuntimeWakeAcceptanceRequest): Promise<OrganizationRuntimeWakeAcceptanceResult> =>
+    await serializeAcceptance(request.agent_id, async () => await persistRequest(request));
 
   return {
     wake: async (request) => await host.wake(request),
@@ -88,6 +157,19 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
         store = opened;
         started = true;
         for (const record of await opened.recoverable(knownAgents)) dispatch(record);
+        if (config.version === "noopolis.daimon.organization-runtime.v2") {
+          schedules = createScheduleController({
+            acceptanceStorePath: options.acceptanceStorePath, agents: config.agents,
+            ...options.scheduleOptions,
+            accept: async (occurrence) => await serializeAcceptance(occurrence.agentId, async () => {
+              if (agentTails.has(occurrence.agentId)) return false;
+              const accepted = await persistRequest({ token: expectedToken, agent_id: occurrence.agentId, delivery_id: occurrence.deliveryId, event: { version: "noopolis.daimon.wake.v2", kind: "schedule", text: occurrence.prompt, occurred_at: occurrence.occurredAt } });
+              if (accepted.state !== "accepted") throw new Error(`scheduled wake ${occurrence.deliveryId} was not durably accepted`);
+              return true;
+            })
+          });
+          await schedules.start();
+        }
       } catch (error) {
         await host.stop().catch(() => undefined);
         await opened.close().catch(() => undefined);
@@ -100,26 +182,26 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
       if (!tokensEqual(expectedToken, request.token)) return { version: "noopolis.daimon.wake-acceptance.v2", state: "rejected", code: "unauthorized" };
       if (!started || stopping) return { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: stopping ? "host_stopping" : "host_stopped" };
       if (!knownAgents.has(request.agent_id)) return { version: "noopolis.daimon.wake-acceptance.v2", state: "rejected", code: "unknown_agent" };
-      try {
-        const accepted = await store!.accept(request);
-        dispatch(accepted.record);
-        return publicAcceptance(accepted.record);
-      } catch (error) {
-        if (error instanceof WakeAcceptanceConflictError) return { version: "noopolis.daimon.wake-acceptance.v2", state: "rejected", code: "delivery_conflict" };
-        throw error;
-      }
+      return await acceptRequest(request);
     },
     async wakeReceipt(token: string | undefined, acceptanceId: string): Promise<OrganizationRuntimeWakeReceiptStatus | undefined> {
       if (!tokensEqual(expectedToken, token) || store === undefined) return undefined;
       return await store.status(acceptanceId);
     },
+    async activityV2(token: string | undefined): Promise<OrganizationRuntimeActivityV2 | undefined> {
+      if (!tokensEqual(expectedToken, token) || store === undefined) return undefined;
+      return { version: ACTIVITY_V2_VERSION, items: await store.activity() };
+    },
     async stop(): Promise<OrganizationRuntimeShutdownCompletion> {
       stopping = true;
+      for (const wake of retryWaiters) wake();
+      await schedules?.stop();
       const result = await host.stop();
       await Promise.allSettled(inFlight.values());
       await store?.releaseClaims(ownerId);
       await store?.close();
       store = undefined;
+      schedules = undefined;
       started = false;
       return result;
     }

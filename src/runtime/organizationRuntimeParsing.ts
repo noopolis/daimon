@@ -4,24 +4,29 @@ import {
   ORGANIZATION_RUNTIME_MAX_STRING_BYTES,
   ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES,
+  ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS,
+  ORGANIZATION_RUNTIME_V2_VERSION,
   ORGANIZATION_RUNTIME_VERSION,
   type OrganizationRuntimeAgentConfig,
   type OrganizationRuntimeConfig,
   type OrganizationRuntimeEngineIntent,
   type OrganizationRuntimeEngineKind,
   type OrganizationRuntimeHostConfig,
+  type OrganizationRuntimeSchedule,
   type OrganizationRuntimeWakeRequest
 } from "./organizationRuntime.js";
 
 type RecordValue = Record<string, unknown>;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ENGINE_KINDS = new Set(["codex", "grok", "agy"]);
+const CRON_FIELD_BOUNDS = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]] as const;
 
 export function parseOrganizationRuntimeConfig(value: unknown): OrganizationRuntimeConfig {
   const root = object(snapshot(value, "config"), "config");
   size(root);
   exact(root, ["version", "host", "agents"], "config");
-  if (string(root.version, "config.version") !== ORGANIZATION_RUNTIME_VERSION) throw new TypeError(`config.version must equal ${ORGANIZATION_RUNTIME_VERSION}`);
+  const version = string(root.version, "config.version");
+  if (version !== ORGANIZATION_RUNTIME_VERSION && version !== ORGANIZATION_RUNTIME_V2_VERSION) throw new TypeError("config.version is not supported");
   const hostValue = object(root.host, "config.host");
   exact(hostValue, ["bindHost", "port", "controlTokenEnv"], "config.host");
   const host: OrganizationRuntimeHostConfig = {
@@ -31,13 +36,13 @@ export function parseOrganizationRuntimeConfig(value: unknown): OrganizationRunt
   if (rawAgents.length === 0 || rawAgents.length > ORGANIZATION_RUNTIME_MAX_AGENTS) throw new TypeError(`config.agents must contain between 1 and ${ORGANIZATION_RUNTIME_MAX_AGENTS} agents`);
   const ids = new Set<string>();
   const agents = rawAgents.map((item, index) => {
-    const agent = parseAgent(item, `config.agents[${index}]`);
+    const agent = parseAgent(item, `config.agents[${index}]`, version === ORGANIZATION_RUNTIME_V2_VERSION);
     if (ids.has(agent.id)) throw new TypeError(`config.agents has duplicate id ${agent.id}`);
     ids.add(agent.id);
     return agent;
   });
   isolated(agents);
-  return { version: ORGANIZATION_RUNTIME_VERSION, host, agents };
+  return { version: version as OrganizationRuntimeConfig["version"], host, agents };
 }
 
 export function parseOrganizationRuntimeWakeRequest(value: unknown): OrganizationRuntimeWakeRequest {
@@ -47,7 +52,7 @@ export function parseOrganizationRuntimeWakeRequest(value: unknown): Organizatio
   exact(event, ["version", "id", "kind", "text", "occurredAt"], "wake request.event");
   if (string(event.version, "wake request.event.version") !== "noopolis.daimon.wake.v1") throw new TypeError("wake request.event.version is not supported");
   const kind = string(event.kind, "wake request.event.kind");
-  if (kind !== "manual" && kind !== "message" && kind !== "external") throw new TypeError("wake request.event.kind is not supported");
+  if (kind !== "manual" && kind !== "message" && kind !== "schedule" && kind !== "external") throw new TypeError("wake request.event.kind is not supported");
   const text = string(event.text, "wake request.event.text");
   if (Buffer.byteLength(text, "utf8") > ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES) throw new TypeError("wake request.event.text exceeds the wake text limit");
   return { token: request.token === undefined ? undefined : string(request.token, "wake request.token"), agentId: nonEmpty(request.agentId, "wake request.agentId"), event: { version: "noopolis.daimon.wake.v1", id: nonEmpty(event.id, "wake request.event.id"), kind, text, occurredAt: rfc3339(event.occurredAt) } };
@@ -59,10 +64,96 @@ export function validateOrganizationRuntimeConfig(value: unknown): value is Orga
 
 export const isOrganizationRuntimeConfig = validateOrganizationRuntimeConfig;
 
-function parseAgent(value: unknown, label: string): OrganizationRuntimeAgentConfig {
+function parseAgent(value: unknown, label: string, v2: boolean): OrganizationRuntimeAgentConfig {
   const agent = object(value, label);
-  exact(agent, ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine"], label);
-  return { id: nonEmpty(agent.id, `${label}.id`), name: nonEmpty(agent.name, `${label}.name`), instructions: nonEmpty(agent.instructions, `${label}.instructions`), workspacePath: absolute(agent.workspacePath, `${label}.workspacePath`), runtimeHomePath: absolute(agent.runtimeHomePath, `${label}.runtimeHomePath`), engine: engine(agent.engine, `${label}.engine`) };
+  exactOptional(agent, v2 ? ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine", "schedule"] : ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine"], ["mcp", "moltnet"], label);
+  return {
+    id: nonEmpty(agent.id, `${label}.id`), name: nonEmpty(agent.name, `${label}.name`), instructions: nonEmpty(agent.instructions, `${label}.instructions`), workspacePath: absolute(agent.workspacePath, `${label}.workspacePath`), runtimeHomePath: absolute(agent.runtimeHomePath, `${label}.runtimeHomePath`), engine: engine(agent.engine, `${label}.engine`),
+    ...(v2 ? { schedule: schedule(agent.schedule, `${label}.schedule`) } : {}),
+    ...(agent.mcp === undefined ? {} : { mcp: mcpServers(agent.mcp, `${label}.mcp`) }),
+    ...(agent.moltnet === undefined ? {} : { moltnet: moltnet(agent.moltnet, `${label}.moltnet`) })
+  };
+}
+
+function mcpServers(value: unknown, label: string): OrganizationRuntimeAgentConfig["mcp"] {
+  const rows = array(value, label); if (rows.length > 8) throw new TypeError(`${label} exceeds server limit`);
+  const names = new Set<string>();
+  return rows.map((value, index) => {
+    const item = object(value, `${label}[${index}]`); exactOptional(item, ["name", "transport", "args", "env", "tools"], ["command", "url", "authSecretEnv"], `${label}[${index}]`);
+    const name = nonEmpty(item.name, `${label}[${index}].name`); if (names.has(name)) throw new TypeError(`${label} has duplicate name`); names.add(name);
+    const transport = string(item.transport, `${label}[${index}].transport`); if (!["stdio", "sse", "streamable_http"].includes(transport)) throw new TypeError(`${label} transport is invalid`);
+    const args = array(item.args, `${label}[${index}].args`).map((entry) => string(entry, `${label}.args`)); if (args.length > 32) throw new TypeError(`${label} args exceed limit`);
+    const envInput = object(item.env, `${label}[${index}].env`); const env = Object.fromEntries(Object.entries(envInput).map(([key, entry]) => [envName(key, `${label}.env key`), string(entry, `${label}.env.${key}`)]));
+    const tools = array(item.tools, `${label}[${index}].tools`).map((entry) => nonEmpty(entry, `${label}.tools`)); if (tools.length === 0 || tools.length > 32 || new Set(tools).size !== tools.length) throw new TypeError(`${label} tools are invalid`);
+    const command = item.command === undefined ? undefined : absolute(item.command, `${label}.command`); const url = item.url === undefined ? undefined : nonEmpty(item.url, `${label}.url`);
+    if ((transport === "stdio") !== (command !== undefined) || (transport === "stdio") === (url !== undefined)) throw new TypeError(`${label} endpoint is invalid`);
+    if (url !== undefined) { const parsed = new URL(url); if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["127.0.0.1", "localhost"].includes(parsed.hostname))) throw new TypeError(`${label}.url must be HTTPS or loopback HTTP`); }
+    return { name, transport: transport as "stdio" | "sse" | "streamable_http", args, env, tools, ...(command ? { command } : {}), ...(url ? { url } : {}), ...(item.authSecretEnv === undefined ? {} : { authSecretEnv: envName(item.authSecretEnv, `${label}.authSecretEnv`) }) };
+  });
+}
+
+function moltnet(value: unknown, label: string): NonNullable<OrganizationRuntimeAgentConfig["moltnet"]> {
+  const item = object(value, label); exact(item, ["cliPath", "configPath", "networks"], label);
+  const networks = array(item.networks, `${label}.networks`).map((value, index) => { const row = object(value, `${label}.networks[${index}]`); exact(row, ["id", "rooms", "dms"], `${label}.networks[${index}]`); return { id: nonEmpty(row.id, `${label}.id`), rooms: array(row.rooms, `${label}.rooms`).map((room) => nonEmpty(room, `${label}.room`)), dms: row.dms === true }; });
+  if (networks.length > 16 || new Set(networks.map((entry) => entry.id)).size !== networks.length) throw new TypeError(`${label}.networks are invalid`);
+  return { cliPath: absolute(item.cliPath, `${label}.cliPath`), configPath: absolute(item.configPath, `${label}.configPath`), networks };
+}
+
+function schedule(value: unknown, label: string): OrganizationRuntimeSchedule {
+  const input = object(value, label); const kind = string(input.kind, `${label}.kind`);
+  if (kind === "disabled") { exact(input, ["kind"], label); return { kind }; }
+  if (kind === "every") {
+    exact(input, ["kind", "interval_ms", "prompt"], label);
+    if (typeof input.interval_ms !== "number" || !Number.isInteger(input.interval_ms) || input.interval_ms < 1 || input.interval_ms > ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS) throw new TypeError(`${label}.interval_ms is outside its bound`);
+    return { kind, interval_ms: input.interval_ms, prompt: nonEmpty(input.prompt, `${label}.prompt`) };
+  }
+  if (kind === "cron") {
+    exact(input, ["kind", "cron", "timezone", "prompt"], label);
+    const cron = nonEmpty(input.cron, `${label}.cron`).trim().replace(/\s+/gu, " ");
+    if (!validCron(cron) || !cronCalendarPossible(cron)) throw new TypeError(`${label}.cron is invalid or impossible`);
+    const timezone = nonEmpty(input.timezone, `${label}.timezone`);
+    try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); } catch { throw new TypeError(`${label}.timezone is not an IANA timezone`); }
+    return { kind, cron, timezone, prompt: nonEmpty(input.prompt, `${label}.prompt`) };
+  }
+  throw new TypeError(`${label}.kind is not supported`);
+}
+
+function validCron(value: string): boolean {
+  const fields = value.split(/\s+/u);
+  return fields.length === 5 && fields.every((field, index) => validCronField(field, CRON_FIELD_BOUNDS[index]!));
+}
+
+function validCronField(field: string, [minimum, maximum]: readonly [number, number]): boolean {
+  return field.split(",").every((part) => {
+    const pieces = part.split("/");
+    const step = Number(pieces[1] ?? 1);
+    if (pieces.length > 2 || !pieces[0] || (pieces[1] !== undefined && !/^\d+$/u.test(pieces[1])) || !Number.isSafeInteger(step) || step < 1) return false;
+    const range = pieces[0]!;
+    if (range === "*") return true;
+    const bounds = range.split("-");
+    if (bounds.length > 2 || !bounds.every((bound) => /^\d+$/u.test(bound))) return false;
+    const first = Number(bounds[0]); const last = Number(bounds[1] ?? bounds[0]);
+    return first >= minimum && last <= maximum && first <= last;
+  });
+}
+
+function cronCalendarPossible(cron: string): boolean {
+  const fields = cron.split(/\s+/u).map((field, index) => cronValues(field, CRON_FIELD_BOUNDS[index]!));
+  for (let year = 2000; year < 2400; year += 1) for (const month of fields[3]!) {
+    const days = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    for (const day of fields[2]!) if (day <= days && fields[4]!.includes(new Date(Date.UTC(year, month - 1, day)).getUTCDay())) return true;
+  }
+  return false;
+}
+
+function cronValues(field: string, [minimum, maximum]: readonly [number, number]): number[] {
+  const result = new Set<number>();
+  for (const part of field.split(",")) {
+    const [range, rawStep] = part.split("/"); const step = Number(rawStep ?? 1);
+    const bounds = range === "*" ? [minimum, maximum] : range!.split("-").map(Number);
+    for (let value = bounds[0]!; value <= (bounds[1] ?? bounds[0]!); value += step) result.add(value === 7 && maximum === 7 ? 0 : value);
+  }
+  return [...result];
 }
 
 function engine(value: unknown, label: string): OrganizationRuntimeEngineIntent {
@@ -109,6 +200,7 @@ function object(value: unknown, label: string): RecordValue {
 }
 function array(value: unknown, label: string): readonly unknown[] { if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`); return value; }
 function exact(value: RecordValue, expected: readonly string[], label: string): void { const extras = Object.keys(value).filter((key) => !expected.includes(key)); const missing = expected.filter((key) => !Object.hasOwn(value, key)); if (extras.length || missing.length) throw new TypeError(`${label} must contain exactly ${expected.join(", ")}`); }
+function exactOptional(value: RecordValue, required: readonly string[], optional: readonly string[], label: string): void { const extras = Object.keys(value).filter((key) => !required.includes(key) && !optional.includes(key)); const missing = required.filter((key) => !Object.hasOwn(value, key)); if (extras.length || missing.length) throw new TypeError(`${label} has invalid fields`); }
 function isolated(agents: readonly OrganizationRuntimeAgentConfig[]): void { const paths = agents.flatMap((agent) => [{ agentId: agent.id, kind: "workspacePath", value: agent.workspacePath }, { agentId: agent.id, kind: "runtimeHomePath", value: agent.runtimeHomePath }]); for (let left = 0; left < paths.length; left += 1) for (let right = left + 1; right < paths.length; right += 1) { const first = paths[left]!; const second = paths[right]!; if (first.value === second.value || first.value.startsWith(`${second.value}/`) || second.value.startsWith(`${first.value}/`)) throw new TypeError(`agents ${first.agentId}.${first.kind} and ${second.agentId}.${second.kind} must not overlap`); } }
 function string(value: unknown, label: string): string { if (typeof value !== "string") throw new TypeError(`${label} must be a string`); if (Buffer.byteLength(value, "utf8") > ORGANIZATION_RUNTIME_MAX_STRING_BYTES || Array.from(value).length > ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS) throw new TypeError(`${label} exceeds the runtime string limit`); return value; }
 function nonEmpty(value: unknown, label: string): string { const result = string(value, label); if (!result.trim()) throw new TypeError(`${label} must not be empty`); return result; }

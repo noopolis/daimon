@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 
+import { ORGANIZATION_RUNTIME_ACTIVITY_V2_VERSION } from "../contracts/runtimeContractManifest.js";
+import { redactCredentialText } from "../core/credentialRedaction.js";
+
 export const WAKE_ACCEPTANCE_VERSION = "noopolis.daimon.wake-acceptance.v2" as const;
 export const WAKE_RECEIPT_STATUS_VERSION = "noopolis.daimon.wake-receipt-status.v2" as const;
 export const WAKE_V2_VERSION = "noopolis.daimon.wake.v2" as const;
+export const ACTIVITY_V2_VERSION = ORGANIZATION_RUNTIME_ACTIVITY_V2_VERSION;
 export const MAX_WAKE_ACCEPTANCE_BYTES = 16_384;
 export const MAX_WAKE_ACCEPTANCE_RECORD_BYTES = 65_536;
+export const MAX_WAKE_COMPLETION_TEXT_BYTES = 16_384;
 
 /** Public HTTP body schema; bearer authentication is intentionally a header. */
 export const WAKE_ACCEPTANCE_REQUEST_SCHEMA = {
@@ -13,14 +18,14 @@ export const WAKE_ACCEPTANCE_REQUEST_SCHEMA = {
     agent_id: { type: "string", minLength: 1, maxLength: MAX_WAKE_ACCEPTANCE_BYTES, pattern: "\\S" },
     delivery_id: { type: "string", minLength: 1, maxLength: MAX_WAKE_ACCEPTANCE_BYTES, pattern: "\\S" },
     event: { type: "object", additionalProperties: false, required: ["version", "kind", "text", "occurred_at"], properties: {
-      version: { const: WAKE_V2_VERSION }, kind: { enum: ["manual", "message", "external"] }, text: { type: "string", maxLength: MAX_WAKE_ACCEPTANCE_BYTES }, occurred_at: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
+      version: { const: WAKE_V2_VERSION }, kind: { enum: ["manual", "message", "schedule", "external"] }, text: { type: "string", maxLength: MAX_WAKE_ACCEPTANCE_BYTES }, occurred_at: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
     } }
   }
 } as const;
 export const WAKE_RECEIPT_STATUS_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema", $id: WAKE_RECEIPT_STATUS_VERSION, type: "object", additionalProperties: false,
   required: ["version", "acceptance_id", "agent_id", "delivery_id", "request_digest", "state", "accepted_at", "updated_at"], properties: {
-    version: { const: WAKE_RECEIPT_STATUS_VERSION }, acceptance_id: { type: "string", pattern: "^[0-9a-f-]{36}$" }, agent_id: { type: "string" }, delivery_id: { type: "string" }, request_digest: { type: "string", pattern: "^[a-f0-9]{64}$" }, state: { enum: ["accepted", "running", "completed", "failed", "stopped"] }, accepted_at: { type: "string" }, updated_at: { type: "string" }, code: { enum: ["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] }
+    version: { const: WAKE_RECEIPT_STATUS_VERSION }, acceptance_id: { type: "string", pattern: "^[0-9a-f-]{36}$" }, agent_id: { type: "string" }, delivery_id: { type: "string" }, request_digest: { type: "string", pattern: "^[a-f0-9]{64}$" }, state: { enum: ["accepted", "running", "completed", "failed", "stopped"] }, accepted_at: { type: "string" }, updated_at: { type: "string" }, code: { enum: ["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] }, text: { type: "string", maxLength: MAX_WAKE_COMPLETION_TEXT_BYTES }
   }
 } as const;
 
@@ -30,7 +35,7 @@ export type OrganizationRuntimeWakeAcceptanceRequest = Readonly<{
   token: string | undefined;
   agent_id: string;
   delivery_id: string;
-  event: Readonly<{ version: typeof WAKE_V2_VERSION; kind: "manual" | "message" | "external"; text: string; occurred_at: string }>;
+  event: Readonly<{ version: typeof WAKE_V2_VERSION; kind: "manual" | "message" | "schedule" | "external"; text: string; occurred_at: string }>;
 }>;
 export type OrganizationRuntimeWakeAcceptance = Readonly<{
   version: typeof WAKE_ACCEPTANCE_VERSION;
@@ -51,6 +56,20 @@ export type OrganizationRuntimeWakeReceiptStatus = Readonly<{
   accepted_at: string;
   updated_at: string;
   code?: WakeReceiptCode;
+  text?: string;
+}>;
+
+/** Bounded authenticated reply payload; strips common credential shapes before persistence. */
+export function sanitizeWakeCompletionText(value: string): string {
+  return redactCredentialText(value, [], MAX_WAKE_COMPLETION_TEXT_BYTES);
+}
+export type OrganizationRuntimeActivityV2Item = OrganizationRuntimeWakeReceiptStatus & Readonly<{
+  active: boolean;
+  queue_position?: number;
+}>;
+export type OrganizationRuntimeActivityV2 = Readonly<{
+  version: typeof ACTIVITY_V2_VERSION;
+  items: readonly OrganizationRuntimeActivityV2Item[];
 }>;
 export type OrganizationRuntimeWakeAcceptanceResult = OrganizationRuntimeWakeAcceptance | Readonly<{
   version: typeof WAKE_ACCEPTANCE_VERSION;
@@ -64,7 +83,7 @@ export function parseWakeAcceptanceRequest(value: unknown): OrganizationRuntimeW
   const event = record(root.event, "wake acceptance.event");
   exact(event, ["version", "kind", "text", "occurred_at"], "wake acceptance.event");
   const kind = text(event.kind, "wake acceptance.event.kind");
-  if (kind !== "manual" && kind !== "message" && kind !== "external") throw new TypeError("wake acceptance.event.kind is not supported");
+  if (kind !== "manual" && kind !== "message" && kind !== "schedule" && kind !== "external") throw new TypeError("wake acceptance.event.kind is not supported");
   const body = text(event.text, "wake acceptance.event.text");
   if (Buffer.byteLength(body, "utf8") > MAX_WAKE_ACCEPTANCE_BYTES) throw new TypeError("wake acceptance.event.text exceeds the wake text limit");
   if (text(event.version, "wake acceptance.event.version") !== WAKE_V2_VERSION) throw new TypeError("wake acceptance.event.version is not supported");

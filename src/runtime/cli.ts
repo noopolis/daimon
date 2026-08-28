@@ -1,19 +1,23 @@
 #!/usr/bin/env node
-import { readFile, realpath, stat } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, stat } from "node:fs/promises";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
+import path from "node:path";
 
 import { createOrganizationRuntimeHost } from "./organizationRuntimeHost.js";
 import { createOrganizationRuntimeControlHost } from "./organizationRuntimeControl.js";
 import { runAgySubscriptionBootstrap } from "./agySubscriptionBootstrap.js";
 import { parseOrganizationRuntimeConfig, parseOrganizationRuntimeWakeRequest } from "./organizationRuntime.js";
+import { runEngineBrokerServiceCli } from "./engineBrokerServiceCli.js";
 
 const MAX_BODY_BYTES = 1_048_576;
 const MAX_CONFIG_BYTES = 1_048_576;
 const ACCEPTANCE_STORE_ENV = "DAIMON_RUNTIME_ACCEPTANCE_STORE";
+const READINESS_RECEIPT_ENV = "DAIMON_RUNTIME_READINESS_RECEIPT";
 
 export async function runOrganizationRuntimeCli(arguments_: readonly string[], environment = process.env): Promise<void> {
+  if(arguments_.length===2&&arguments_[0]==="engine-broker"&&arguments_[1]==="serve"){await runEngineBrokerServiceCli();return;}
   const command = parseArguments(arguments_);
   const config = parseOrganizationRuntimeConfig(JSON.parse(await readBoundedFile(command.configPath)));
   if (command.kind === "agy-login") {
@@ -31,6 +35,7 @@ export async function runOrganizationRuntimeCli(arguments_: readonly string[], e
     void handleRequest(request, response, host, control, environment[config.host.controlTokenEnv]);
   });
   try {
+    if (environment[READINESS_RECEIPT_ENV]) await writeReadinessReceipt(environment[READINESS_RECEIPT_ENV]!, config);
     await listen(server, config.host.bindHost, config.host.port);
   } catch (error) {
     await host.stop();
@@ -60,6 +65,13 @@ export async function runOrganizationRuntimeCli(arguments_: readonly string[], e
   const onSignal = (): void => { void stop().catch((error: unknown) => { process.stderr.write(`${error instanceof Error ? error.message : "runtime shutdown failed"}\n`); process.exitCode = 1; }); };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
+}
+
+async function writeReadinessReceipt(file: string, config: ReturnType<typeof parseOrganizationRuntimeConfig>): Promise<void> {
+  const value = `${JSON.stringify({ version: "noopolis.daimon.readiness-receipt.v1", agents: config.agents.map((agent) => ({ agent_id: agent.id, engine: agent.engine.kind })).sort((left, right) => left.agent_id.localeCompare(right.agent_id)) })}\n`;
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 }); const temporary = `${file}.${process.pid}.tmp`;
+  const handle = await open(temporary, "wx", 0o600); try { await handle.writeFile(value); await handle.sync(); } finally { await handle.close(); }
+  await rename(temporary, file); const directory = await open(path.dirname(file), "r"); try { await directory.sync(); } finally { await directory.close(); }
 }
 
 export function parseOrganizationRuntimeCliArguments(arguments_: readonly string[]): Readonly<{
@@ -113,6 +125,11 @@ async function handleRequest(
       const acceptanceId = url.pathname.slice("/v2/wake-receipts/".length);
       const receipt = await control.wakeReceipt(expectedToken, acceptanceId);
       return receipt === undefined ? respond(response, 404, { error: "not_found" }) : respond(response, 200, receipt);
+    }
+    if (control !== undefined && request.method === "GET" && url.pathname === "/v2/activity") {
+      assertQuery(url, []);
+      const activity = await control.activityV2(expectedToken);
+      return activity === undefined ? respond(response, 404, { error: "not_found" }) : respond(response, 200, activity);
     }
     return respond(response, 404, { error: "not_found" });
   } catch (error) {

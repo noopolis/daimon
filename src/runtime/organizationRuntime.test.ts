@@ -73,13 +73,39 @@ test("bounds programmatic config size, agents, and every string field", () => {
 
 test("rejects unknown versions and organization semantics before any side effect", () => {
   const unknownVersion = valid();
-  unknownVersion.version = "noopolis.daimon.organization-runtime.v2" as typeof ORGANIZATION_RUNTIME_VERSION;
+  unknownVersion.version = "noopolis.daimon.organization-runtime.v3" as typeof ORGANIZATION_RUNTIME_VERSION;
   assert.throws(() => parseOrganizationRuntimeConfig(unknownVersion), /config.version/);
   for (const forbidden of ["teams", "roles", "parents", "members", "edges", "schedules", "wakePolicy", "deployment", "moltnet"]) {
     const config = valid() as Record<string, unknown>;
     config[forbidden] = [];
     assert.throws(() => parseOrganizationRuntimeConfig(config), /exactly/);
   }
+});
+
+test("v2 cron schedules reject out-of-range and unsupported syntax", () => {
+  for (const cron of ["60 0 * * *", "0 24 * * *", "0 0 0 * *", "0 0 32 * *", "0 0 * 0 *", "0 0 * 13 *", "0 0 * * 8", "5-1 * * * *", "*/0 * * * *", "L * * * *"]) {
+    const source = valid();
+    const config = { ...source, version: "noopolis.daimon.organization-runtime.v2", agents: [{ ...source.agents[0], schedule: { kind: "cron", cron, timezone: "UTC", prompt: "work" } }] };
+    assert.throws(() => parseOrganizationRuntimeConfig(config), /cron is invalid/);
+  }
+});
+
+test("v2 schedules reject impossible cron, oversized prompt, and out-of-range cadence", () => {
+  const source = valid();
+  const scheduled = (schedule: unknown) => ({ ...source, version: "noopolis.daimon.organization-runtime.v2", agents: [{ ...source.agents[0], schedule }] });
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled({ kind: "cron", cron: "0 0 31 2 *", timezone: "UTC", prompt: "work" })), /impossible/);
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled({ kind: "every", interval_ms: 31_536_000_001, prompt: "work" })), /outside its bound/);
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled({ kind: "every", interval_ms: 1, prompt: "x".repeat(4_097) })), /string limit/);
+  assert.equal(parseOrganizationRuntimeConfig(scheduled({ kind: "every", interval_ms: 31_536_000_000, prompt: "work" })).version, "noopolis.daimon.organization-runtime.v2");
+});
+
+test("v2 cron schedules normalize whitespace and reject unbounded steps and text", () => {
+  const source = valid();
+  const scheduled = (cron: string) => ({ ...source, version: "noopolis.daimon.organization-runtime.v2", agents: [{ ...source.agents[0], schedule: { kind: "cron", cron, timezone: "UTC", prompt: "work" } }] });
+  const parsed = parseOrganizationRuntimeConfig(scheduled("  0   5  *  *   *  "));
+  assert.equal(parsed.agents[0]?.schedule?.kind === "cron" ? parsed.agents[0].schedule.cron : undefined, "0 5 * * *");
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled(`*/${"9".repeat(400)} * * * *`)), /invalid/);
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled("*".repeat(4_097))), /string limit/);
 });
 
 test("rejects unsafe auth names, duplicate ids, and invalid absolute paths", () => {

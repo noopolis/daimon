@@ -1,11 +1,14 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { AgentHandle, AgentStatus, WakeEvent } from "../core/types.js";
+import { sanitizeWakeCompletionText } from "./wakeAcceptanceTypes.js";
 
-import { startAgySubscriptionRealm, type AgySubscriptionRealm } from "./agySubscriptionRealm.js";
 import { startOrganizationRuntimeEngine } from "./engineDispatcher.js";
-import { prepareEngineExecutable, verifyAgySubscriptionEnrollment } from "./engineReadiness.js";
-import { prepareOrganizationRuntimePaths, type OrganizationRuntimePathAuthority } from "./physicalReadiness.js";
+import type { OrganizationRuntimePathAuthority } from "./physicalReadiness.js";
+import {
+  prepareProductionReadiness,
+  type OrganizationRuntimeHostReadiness
+} from "./organizationRuntimeReadiness.js";
 import {
   parseOrganizationRuntimeConfig,
   parseOrganizationRuntimeWakeRequest,
@@ -28,11 +31,8 @@ type OrganizationRuntimeEngineFactory = (
   paths?: ReturnType<OrganizationRuntimePathAuthority["forAgent"]>
 ) => Promise<AgentHandle>;
 
-type HostReadiness = Readonly<{
-  agyRealm?: AgySubscriptionRealm;
-  paths: OrganizationRuntimePathAuthority;
-  close(): Promise<void>;
-}>;
+type HostReadiness = OrganizationRuntimeHostReadiness;
+type ProductionHostOptions = Readonly<{ sharedProtectedPaths?: readonly string[] }>;
 
 type WakeJob = {
   readonly request: OrganizationRuntimeWakeRequest;
@@ -52,19 +52,21 @@ type HostedAgent = {
 };
 
 /** Creates the public host with Daimon's closed production engine dispatcher. */
-export function createOrganizationRuntimeHost(config: unknown): OrganizationRuntimeHost {
+export function createOrganizationRuntimeHost(config: unknown, options: ProductionHostOptions = {}): OrganizationRuntimeHost {
   const parsed = parseOrganizationRuntimeConfig(config);
   let agyBusAddress: string | undefined;
+  let grokBroker: OrganizationRuntimeHostReadiness["grokBroker"];
   return createHost(
     parsed,
-    (agent, paths) => startOrganizationRuntimeEngine(agent, parsed.host.controlTokenEnv, paths, agyBusAddress),
+    (agent, paths) => startOrganizationRuntimeEngine(agent, parsed.host.controlTokenEnv, paths, agyBusAddress, grokBroker, parsed.agents, options.sharedProtectedPaths),
     async () => {
       const ready = await prepareProductionReadiness(parsed);
       agyBusAddress = ready.agyRealm?.busAddress;
+      grokBroker = ready.grokBroker;
       return {
         ...ready,
         async close() {
-          try { await ready.close(); } finally { agyBusAddress = undefined; }
+          try { await ready.close(); } finally { agyBusAddress = undefined; grokBroker = undefined; }
         }
       };
     }
@@ -81,40 +83,6 @@ export function createOrganizationRuntimeHostForTest(
     const paths = await preflight();
     return { paths, close: () => paths.close() };
   });
-}
-
-async function prepareProductionReadiness(config: OrganizationRuntimeConfig): Promise<HostReadiness> {
-  const paths = await prepareOrganizationRuntimePaths(config.agents);
-  let realm: AgySubscriptionRealm | undefined;
-  try {
-    const agy = config.agents.find((agent) => agent.engine.kind === "agy");
-    if (agy !== undefined) {
-      realm = await startAgySubscriptionRealm();
-      const canonical = paths.forAgent(agy);
-      await canonical.verify();
-      const executable = await prepareEngineExecutable(agy.id, "agy");
-      await verifyAgySubscriptionEnrollment(agy.id, executable.executablePath, canonical.runtimeHomePath, realm.busAddress);
-      await executable.verify();
-      await canonical.verify();
-    }
-    let closed = false;
-    return {
-      ...(realm === undefined ? {} : { agyRealm: realm }),
-      paths,
-      async close() {
-        if (closed) return;
-        closed = true;
-        const results = await Promise.allSettled([realm?.close(), paths.close()].filter((value): value is Promise<void> => value !== undefined));
-        const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-        if (failures.length > 0) throw new AggregateError(failures, "organization runtime readiness cleanup failed");
-      }
-    };
-  } catch (error) {
-    const cleanup = await Promise.allSettled([realm?.close(), paths.close()].filter((value): value is Promise<void> => value !== undefined));
-    const failures = cleanup.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-    if (failures.length > 0) throw new AggregateError([error, ...failures], "organization runtime readiness failed and cleanup was incomplete");
-    throw error;
-  }
 }
 
 function createHost(
@@ -297,7 +265,7 @@ function createHost(
     state,
     agents: [...agents.values()]
       .filter((agent) => agentId === undefined || agent.config.id === agentId)
-      .map((agent) => ({ agentId: agent.config.id, state: agentHealthState(agent) }))
+      .map((agent) => ({ agentId: agent.config.id, engine: agent.config.engine.kind, state: agentHealthState(agent) }))
   });
 
   const activityPage = async (request: OrganizationRuntimeActivityRequest): Promise<OrganizationRuntimeActivityPage> => {
@@ -395,7 +363,7 @@ function cursorOffset(cursor: string | undefined): number {
 }
 
 function completed(request: OrganizationRuntimeWakeRequest, text: string, durationMs: number): OrganizationRuntimeWakeResult {
-  return { version: "noopolis.daimon.wake-result.v1", status: "completed", agentId: request.agentId, wakeId: request.event.id, text, durationMs };
+  return { version: "noopolis.daimon.wake-result.v1", status: "completed", agentId: request.agentId, wakeId: request.event.id, text: sanitizeWakeCompletionText(text), durationMs };
 }
 
 function failed(request: OrganizationRuntimeWakeRequest): OrganizationRuntimeWakeResult {

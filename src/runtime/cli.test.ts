@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -41,9 +41,12 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
   await mkdir(workspace, { recursive: true, mode: 0o700 });
   await mkdir(runtimeHome, { recursive: true, mode: 0o700 });
   await mkdir(acceptanceStore, { recursive: true, mode: 0o700 });
-  await mkdir(path.join(runtimeHome, ".codex"), { recursive: true, mode: 0o700 });
-  await writeFile(path.join(runtimeHome, ".codex", "auth.json"), JSON.stringify({ tokens: { access_token: "test-access", refresh_token: "test-refresh" } }), { mode: 0o600 });
-  await chmod(path.join(runtimeHome, ".codex", "auth.json"), 0o600);
+  await mkdir(path.join(runtimeHome, ".daimon-inbound"), { recursive: true, mode: 0o700 });
+  const inboundAuth = path.join(runtimeHome, ".daimon-inbound", "codex-auth");
+  const runtimeAuth = path.join(runtimeHome, ".codex", "auth.json");
+  const readinessReceipt = path.join(root, "state", "runtime-readiness.json");
+  await writeFile(inboundAuth, JSON.stringify({ tokens: { access_token: "test-access", refresh_token: "test-refresh" } }), { mode: 0o600 });
+  await chmod(inboundAuth, 0o600);
   await writeFile(program, `#!/usr/bin/env node\nif (process.argv.includes('--version')) process.stdout.write('test'); else { process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(process.env.${tokenEnv} ?? 'absent')); }`);
   await chmod(program, 0o700);
   await writeFile(configPath, JSON.stringify({
@@ -55,13 +58,17 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
     }]
   }));
   const child = spawn(process.execPath, ["--import", "tsx", "src/runtime/cli.ts", "run", "--config", configPath], {
-    cwd: process.cwd(), env: { ...process.env, PATH: `${root}${path.delimiter}${process.env.PATH ?? ""}`, [tokenEnv]: token, ...(supportsC0 ? { DAIMON_RUNTIME_ACCEPTANCE_STORE: acceptanceStore } : {}), NOOPOLIS_RUN_ID: "runtime-cli-test" }, stdio: ["ignore", "pipe", "pipe"]
+    cwd: process.cwd(), env: { ...process.env, PATH: `${root}${path.delimiter}${process.env.PATH ?? ""}`, [tokenEnv]: token, DAIMON_RUNTIME_READINESS_RECEIPT: readinessReceipt, ...(supportsC0 ? { DAIMON_RUNTIME_ACCEPTANCE_STORE: acceptanceStore } : {}), NOOPOLIS_RUN_ID: "runtime-cli-test" }, stdio: ["ignore", "pipe", "pipe"]
   });
   const output: Buffer[] = [];
   child.stdout?.on("data", (chunk: Buffer) => output.push(chunk));
   child.stderr?.on("data", (chunk: Buffer) => output.push(chunk));
   try {
     await waitForHealth(port, token, child, output);
+    assert.deepEqual(JSON.parse(await readFile(readinessReceipt, "utf8")), { version: "noopolis.daimon.readiness-receipt.v1", agents: [{ agent_id: "agent", engine: "codex" }] });
+    assert.equal(await readFile(runtimeAuth, "utf8"), await readFile(inboundAuth, "utf8"));
+    assert.equal((await lstat(path.dirname(runtimeAuth))).mode & 0o777, 0o700);
+    assert.equal((await lstat(runtimeAuth)).mode & 0o777, 0o600);
     const readiness = await fetch(`http://127.0.0.1:${port}/healthz`);
     assert.equal(readiness.status, 200);
     assert.deepEqual(await readiness.json(), { status: "ok" });
@@ -97,6 +104,11 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
     const acceptance = await accepted.json() as { acceptance_id: string; state: string; text?: string };
     assert.equal(acceptance.state, "accepted");
     assert.equal(acceptance.text, undefined);
+    const activityV2 = await fetch(`http://127.0.0.1:${port}/v2/activity`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(activityV2.status, 200);
+    const activityBody = await activityV2.json() as { version: string; items: Array<{ delivery_id: string }> };
+    assert.equal(activityBody.version, "noopolis.daimon.organization-runtime-activity.v2");
+    assert.equal(activityBody.items.some((item) => item.delivery_id === "delivery-1"), true);
     await waitForReceipt(port, token, acceptance.acceptance_id);
     const conflict = await fetch(`http://127.0.0.1:${port}/v2/wakes`, {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ agent_id: "agent", delivery_id: "delivery-1", event: {

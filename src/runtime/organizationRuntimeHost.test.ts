@@ -181,6 +181,25 @@ test("authenticates targeted wakes and exposes bounded activity", async () => {
   delete process.env[tokenEnv];
 });
 
+test("v1 wake results redact provider credentials before publication", async () => {
+  process.env[tokenEnv] = "test-token";
+  const rawKey = "grok-access-key-secret-1234567890";
+  const host = createOrganizationRuntimeHostForTest(config(["alpha"]), async () => {
+    const handle = new FakeHandle();
+    handle.wake = async () => ({ agentId: "alpha", text: JSON.stringify({ key: rawKey, refresh_token: rawKey }), durationMs: 1 });
+    return handle;
+  });
+  await host.start();
+  const result = await host.wake(wake("alpha", "redact-v1"));
+  assert.equal(result.status, "completed");
+  if (result.status === "completed") {
+    assert.doesNotMatch(result.text, /grok-access-key/u);
+    assert.match(result.text, /\[REDACTED\]/u);
+  }
+  await host.stop();
+  delete process.env[tokenEnv];
+});
+
 test("stop rejects queued work, aborts active work, and is idempotent", async () => {
   process.env[tokenEnv] = "test-token";
   const handle = new FakeHandle(true);
