@@ -5,7 +5,10 @@ type CliEnvironmentIntent = Readonly<{
   engine?: "codex" | "grok" | "agy";
   executablePath?: string;
   engineHomePath?: string;
+  wakeId?: string;
 }>;
+
+export const DAIMON_WAKE_ID_ENV = "DAIMON_WAKE_ID" as const;
 
 /** Build a positive child environment; agent CLIs never inherit host secrets. */
 export const cliChildEnvironment = (
@@ -34,7 +37,8 @@ export const cliChildEnvironment = (
     XDG_CACHE_HOME: `${runtimeHomePath}/.cache`,
     TMPDIR: `${runtimeHomePath}/.tmp`,
     ...(engineVariable === undefined || engineHome === undefined ? {} : { [engineVariable]: engineHome }),
-    ...(keyringBus === undefined ? {} : { DBUS_SESSION_BUS_ADDRESS: keyringBus })
+    ...(keyringBus === undefined ? {} : { DBUS_SESSION_BUS_ADDRESS: keyringBus }),
+    ...(intent.wakeId === undefined ? {} : { [DAIMON_WAKE_ID_ENV]: intent.wakeId })
   };
 };
 

@@ -15,7 +15,7 @@ export const runEngineDetailed = async (
   const startedAt = Date.now();
   const options: CliEngineOptions = engine === "agy"
     ? { engine, maxToolTurns: 1, timeoutMs: 180_000, toolAccess: "none" }
-    : { engine, maxToolTurns: 2, timeoutMs: 180_000 };
+    : { engine };
   const { session } = await createCliSessionFactory(options)({
     cwd: paths.workspacePath,
     runtimeHomePath: paths.runtimeHomePath

@@ -7,17 +7,27 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { createPiToolMcpServer } from "../mcp/toolServer.js";
+import type { WakeEvent } from "../core/types.js";
+import { redactCredentialError, redactCredentialText } from "../core/credentialRedaction.js";
+import {
+  asGrokAuthenticationRejected,
+  classifyGrokAuthenticationDiagnostic,
+  GrokSubscriptionAuthenticationRejectedError
+} from "../runtime/grokAuthenticationError.js";
+import { readChild } from "./cliChildOutput.js";
 import { cliChildEnvironment } from "./cliEnvironment.js";
-import { renderCodexArgs, spawnEngine } from "./cliEngineSpawn.js";
+import {
+  GROK_STRICT_SANDBOX_PROFILE,
+  renderCodexArgs,
+  renderGrokSandboxArgs,
+  spawnEngine
+} from "./cliEngineSpawn.js";
+import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
 import type { PiSessionFactoryInput } from "./piHarness.js";
-import { redactTraceText } from "./turnTrace.js";
 
 export type CliEngineKind = "agy" | "codex" | "grok";
-
-/** Total stdout + stderr retained for one CLI invocation. */
-export const CLI_ENGINE_MAX_OUTPUT_BYTES = 64 * 1024;
 
 export type CliEngineOptions = {
   readonly commandArgs?: readonly string[];
@@ -26,12 +36,18 @@ export type CliEngineOptions = {
   readonly verifyExecutable?: () => Promise<void>;
   readonly verifyRuntimePaths?: () => Promise<void>;
   readonly engineHomePath?: string;
-  readonly maxToolTurns: number;
+  readonly maxToolTurns?: number;
   readonly onToolsMounted?: (tools: readonly ToolDefinition[]) => void;
-  readonly timeoutMs: number;
+  readonly timeoutMs?: number;
   /** Daimon-owned identity envelope prepended exactly once to every wake. */
   readonly identityPrompt?: string;
   readonly redactedEnvironmentNames?: readonly string[];
+  /** Internal secret-file authority used only for exact reply redaction. */
+  readonly credentialSecretValues?: () => Promise<readonly string[]>;
+  /** Internal production boundary; confirms the custom kernel profile before every Grok process. */
+  readonly verifyGrokSandbox?: () => Promise<void>;
+  readonly grokSandboxProfile?: string;
+  readonly grokBrokerTurn?: (prompt: string, mcpEndpoint: string, signal: AbortSignal) => Promise<string>;
 } & ({
   readonly engine: "codex" | "grok";
 } | {
@@ -70,81 +86,18 @@ const childSecretValues = (redactedNames: readonly string[]): readonly string[] 
     .map((name) => process.env[name])
     .filter((value): value is string => typeof value === "string" && value.length > 0);
 
-const redactChildOutput = (value: string, secretValues: readonly string[]): string => {
-  let redacted = redactTraceText(value);
-  for (const secret of secretValues) redacted = redacted.split(secret).join("[REDACTED]");
-  return redacted;
-};
-
-const childDiagnostic = (stdout: string, stderr: string, secretValues: readonly string[]): string => {
-  const output = stderr.trim().length > 0 ? stderr : stdout;
-  const redacted = redactChildOutput(output, secretValues).trim();
-  return redacted.length > 0 ? `: ${redacted}` : "";
-};
-
 const captureCleanup = async (current: unknown, action: () => Promise<void>): Promise<unknown> => {
   try { await action(); } catch (error) { return current ?? error; }
   return current;
 };
 
 export { terminateChild } from "./cliProcess.js";
-
-export const readChild = (child: ChildProcess, timeoutMs: number, secretValues: readonly string[]): Promise<string> => new Promise((resolve, reject) => {
-  trackCliChild(child);
-  const stdout: Buffer[] = [];
-  const stderr: Buffer[] = [];
-  let bytes = 0;
-  let settled = false;
-  let cleanupStarted = false;
-  const settle = (action: () => void): void => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    action();
-  };
-  const abort = (error: Error): void => {
-    if (cleanupStarted) return;
-    cleanupStarted = true;
-    void terminateChild(child).then(
-      () => settle(() => reject(error)),
-      (cleanupError: unknown) => settle(() => reject(cleanupError instanceof Error ? cleanupError : error))
-    );
-  };
-  const retain = (target: Buffer[], chunk: Buffer): void => {
-    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    bytes += value.length;
-    if (bytes > CLI_ENGINE_MAX_OUTPUT_BYTES) {
-      abort(new Error(`CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`));
-      return;
-    }
-    target.push(value);
-  };
-  child.stdout?.on("data", (chunk: Buffer) => retain(stdout, chunk));
-  child.stderr?.on("data", (chunk: Buffer) => retain(stderr, chunk));
-  const timer = setTimeout(() => {
-    abort(new Error("CLI engine timed out"));
-  }, timeoutMs);
-  child.once("error", (error) => {
-    abort(error);
-  });
-  child.once("close", (code, signal) => {
-    if (cleanupStarted) return;
-    if (code === 0) {
-      settle(() => resolve(Buffer.concat(stdout).toString("utf8").trim()));
-    } else {
-      settle(() => reject(new Error(`CLI engine exited ${code ?? signal}${childDiagnostic(
-        Buffer.concat(stdout).toString("utf8"),
-        Buffer.concat(stderr).toString("utf8"),
-        secretValues
-      )}`)));
-    }
-  });
-});
+export { CLI_ENGINE_MAX_DIAGNOSTIC_BYTES, CLI_ENGINE_MAX_OUTPUT_BYTES, readChild } from "./cliChildOutput.js";
 
 const startMcp = async (
   tools: ToolDefinition[],
-  maxToolTurns: number,
-  wakeDeadline: number,
+  maxToolTurns: number | undefined,
+  wakeDeadline: number | undefined,
   onToolsMounted: ((tools: readonly ToolDefinition[]) => void) | undefined,
   onStarted: (mount: { endpoint: string; close: () => Promise<void> }) => void
 ): Promise<{ endpoint: string; close: () => Promise<void> }> => {
@@ -219,7 +172,9 @@ const grokCommand = async (
   }));
   onChild(child);
   try {
-    await readChild(child, 30_000, secretValues);
+    await readChild(child, 30_000, secretValues, {
+      failureClassifier: classifyGrokAuthenticationDiagnostic
+    });
   } finally {
     // The Grok CLI may let an auxiliary process outlive its leader. Do not
     // release the tracked setup child until its detached group is quiescent.
@@ -230,18 +185,23 @@ const grokCommand = async (
 
 const addGrokServer = async (
   endpoint: string, cwd: string, env: NodeJS.ProcessEnv, command: string, commandArgs: readonly string[], secretValues: readonly string[],
-  onChild: (child: ChildProcess) => void, onChildSettled: (child: ChildProcess) => void
+  onChild: (child: ChildProcess) => void, onChildSettled: (child: ChildProcess) => void,
+  profile: string, verifySandbox: (() => Promise<void>) | undefined
 ): Promise<GrokRegistration> => {
+  await verifySandbox?.();
   await grokCommand(
-    [...commandArgs, "mcp", "add", "--transport", "http", "--scope", "project", "daimon", endpoint],
+    [...renderGrokSandboxArgs(commandArgs, profile), "mcp", "add", "--transport", "http", "--scope", "project", "daimon", endpoint],
     cwd, env, command, secretValues, onChild, onChildSettled
   );
   let closePromise: Promise<void> | undefined;
   return {
-    close: (): Promise<void> => closePromise ??= grokCommand(
-      [...commandArgs, "mcp", "remove", "--scope", "project", "daimon"],
-      cwd, env, command, secretValues, onChild, onChildSettled
-    )
+    close: (): Promise<void> => closePromise ??= (async () => {
+      await verifySandbox?.();
+      await grokCommand(
+        [...renderGrokSandboxArgs(commandArgs, profile), "mcp", "remove", "--scope", "project", "daimon"],
+        cwd, env, command, secretValues, onChild, onChildSettled
+      );
+    })()
   };
 };
 
@@ -251,8 +211,10 @@ class CliSession implements PiSessionLike {
   private disposed = false;
   private activeChild: ChildProcess | undefined;
   private activeMount: { close: () => Promise<void> } | undefined;
+  private activeBrokerTurn: AbortController | undefined;
   private grokRegistration: GrokRegistration | undefined;
   private disposePromise: Promise<void> | undefined;
+  private wakeId: string | undefined;
 
   public constructor(
     private readonly options: CliEngineOptions,
@@ -264,20 +226,27 @@ class CliSession implements PiSessionLike {
     return () => this.listeners.delete(listener);
   }
 
+  public bindWake(event?: WakeEvent): void {
+    this.wakeId = event?.id;
+  }
+
   public async prompt(text: string): Promise<void> {
     if (this.disposed) throw new Error("CLI session is disposed");
     await prepareCliRuntimeHome(this.input.runtimeHomePath);
-    const deadline = Date.now() + this.options.timeoutMs;
-    const secretValues = childSecretValues([
+    const deadline = this.options.timeoutMs === undefined ? undefined : Date.now() + this.options.timeoutMs;
+    const environmentSecretValues = childSecretValues([
       ...(this.options.redactedEnvironmentNames ?? []),
       ...(this.input.daimonSecretEnvironmentNames ?? [])
     ]);
+    const stagedCredentialSecrets = await this.options.credentialSecretValues?.() ?? [];
+    const secretValues = [...environmentSecretValues, ...stagedCredentialSecrets];
     const needsMcp = this.options.engine !== "agy";
     let mount: { endpoint: string; close: () => Promise<void> } | undefined;
     let registration: GrokRegistration | undefined;
     let child: ChildProcess | undefined;
     let output: string | undefined;
     let cleanupFailure: unknown;
+    let promptFailure: unknown;
     try {
       mount = needsMcp
         ? await startMcp(this.input.customTools ?? [], this.options.maxToolTurns, deadline, this.options.onToolsMounted, (started) => {
@@ -286,6 +255,10 @@ class CliSession implements PiSessionLike {
         })
         : undefined;
       this.ensureLive();
+      if (this.options.engine === "grok" && this.options.grokBrokerTurn !== undefined && mount !== undefined) {
+        const controller=new AbortController();this.activeBrokerTurn=controller;
+        try{output=await this.options.grokBrokerTurn(`${this.options.identityPrompt ?? ""}${text}`,mount.endpoint,controller.signal);}finally{if(this.activeBrokerTurn===controller)this.activeBrokerTurn=undefined;}
+      } else {
       if (this.options.engine === "grok" && mount !== undefined) {
         await this.options.verifyExecutable?.();
         registration = await addGrokServer(mount.endpoint, this.input.cwd, cliChildEnvironment([
@@ -293,20 +266,30 @@ class CliSession implements PiSessionLike {
           ...(this.input.daimonSecretEnvironmentNames ?? [])
         ], this.input.runtimeHomePath, { engine: this.options.engine, executablePath: this.options.command, engineHomePath: this.options.engineHomePath }), this.options.command ?? "grok", this.options.commandArgs ?? [], secretValues, (setupChild) => {
           this.setupChildren.add(setupChild);
-        }, (setupChild) => this.setupChildren.delete(setupChild));
+        }, (setupChild) => this.setupChildren.delete(setupChild),
+        this.options.grokSandboxProfile ?? GROK_STRICT_SANDBOX_PROFILE,
+        this.options.verifyGrokSandbox);
         this.grokRegistration = registration;
       }
       this.ensureLive();
       await this.options.verifyRuntimePaths?.();
       await this.options.verifyExecutable?.();
-      child = spawnEngine(this.options, `${this.options.identityPrompt ?? ""}${text}`, this.input, mount?.endpoint);
+      await this.options.verifyGrokSandbox?.();
+      child = spawnEngine(this.options, `${this.options.identityPrompt ?? ""}${text}`, this.input, mount?.endpoint, this.wakeId);
       this.activeChild = child;
       // Attach terminal listeners synchronously. A fast local sentinel may
       // exit before an asynchronous post-spawn authority recheck completes.
-      const outputPromise = readChild(child, Math.max(1, deadline - Date.now()), secretValues);
+      const outputPromise = readChild(child, deadline === undefined ? undefined : Math.max(1, deadline - Date.now()), secretValues, {
+        failureClassifier: this.options.engine === "grok" ? classifyGrokAuthenticationDiagnostic : undefined,
+        retainStdoutTail: this.options.engine === "grok"
+      });
       await this.options.verifyRuntimePaths?.();
       await this.options.verifyExecutable?.();
-      output = await outputPromise;
+      const childOutput = await outputPromise;
+      output = this.options.engine === "grok" ? decodeGrokHeadlessResult(childOutput) : childOutput;
+      }
+    } catch (error) {
+      promptFailure = error;
     } finally {
       cleanupFailure = await captureCleanup(cleanupFailure, async () => { if (child !== undefined) await terminateChild(child); });
       if (this.activeChild === child) this.activeChild = undefined;
@@ -315,9 +298,25 @@ class CliSession implements PiSessionLike {
       if (registrationClosed && this.grokRegistration === registration) this.grokRegistration = undefined;
       cleanupFailure = await captureCleanup(cleanupFailure, async () => { await mount?.close(); });
       if (this.activeMount === mount) this.activeMount = undefined;
-      if (cleanupFailure !== undefined) throw cleanupFailure;
+    }
+    const refreshedCredentialSecrets = await this.options.credentialSecretValues?.().catch(() => []) ?? [];
+    const finalSecrets = [...secretValues, ...refreshedCredentialSecrets];
+    if (promptFailure !== undefined) {
+      const authRejection = this.options.engine === "grok" ? asGrokAuthenticationRejected(promptFailure) : undefined;
+      if (authRejection !== undefined) throw new GrokSubscriptionAuthenticationRejectedError(
+        cleanupFailure === undefined ? undefined : redactCredentialError(cleanupFailure, finalSecrets)
+      );
+      if (cleanupFailure !== undefined) throw redactCredentialError(cleanupFailure, finalSecrets);
+      throw redactCredentialError(promptFailure, finalSecrets);
+    }
+    if (cleanupFailure !== undefined) {
+      if (this.options.engine === "grok" && asGrokAuthenticationRejected(cleanupFailure) !== undefined) {
+        throw new GrokSubscriptionAuthenticationRejectedError();
+      }
+      throw redactCredentialError(cleanupFailure, finalSecrets);
     }
     if (output === undefined) return;
+    output = redactCredentialText(output, finalSecrets, 64 * 1024);
     for (const listener of this.listeners) listener({
       type: "turn_end",
       message: {
@@ -346,6 +345,7 @@ class CliSession implements PiSessionLike {
   private async quiesce(): Promise<void> {
     let cleanupFailure: unknown;
     cleanupFailure = await captureCleanup(cleanupFailure, async () => { if (this.activeChild !== undefined) await terminateChild(this.activeChild); });
+    this.activeBrokerTurn?.abort();
     cleanupFailure = await captureCleanup(cleanupFailure, () => Promise.all([...this.setupChildren].map((child) => terminateChild(child))).then(() => undefined));
     cleanupFailure = await captureCleanup(cleanupFailure, async () => { await this.grokRegistration?.close(); });
     cleanupFailure = await captureCleanup(cleanupFailure, async () => { await this.activeMount?.close(); });

@@ -194,7 +194,7 @@ test("CLI engine failures include bounded redacted diagnostics", async () => {
   }
 });
 
-test("CLI output cap counts combined multibyte stdout and stderr and quiesces descendants", async (context) => {
+test("CLI stdout cap counts multibyte replies and quiesces descendants", async (context) => {
   if (!requirePosixProcessGroups(context)) return;
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-output-cap-"));
   const pidFile = path.join(root, "descendant.pid");
@@ -258,7 +258,7 @@ test("protected host control variables never reach Codex, Grok, or AGY children"
   process.env[unrelatedEnv] = "must-never-reach-engine";
   process.env[modelEnv] = "must-never-reach-engine";
   const probe = path.join(root, "probe.mjs");
-  await writeFile(probe, `#!/usr/bin/env node\nprocess.stdout.write([process.env.${controlEnv} ?? "absent", process.env.${unrelatedEnv} ?? "absent", process.env.${modelEnv} ?? "absent", process.env.CODEX_HOME ?? process.env.GROK_HOME ?? process.env.ANTIGRAVITY_CLI_HOME ?? "missing"].join("|"));`);
+  await writeFile(probe, `#!/usr/bin/env node\nconst text = [process.env.${controlEnv} ?? "absent", process.env.${unrelatedEnv} ?? "absent", process.env.${modelEnv} ?? "absent", process.env.CODEX_HOME ?? process.env.GROK_HOME ?? process.env.ANTIGRAVITY_CLI_HOME ?? "missing", process.env.DAIMON_WAKE_ID ?? "absent"].join("|"); const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); process.stdout.write(process.argv.includes("--single") ? stream(text) : text);`);
   await chmod(probe, 0o700);
   try {
     for (const engine of ["codex", "grok", "agy"] as const) {
@@ -267,6 +267,7 @@ test("protected host control variables never reach Codex, Grok, or AGY children"
         ? { engine, command: probe, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000, toolAccess: "none" as const, redactedEnvironmentNames: [controlEnv], engineHomePath }
         : { engine, command: probe, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000, redactedEnvironmentNames: [controlEnv], engineHomePath };
       const { session } = await createCliSessionFactory(options)({ cwd: root, runtimeHomePath: path.join(root, engine) });
+      session.bindWake?.({ id: "moltnet:msg_1", kind: "message", text: "probe" });
       let output = "";
       session.subscribe((event) => {
         if (event.type === "turn_end" && "content" in event.message && Array.isArray(event.message.content)) {
@@ -274,7 +275,7 @@ test("protected host control variables never reach Codex, Grok, or AGY children"
         }
       });
       await session.prompt("probe");
-      assert.equal(output, `absent|absent|absent|${engineHomePath}`);
+      assert.equal(output, `absent|absent|absent|${engineHomePath}|moltnet:msg_1`);
       await session.disposeAsync?.();
     }
   } finally {

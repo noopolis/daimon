@@ -28,8 +28,8 @@ export class McpWakeDeadlineError extends Error {
 }
 
 export interface PiToolMcpServerOptions {
-  readonly maxToolTurns: number;
-  readonly wakeDeadline: number;
+  readonly maxToolTurns?: number;
+  readonly wakeDeadline?: number;
 }
 
 type JsonSchema = Record<string, unknown>;
@@ -59,10 +59,10 @@ const toolError = (error: unknown): CallToolResult => ({
 const NO_PI_EXTENSION_CONTEXT = undefined as never;
 
 const validateOptions = (options: PiToolMcpServerOptions): void => {
-  if (!Number.isSafeInteger(options.maxToolTurns) || options.maxToolTurns < 1) {
+  if (options.maxToolTurns !== undefined && (!Number.isSafeInteger(options.maxToolTurns) || options.maxToolTurns < 1)) {
     throw new TypeError("maxToolTurns must be a positive safe integer");
   }
-  if (!Number.isFinite(options.wakeDeadline)) {
+  if (options.wakeDeadline !== undefined && !Number.isFinite(options.wakeDeadline)) {
     throw new TypeError("wakeDeadline must be a finite epoch-millisecond deadline");
   }
 };
@@ -92,8 +92,8 @@ export const createPiToolMcpServer = (
     CallToolRequestSchema,
     async (request, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       try {
-        if (Date.now() >= options.wakeDeadline) throw new McpWakeDeadlineError();
-        if (toolTurns >= options.maxToolTurns) throw new McpToolTurnLimitError(options.maxToolTurns);
+        if (options.wakeDeadline !== undefined && Date.now() >= options.wakeDeadline) throw new McpWakeDeadlineError();
+        if (options.maxToolTurns !== undefined && toolTurns >= options.maxToolTurns) throw new McpToolTurnLimitError(options.maxToolTurns);
         const tool = tools.find((candidate) => candidate.name === request.params.name);
         const validator = validators.get(request.params.name);
         if (tool === undefined || validator === undefined) {
@@ -106,29 +106,20 @@ export const createPiToolMcpServer = (
         toolTurns += 1;
         // Ajv validated this value against this tool's own schema immediately above.
         const validatedArgs = args as Parameters<typeof tool.execute>[1];
-        const deadlineController = new AbortController();
-        const remainingMs = Math.max(0, options.wakeDeadline - Date.now());
-        const deadlineTimer = setTimeout(() => deadlineController.abort(), remainingMs);
-        const signal = extra.signal === undefined
-          ? deadlineController.signal
-          : AbortSignal.any([extra.signal, deadlineController.signal]);
-        const deadline = new Promise<never>((_resolve, reject) => {
+        const deadlineController = options.wakeDeadline === undefined ? undefined : new AbortController();
+        const remainingMs = options.wakeDeadline === undefined ? undefined : Math.max(0, options.wakeDeadline - Date.now());
+        const deadlineTimer = deadlineController === undefined ? undefined : setTimeout(() => deadlineController.abort(), remainingMs);
+        const signal = deadlineController === undefined ? extra.signal
+          : extra.signal === undefined ? deadlineController.signal : AbortSignal.any([extra.signal, deadlineController.signal]);
+        const deadline = deadlineController === undefined ? undefined : new Promise<never>((_resolve, reject) => {
           deadlineController.signal.addEventListener("abort", () => reject(new McpWakeDeadlineError()), { once: true });
         });
         let result: Awaited<ReturnType<typeof tool.execute>>;
         try {
-          result = await Promise.race([
-            tool.execute(
-              `mcp-tool-turn-${toolTurns}`,
-              validatedArgs,
-              signal,
-              undefined,
-              NO_PI_EXTENSION_CONTEXT
-            ),
-            deadline
-          ]);
+          const execution = tool.execute(`mcp-tool-turn-${toolTurns}`, validatedArgs, signal, undefined, NO_PI_EXTENSION_CONTEXT);
+          result = deadline === undefined ? await execution : await Promise.race([execution, deadline]);
         } finally {
-          clearTimeout(deadlineTimer);
+          if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
         }
         return toolResult(result);
       } catch (error) {

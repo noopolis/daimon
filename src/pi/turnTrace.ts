@@ -5,6 +5,7 @@ import path from "node:path";
 import type { MemoryPrepareTurnResult, MemoryWakeMode } from "@noopolis/mneme";
 
 import type { HarnessModelSpec, WakeEvent } from "../core/types.js";
+import { redactCredentialText } from "../core/credentialRedaction.js";
 
 export interface PiTurnTraceModel {
   authMethod: NonNullable<HarnessModelSpec["auth"]>["method"];
@@ -131,14 +132,7 @@ export interface PersistPiTurnTraceInput extends Omit<BuildPiTurnTraceRecordInpu
 }
 
 export const redactTraceText = (value: unknown): string => {
-  let redacted = String(value);
-  redacted = redacted.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/giu, "Bearer [REDACTED]");
-  redacted = redacted.replace(/\bmagt_v1_[A-Za-z0-9_-]{16,}\b/gu, "[REDACTED]");
-  redacted = redacted.replace(/\b(?:sk|sk-proj)-[A-Za-z0-9_-]{20,}\b/gu, "[REDACTED]");
-  redacted = redacted.replace(
-    /("([^"]*(?:api[_-]?key|token|secret|password)[^"]*)"\s*:\s*")([^"]+)(")/giu,
-    "$1[REDACTED]$4"
-  );
+  let redacted = redactCredentialText(value, [], 4_096);
   redacted = redacted.replace(/\/(?:Users|home|private|tmp|var|opt|run)\/[^\s"']+/gu, "[path]");
   return redacted.length > 1000 ? `${redacted.slice(0, 1000)}...` : redacted;
 };

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cliChildEnvironment } from "./cliEnvironment.js";
+import { cliChildEnvironment, DAIMON_WAKE_ID_ENV } from "./cliEnvironment.js";
 
 test("passes only an explicit local Linux Secret Service bus to AGY", () => {
   const previous = process.env.DBUS_SESSION_BUS_ADDRESS;
@@ -16,4 +16,11 @@ test("passes only an explicit local Linux Secret Service bus to AGY", () => {
     if (previous === undefined) delete process.env.DBUS_SESSION_BUS_ADDRESS;
     else process.env.DBUS_SESSION_BUS_ADDRESS = previous;
   }
+});
+
+test("adds only the explicitly bound current wake id", () => {
+  const absent = cliChildEnvironment([], "/runtime", { engine: "codex" });
+  const bound = cliChildEnvironment([], "/runtime", { engine: "codex", wakeId: "moltnet:msg_1" });
+  assert.equal(absent[DAIMON_WAKE_ID_ENV], undefined);
+  assert.equal(bound[DAIMON_WAKE_ID_ENV], "moltnet:msg_1");
 });

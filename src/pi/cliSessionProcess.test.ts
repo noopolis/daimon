@@ -6,6 +6,11 @@ import test from "node:test";
 
 import { createCliSessionFactory, readChild, spawnEngine, terminateChild } from "./cliSession.js";
 
+const grokStream = (text: string): string => [
+  { type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } },
+  { type: "result", subtype: "success", is_error: false, result: text, stop_reason: "end_turn", session_id: "fake" }
+].map((event) => JSON.stringify(event)).join("\n");
+
 test("terminates a process group after its leader has exited", async (context) => {
   if (!requirePosixProcessGroups(context)) return;
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-group-"));
@@ -36,7 +41,7 @@ test("Grok setup reaps a stubborn descendant after its successful leader exits",
       child.stdout.once("data", () => { writeFileSync(${JSON.stringify(descendant)}, String(child.pid)); process.exit(0); });
     }
     if (args.includes("remove")) process.exit(0);
-    process.stdout.write("engine complete");`);
+    process.stdout.write(${JSON.stringify(grokStream("engine complete"))});`);
   try {
     const { session } = await createCliSessionFactory({
       command: process.execPath, commandArgs: [grok], engine: "grok", maxToolTurns: 1, timeoutMs: 10_000
@@ -61,7 +66,7 @@ test("Grok removal reaps a stubborn descendant after its successful leader exits
     if (args.includes("remove")) {
       const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => undefined); process.stdout.write('ready'); setInterval(() => undefined, 1000)"], { stdio: ["ignore", "pipe", "ignore"] });
       child.stdout.once("data", () => { writeFileSync(${JSON.stringify(descendant)}, String(child.pid)); process.exit(0); });
-    } else if (args.includes("add")) process.exit(0); else process.stdout.write("engine complete");`);
+    } else if (args.includes("add")) process.exit(0); else process.stdout.write(${JSON.stringify(grokStream("engine complete"))});`);
   try {
     const { session } = await createCliSessionFactory({
       command: process.execPath, commandArgs: [grok], engine: "grok", maxToolTurns: 1, timeoutMs: 10_000
