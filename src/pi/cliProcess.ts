@@ -48,28 +48,47 @@ const parseLinuxProcessState = (stat: string): LinuxProcessState | undefined => 
   return fields.length >= 3 && Number.isInteger(group) ? { state: fields[0]!, group } : undefined;
 };
 
-const linuxGroupHasLiveMember = async (pgid: number, procRoot = "/proc"): Promise<boolean | undefined> => {
+/**
+ * What a `/proc` snapshot says about a process group.
+ *
+ * `"settled"` covers BOTH "every member is an exited zombie" and "the group has
+ * no members at all". Those are the same fact — nothing in the group can still
+ * execute — but they used to be reported differently: an empty scan returned
+ * `undefined`, which the caller read as "not settled", so a group that had
+ * finished disappearing was declared unfinished and cleanup threw.
+ *
+ * That is reachable whenever the last member exits between `groupExists` (which
+ * sees it, zombies included) and this scan. It only bites on Linux, because the
+ * `/proc` path does not run anywhere else — and containers are Linux, so it is
+ * the platform that actually matters.
+ *
+ * `"unknown"` is reserved for a genuine read failure, where refusing to call the
+ * group settled is the safe answer.
+ */
+type LinuxGroupScan = "live" | "settled" | "unknown";
+
+const linuxGroupScan = async (pgid: number, procRoot = "/proc"): Promise<LinuxGroupScan> => {
   let entries: string[];
-  try { entries = await readdir(procRoot); } catch { return undefined; }
-  let found = false;
+  try { entries = await readdir(procRoot); } catch { return "unknown"; }
   for (const entry of entries) {
     if (!/^\d+$/u.test(entry)) continue;
     try {
       const processState = parseLinuxProcessState(await readFile(`${procRoot}/${entry}/stat`, "utf8"));
       if (processState?.group !== pgid) continue;
-      found = true;
-      if (processState.state !== "Z" && processState.state !== "X") return true;
+      if (processState.state !== "Z" && processState.state !== "X") return "live";
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+      // ENOENT is the process exiting mid-scan, which is exactly what settling
+      // looks like; anything else means the snapshot cannot be trusted.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "unknown";
     }
   }
-  return found ? false : undefined;
+  return "settled";
 };
 
 const groupSettled = async (pgid: number): Promise<boolean> => {
   if (!groupExists(pgid)) return true;
   if (process.platform !== "linux") return false;
-  return await linuxGroupHasLiveMember(pgid) === false;
+  return await linuxGroupScan(pgid) === "settled";
 };
 
 const signalGroup = (pgid: number, signal: NodeJS.Signals): boolean => {
