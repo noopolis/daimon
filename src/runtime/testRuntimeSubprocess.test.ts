@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import test from "node:test";
+import test, { after } from "node:test";
 
 const entrypoint = path.resolve("src/runtime/testRuntimeSubprocess.ts");
 const config = {
@@ -72,7 +72,7 @@ test("explicit test runtime supports a bounded container HTTP bind", async () =>
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("scripted cognition uses the real Moltnet CLI path to address a declared outbound wake", async () => {
+test("scripted cognition drives the Moltnet CLI send contract to address a declared outbound wake", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "daimon-test-runtime-action-"));
   const senderRoot = path.join(directory, "sender"); const recipientRoot = path.join(directory, "recipient");
   await Promise.all([chmod(directory, 0o700), mkdtemp(`${senderRoot}-`), mkdtemp(`${recipientRoot}-`)]);
@@ -94,14 +94,20 @@ test("scripted cognition uses the real Moltnet CLI path to address a declared ou
     await writeFile(clientConfig, JSON.stringify({ version: "moltnet.client.v1", agent: { name: "Alpha", runtime: "daimon" }, attachments: [{ agent_name: "Alpha", auth: { mode: "none" }, base_url: `http://127.0.0.1:${address.port}`, member_id: "alpha", network_id: "test-network", runtime: "daimon", rooms: [{ id: "dispatch" }] }] }), { mode: 0o600 });
     const senderStart = await sender.command({ type: "start", acceptance_store_path: await actualSenderRoot, config, control_token: "sender-token", now_ms: 0,
       cognition_actions: [{ delivery_id: "moltnet:incoming_1", network_id: "test-network", target: "room:dispatch", text: "addressed result" }],
-      moltnet_cli_path: path.resolve("../moltnet/bin/moltnet"), moltnet_client_config_path: clientConfig }) as { base_url: string };
+      moltnet_cli_path: path.resolve("src/runtime/fixtures/testMoltnetCli.mjs"), moltnet_client_config_path: clientConfig }) as { base_url: string };
     assert.equal((await post(senderStart.base_url, { agent_id: "alpha", delivery_id: "moltnet:incoming_1", event: { version: "noopolis.daimon.wake.v2", kind: "message", text: "inbound", occurred_at: "1970-01-01T00:00:00.000Z" } }, "sender-token")).status, 202);
     await settles(sender, 1); await settles(recipient, 1);
     const senderEvidence = await sender.command({ type: "snapshot" }) as { action_receipts: Array<{ target: string }> };
     assert.deepEqual(senderEvidence.action_receipts.map((item) => item.target), ["room:dispatch"]);
     await sender.command({ type: "stop" }); await recipient.command({ type: "stop" });
     await Promise.all([sender.close(), recipient.close(), new Promise<void>((resolve, reject) => bridge.close((error) => error ? reject(error) : resolve()))]);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    // Closed here, not only on the success path: when an assertion above threw,
+    // both children were left alive with their stdin never ended, and their
+    // still-open pipes kept the test runner's event loop from ever draining.
+    await Promise.allSettled([sender.close(), recipient.close()]);
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("scripted cognition calls only an attested compiled MCP server and tool", async () => {
@@ -124,8 +130,57 @@ test("subprocess entrypoint is unavailable without explicit test mode", async ()
   assert.notEqual(code, 0); assert.match(error, /requires DAIMON_EXPLICIT_TEST_RUNTIME=1/);
 });
 
+/**
+ * Every runtime child still believed to be alive.
+ *
+ * A test that throws before its own `close()` used to leave the child sleeping
+ * on a stdin that is never ended; its pipes then keep this runner's event loop
+ * alive and the whole job hangs until the CI timeout kills it — 24 minutes of
+ * silence for one failed assertion. The `after` hook below is the backstop, so
+ * no future test can reintroduce that by forgetting a `finally`.
+ */
+const liveRuntimes = new Set<ChildProcessWithoutNullStreams>();
+
+after(() => {
+  const leaked = [...liveRuntimes];
+  for (const child of leaked) child.kill("SIGKILL");
+  liveRuntimes.clear();
+  // Loud, never silent: a leaked child means a test's teardown is broken, and
+  // that is exactly the defect that cost a CI job.
+  assert.equal(leaked.length, 0, `${leaked.length} test runtime child process(es) leaked; a test did not close its runtime`);
+});
+
+/**
+ * Waits for the child to exit, escalating rather than waiting forever.
+ *
+ * The unbounded `await` this replaces turned any stuck child into a hung job.
+ * A kill is reported, never swallowed: reaching SIGTERM means the child did not
+ * exit on stdin close, which is a real teardown defect and must fail the test.
+ */
+async function exitWithin(child: ChildProcessWithoutNullStreams): Promise<{ code: number | null; killed: "none" | "SIGTERM" | "SIGKILL" }> {
+  // Already reaped: `exit` has fired and will never fire again, so awaiting it
+  // would hang forever. `close()` is deliberately called twice on the success
+  // path — once explicitly, once by the `finally` safety net — so this has to
+  // be idempotent.
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { code: child.exitCode, killed: "none" };
+  }
+  const exited = new Promise<number | null>((resolve) => child.once("exit", resolve));
+  const sleep = async (ms: number): Promise<"timeout"> => await new Promise((resolve) => setTimeout(() => resolve("timeout"), ms));
+  if (await Promise.race([exited.then(() => "exit" as const), sleep(10_000)]) === "exit") {
+    return { code: await exited, killed: "none" };
+  }
+  child.kill("SIGTERM");
+  if (await Promise.race([exited.then(() => "exit" as const), sleep(5_000)]) === "exit") {
+    return { code: await exited, killed: "SIGTERM" };
+  }
+  child.kill("SIGKILL");
+  return { code: await exited, killed: "SIGKILL" };
+}
+
 function runtime(): { command(value: unknown): Promise<unknown>; close(): Promise<void> } {
   const child = spawn(process.execPath, ["--import", "tsx", entrypoint], { env: { ...process.env, DAIMON_EXPLICIT_TEST_RUNTIME: "1" }, stdio: ["pipe", "pipe", "pipe"] });
+  liveRuntimes.add(child);
   const lines = createInterface({ input: child.stdout });
   const replies: Array<(value: unknown) => void> = [];
   lines.on("line", (line) => replies.shift()?.(JSON.parse(line)));
@@ -136,7 +191,9 @@ function runtime(): { command(value: unknown): Promise<unknown>; close(): Promis
     }),
     close: async () => {
       child.stdin.end();
-      const code = await new Promise<number | null>((resolve) => child.once("exit", resolve));
+      const { code, killed } = await exitWithin(child);
+      liveRuntimes.delete(child);
+      if (killed !== "none") throw new Error(`test runtime had to be killed with ${killed}; it did not exit when its command stream closed`);
       if (code !== 0) throw new Error(`test runtime exited ${code}`);
     }
   };
