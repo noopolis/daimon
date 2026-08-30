@@ -95,7 +95,7 @@ test("non-memory Pi tool events are not implicitly written to memory", async () 
   await handle.stop();
 });
 
-test("failed wakes do not implicitly record recalled memory provenance", async () => {
+test("failed wakes still write back recalled memory provenance via recordTurn, and torn-down tool context stays inert", async () => {
   const root = await tempDir();
   const runtimeHomePath = path.join(root, "runtime");
   const workspacePath = path.join(root, "workspace");
@@ -168,6 +168,10 @@ test("failed wakes do not implicitly record recalled memory provenance", async (
     text: "Use the phoenix memory before failing."
   }), /prompt failed after recall/u);
 
+  // recordTurn now runs on the failure path too (PiAgentHandle.runWake write-back),
+  // so the recall Mneme already gathered into prepared.recall before the engine
+  // prompt failed is exactly what gets persisted as memory.recalled provenance —
+  // that is the intended fix, not a leak.
   const recalled = await new JsonlMemoryStore(runtimeHomePath).read({
     principalAgentId: "mapper",
     types: ["memory.recalled"]
@@ -175,7 +179,7 @@ test("failed wakes do not implicitly record recalled memory provenance", async (
   assert.equal(recalled.some((event) =>
     event.content.kind === "text" &&
     event.content.text.includes("PHOENIX_FAIL_MARKER")
-  ), false);
+  ), true);
   assert.ok(searchAfterFailure);
   await assert.rejects(
     searchAfterFailure.execute("late-failed-call", { scope: "current", query: "PHOENIX_FAIL_MARKER" }),

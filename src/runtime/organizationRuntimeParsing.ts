@@ -42,6 +42,7 @@ export function parseOrganizationRuntimeConfig(value: unknown): OrganizationRunt
     return agent;
   });
   isolated(agents);
+  isolatedMemory(agents);
   return { version: version as OrganizationRuntimeConfig["version"], host, agents };
 }
 
@@ -66,12 +67,13 @@ export const isOrganizationRuntimeConfig = validateOrganizationRuntimeConfig;
 
 function parseAgent(value: unknown, label: string, v2: boolean): OrganizationRuntimeAgentConfig {
   const agent = object(value, label);
-  exactOptional(agent, v2 ? ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine", "schedule"] : ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine"], ["mcp", "moltnet"], label);
+  exactOptional(agent, v2 ? ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine", "schedule"] : ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine"], ["mcp", "moltnet", "memory"], label);
   return {
     id: nonEmpty(agent.id, `${label}.id`), name: nonEmpty(agent.name, `${label}.name`), instructions: nonEmpty(agent.instructions, `${label}.instructions`), workspacePath: absolute(agent.workspacePath, `${label}.workspacePath`), runtimeHomePath: absolute(agent.runtimeHomePath, `${label}.runtimeHomePath`), engine: engine(agent.engine, `${label}.engine`),
     ...(v2 ? { schedule: schedule(agent.schedule, `${label}.schedule`) } : {}),
     ...(agent.mcp === undefined ? {} : { mcp: mcpServers(agent.mcp, `${label}.mcp`) }),
-    ...(agent.moltnet === undefined ? {} : { moltnet: moltnet(agent.moltnet, `${label}.moltnet`) })
+    ...(agent.moltnet === undefined ? {} : { moltnet: moltnet(agent.moltnet, `${label}.moltnet`) }),
+    ...(agent.memory === undefined ? {} : { memory: memory(agent.memory, `${label}.memory`) })
   };
 }
 
@@ -97,6 +99,20 @@ function moltnet(value: unknown, label: string): NonNullable<OrganizationRuntime
   const networks = array(item.networks, `${label}.networks`).map((value, index) => { const row = object(value, `${label}.networks[${index}]`); exact(row, ["id", "rooms", "dms"], `${label}.networks[${index}]`); return { id: nonEmpty(row.id, `${label}.id`), rooms: array(row.rooms, `${label}.rooms`).map((room) => nonEmpty(room, `${label}.room`)), dms: row.dms === true }; });
   if (networks.length > 16 || new Set(networks.map((entry) => entry.id)).size !== networks.length) throw new TypeError(`${label}.networks are invalid`);
   return { cliPath: absolute(item.cliPath, `${label}.cliPath`), configPath: absolute(item.configPath, `${label}.configPath`), networks };
+}
+
+function memory(value: unknown, label: string): NonNullable<OrganizationRuntimeAgentConfig["memory"]> {
+  const item = object(value, label); exactOptional(item, ["runtimeHomePath"], ["source", "tokenBudget"], label);
+  return {
+    runtimeHomePath: absolute(item.runtimeHomePath, `${label}.runtimeHomePath`),
+    ...(item.source === undefined ? {} : { source: nonEmpty(item.source, `${label}.source`) }),
+    ...(item.tokenBudget === undefined ? {} : { tokenBudget: tokenBudget(item.tokenBudget, `${label}.tokenBudget`) })
+  };
+}
+
+function tokenBudget(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 1_000_000) throw new TypeError(`${label} must be an integer between 1 and 1000000`);
+  return value;
 }
 
 function schedule(value: unknown, label: string): OrganizationRuntimeSchedule {
@@ -202,6 +218,26 @@ function array(value: unknown, label: string): readonly unknown[] { if (!Array.i
 function exact(value: RecordValue, expected: readonly string[], label: string): void { const extras = Object.keys(value).filter((key) => !expected.includes(key)); const missing = expected.filter((key) => !Object.hasOwn(value, key)); if (extras.length || missing.length) throw new TypeError(`${label} must contain exactly ${expected.join(", ")}`); }
 function exactOptional(value: RecordValue, required: readonly string[], optional: readonly string[], label: string): void { const extras = Object.keys(value).filter((key) => !required.includes(key) && !optional.includes(key)); const missing = required.filter((key) => !Object.hasOwn(value, key)); if (extras.length || missing.length) throw new TypeError(`${label} has invalid fields`); }
 function isolated(agents: readonly OrganizationRuntimeAgentConfig[]): void { const paths = agents.flatMap((agent) => [{ agentId: agent.id, kind: "workspacePath", value: agent.workspacePath }, { agentId: agent.id, kind: "runtimeHomePath", value: agent.runtimeHomePath }]); for (let left = 0; left < paths.length; left += 1) for (let right = left + 1; right < paths.length; right += 1) { const first = paths[left]!; const second = paths[right]!; if (first.value === second.value || first.value.startsWith(`${second.value}/`) || second.value.startsWith(`${first.value}/`)) throw new TypeError(`agents ${first.agentId}.${first.kind} and ${second.agentId}.${second.kind} must not overlap`); } }
+/**
+ * A declared bank may sit inside its own agent's runtime home, or be shared
+ * verbatim by another agent's declared bank; it must never reach into another
+ * agent's private roots, and it must never sit inside its own agent's
+ * model-writable workspace (the bash tool's cwd), which would let the sandboxed
+ * model tamper with its own ledger and bypass Mneme's policy layer entirely.
+ */
+function isolatedMemory(agents: readonly OrganizationRuntimeAgentConfig[]): void {
+  for (const agent of agents) {
+    if (agent.memory === undefined) continue;
+    const value = agent.memory.runtimeHomePath;
+    if (value === agent.workspacePath || value.startsWith(`${agent.workspacePath}/`) || agent.workspacePath.startsWith(`${value}/`)) throw new TypeError(`agent ${agent.id}.memory.runtimeHomePath and ${agent.id}.workspacePath must not overlap`);
+    for (const peer of agents) {
+      if (peer.id === agent.id) continue;
+      for (const [kind, peerValue] of [["workspacePath", peer.workspacePath], ["runtimeHomePath", peer.runtimeHomePath]] as const) {
+        if (value === peerValue || value.startsWith(`${peerValue}/`) || peerValue.startsWith(`${value}/`)) throw new TypeError(`agent ${agent.id}.memory.runtimeHomePath and ${peer.id}.${kind} must not overlap`);
+      }
+    }
+  }
+}
 function string(value: unknown, label: string): string { if (typeof value !== "string") throw new TypeError(`${label} must be a string`); if (Buffer.byteLength(value, "utf8") > ORGANIZATION_RUNTIME_MAX_STRING_BYTES || Array.from(value).length > ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS) throw new TypeError(`${label} exceeds the runtime string limit`); return value; }
 function nonEmpty(value: unknown, label: string): string { const result = string(value, label); if (!result.trim()) throw new TypeError(`${label} must not be empty`); return result; }
 function absolute(value: unknown, label: string): string { const result = nonEmpty(value, label); if (!path.posix.isAbsolute(result)) throw new TypeError(`${label} must be an absolute POSIX path`); const normalized = path.posix.normalize(result); if (normalized === "/") throw new TypeError(`${label} must not overlap filesystem root`); return normalized.replace(/\/+$/, ""); }

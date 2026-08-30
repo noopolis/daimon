@@ -143,7 +143,7 @@ export class PiAgentHandle implements AgentHandle {
       ? undefined
       : createPiWorldTrajectoryCapture();
     const request = {
-      eventId: event.id,
+      eventId: /^(simfile|moltnet|mneme|daimon):.+$/u.test(event.id) ? event.id : `daimon:${event.id}`,
       kind: event.kind,
       text: safeWakeText,
       from: event.from,
@@ -242,6 +242,11 @@ export class PiAgentHandle implements AgentHandle {
         turnId: event.id
       } satisfies StampTurnOutputCompletedInput);
 
+      if (this.memory !== undefined && prepared !== undefined) {
+        await this.memory.recordTurn({ principal: prepared.principal, prompt: prepared.packet, request, recall: prepared.recall, result: "completed", outputText, toolEvents: tools })
+          .catch((recordError) => { this.lastError = `memory record failed: ${recordError instanceof Error ? recordError.message : String(recordError)}`; });
+      }
+
       await this.persistTrace({
         agentId: this.id,
         enginePromptMs,
@@ -323,6 +328,9 @@ export class PiAgentHandle implements AgentHandle {
           ? {}
           : { worldContextBound: worldContext !== undefined })
       }).catch(() => undefined);
+      if (this.memory !== undefined && prepared !== undefined) {
+        await this.memory.recordTurn({ principal: prepared.principal, prompt: prepared.packet, request, recall: prepared.recall, result: "failed", error: message, outputText: chunks.join("\n").trim(), toolEvents: tools }).catch(() => undefined);
+      }
       const persistRawCapture = !rawTrainingCapturePersistAttempted
         && selectedSession !== undefined;
       if (persistRawCapture && rawTrainingCapture !== undefined) {

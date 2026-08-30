@@ -17,6 +17,11 @@ const PRODUCTION_TOOL_PROPERTIES = {
   } } },
   moltnet: { type: "object", additionalProperties: false, required: ["cliPath", "configPath", "networks"], properties: {
     cliPath: { type: "string", pattern: "^/" }, configPath: { type: "string", pattern: "^/" }, networks: { type: "array", maxItems: 16, items: { type: "object", additionalProperties: false, required: ["id", "rooms", "dms"], properties: { id: { type: "string", minLength: 1 }, rooms: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }, dms: { type: "boolean" } } } }
+  } },
+  memory: { type: "object", additionalProperties: false, required: ["runtimeHomePath"], properties: {
+    runtimeHomePath: { type: "string", pattern: "^/", maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS },
+    source: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
+    tokenBudget: { type: "integer", minimum: 1, maximum: 1000000 }
   } }
 } as const;
 

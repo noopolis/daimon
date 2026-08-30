@@ -210,6 +210,70 @@ test("accepts only Daimon's three production engines", () => {
   assert.throws(() => parseOrganizationRuntimeConfig(injected), /exactly/);
 });
 
+const withMemory = (agent: Record<string, unknown>, memory: unknown): Record<string, unknown> => ({ ...agent, memory });
+
+test("parses a declared memory bank and round-trips its fields", () => {
+  const config = valid() as Record<string, unknown> & { agents: Record<string, unknown>[] };
+  config.agents[0] = withMemory(config.agents[0]!, { runtimeHomePath: "/runtime/memory/editor", source: "editor-notes", tokenBudget: 4000 });
+  const parsed = parseOrganizationRuntimeConfig(config);
+  assert.deepEqual(parsed.agents[0]?.memory, { runtimeHomePath: "/runtime/memory/editor", source: "editor-notes", tokenBudget: 4000 });
+});
+
+test("parses a memory bank with only runtimeHomePath and omits absent optional keys", () => {
+  const config = valid() as Record<string, unknown> & { agents: Record<string, unknown>[] };
+  config.agents[0] = withMemory(config.agents[0]!, { runtimeHomePath: "/runtime/memory/editor" });
+  const parsed = parseOrganizationRuntimeConfig(config);
+  assert.deepEqual(parsed.agents[0]?.memory, { runtimeHomePath: "/runtime/memory/editor" });
+  assert.equal(Object.hasOwn(parsed.agents[0]?.memory ?? {}, "source"), false);
+  assert.equal(Object.hasOwn(parsed.agents[0]?.memory ?? {}, "tokenBudget"), false);
+});
+
+test("rejects malformed memory declarations", () => {
+  const relative = valid() as Record<string, unknown> & { agents: Record<string, unknown>[] };
+  relative.agents[0] = withMemory(relative.agents[0]!, { runtimeHomePath: "memory/editor" });
+  assert.throws(() => parseOrganizationRuntimeConfig(relative), /absolute POSIX/);
+
+  const unknownKey = valid() as Record<string, unknown> & { agents: Record<string, unknown>[] };
+  unknownKey.agents[0] = withMemory(unknownKey.agents[0]!, { runtimeHomePath: "/runtime/memory/editor", extra: "nope" });
+  assert.throws(() => parseOrganizationRuntimeConfig(unknownKey), /invalid fields/);
+
+  for (const tokenBudget of [0, 1_000_001, 1.5]) {
+    const config = valid() as Record<string, unknown> & { agents: Record<string, unknown>[] };
+    config.agents[0] = withMemory(config.agents[0]!, { runtimeHomePath: "/runtime/memory/editor", tokenBudget });
+    assert.throws(() => parseOrganizationRuntimeConfig(config), /tokenBudget must be an integer between 1 and 1000000/);
+  }
+});
+
+test("rejects a declared memory bank overlapping another agent's roots", () => {
+  for (const value of ["/runtime/homes/editor", "/runtime/workspaces/editor", "/runtime/workspaces/editor/nested"]) {
+    const config = valid() as Record<string, unknown> & { agents: Record<string, unknown>[] };
+    config.agents.push(withMemory({ ...config.agents[0]!, id: "other", workspacePath: "/runtime/workspaces/other", runtimeHomePath: "/runtime/homes/other" }, { runtimeHomePath: value }));
+    assert.throws(() => parseOrganizationRuntimeConfig(config), /must not overlap/);
+  }
+});
+
+test("accepts a declared memory bank nested inside its own agent's runtimeHomePath", () => {
+  const config = valid() as Record<string, unknown> & { agents: Record<string, unknown>[] };
+  config.agents[0] = withMemory(config.agents[0]!, { runtimeHomePath: "/runtime/homes/editor/memory" });
+  const parsed = parseOrganizationRuntimeConfig(config);
+  assert.equal(parsed.agents[0]?.memory?.runtimeHomePath, "/runtime/homes/editor/memory");
+});
+
+test("rejects a declared memory bank nested inside its own agent's workspacePath", () => {
+  const config = valid() as Record<string, unknown> & { agents: Record<string, unknown>[] };
+  config.agents[0] = withMemory(config.agents[0]!, { runtimeHomePath: "/runtime/workspaces/editor/memory" });
+  assert.throws(() => parseOrganizationRuntimeConfig(config), /must not overlap/);
+});
+
+test("accepts two agents sharing one identical declared memory bank", () => {
+  const config = valid() as Record<string, unknown> & { agents: Record<string, unknown>[] };
+  config.agents[0] = withMemory(config.agents[0]!, { runtimeHomePath: "/runtime/memory/shared" });
+  config.agents.push(withMemory({ ...config.agents[0]!, id: "other", workspacePath: "/runtime/workspaces/other", runtimeHomePath: "/runtime/homes/other" }, { runtimeHomePath: "/runtime/memory/shared" }));
+  const parsed = parseOrganizationRuntimeConfig(config);
+  assert.equal(parsed.agents[0]?.memory?.runtimeHomePath, "/runtime/memory/shared");
+  assert.equal(parsed.agents[1]?.memory?.runtimeHomePath, "/runtime/memory/shared");
+});
+
 test("wake-result status and code pairs are fixed", () => {
   const fixtures = [
     { version: "noopolis.daimon.wake-result.v1", status: "completed", agentId: "a", wakeId: "w", text: "done", durationMs: 1 },

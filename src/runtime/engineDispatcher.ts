@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import type { AgentHandle } from "../core/types.js";
-import { createCliSessionFactory } from "../pi/cliSession.js";
+import { AGY_MAX_TOOL_TURNS, createCliSessionFactory } from "../pi/cliSession.js";
 import {
   GROK_DAIMON_SANDBOX_PROFILE,
   prepareAndVerifyGrokSandbox
@@ -14,6 +14,7 @@ import { engineHomeName, prepareEngineExecutable, prepareEngineReadiness, readPo
 import type { EngineBrokerTurnClient } from "./engineBrokerControlClient.js";
 import { createProductionAgentTools } from "./productionAgentTools.js";
 import { AGY_SUBSCRIPTION_REALM, GROK_SUBSCRIPTION_REALM } from "./contractManifest.js";
+import { recordTurnUsage, resolveTurnUsageLedgerPath } from "./turnUsageLedger.js";
 
 /**
  * The production-only bridge from a closed runtime engine intent to Daimon's
@@ -87,7 +88,11 @@ function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: stri
   const engine = agent.engine.kind;
   const sessionFactory = createCliSessionFactory(
     engine === "agy"
-      ? { engine, maxToolTurns: 1, timeoutMs: 180_000, toolAccess: "none", dbusSessionBusAddress: agyBusAddress, redactedEnvironmentNames: [controlTokenEnv], identityPrompt: identityEnvelope(agent), command: executablePath, engineHomePath, verifyExecutable, verifyRuntimePaths }
+      ? { engine, maxToolTurns: AGY_MAX_TOOL_TURNS, timeoutMs: 180_000, dbusSessionBusAddress: agyBusAddress, redactedEnvironmentNames: [controlTokenEnv], identityPrompt: identityEnvelope(agent), command: executablePath, engineHomePath, verifyExecutable, verifyRuntimePaths,
+        // AGY has no broker to meter it, so the session hands its decoded
+        // terminal-frame usage straight to the same ledger the Grok broker
+        // appends to. `recordTurnUsage` is advisory and never rejects.
+        onTurnUsage: (usage) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "agy", usage }) }
       : { engine, redactedEnvironmentNames: [controlTokenEnv], identityPrompt: identityEnvelope(agent), command: executablePath, engineHomePath, verifyExecutable, verifyRuntimePaths,
         ...(engine==="grok"&&grokBroker!==undefined?{}:{credentialSecretValues: () => readPortableEngineCredentialSecrets(agent.id, engine, engineHomePath)}),
         ...(engine==="grok"&&grokBroker!==undefined?{grokBrokerTurn:(prompt:string,endpoint:string,signal:AbortSignal)=>grokBroker.turn(agent.id,wakeEnvironmentContext.current??"wake",prompt,endpoint,signal)}:{}),
@@ -131,6 +136,11 @@ function cliHarness(
     sessionFactory,
     protectedEnvironmentNames,
     productionTools,
-    wakeEnvironmentContext
+    wakeEnvironmentContext,
+    ...(agent.memory === undefined ? {} : { memory: {
+      runtimeHomePath: agent.memory.runtimeHomePath,
+      ...(agent.memory.source === undefined ? {} : { source: agent.memory.source }),
+      ...(agent.memory.tokenBudget === undefined ? {} : { tokenBudget: agent.memory.tokenBudget })
+    } })
   });
 }

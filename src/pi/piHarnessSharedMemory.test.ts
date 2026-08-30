@@ -169,7 +169,10 @@ test("shares one Mneme bank across agents with separate Pi runtimes", async () =
   const sharedEvents = await sharedBank.read({});
   const agentIds = new Set(sharedEvents.map((event) => event.principal?.agentId));
   assert.ok(agentIds.has("mapper"));
-  assert.equal(agentIds.has("listener"), false);
+  // recordTurn now runs on every wake (PiAgentHandle write-back), so listener's
+  // own wake also writes its own turn record into the shared bank alongside
+  // mapper's — that is the intended fix, not cross-tenant leakage.
+  assert.ok(agentIds.has("listener"));
   assert.ok(JSON.stringify(sharedEvents).includes("BANK_SHARED_SCOPE_ALPHA"));
 
   await listener.stop();

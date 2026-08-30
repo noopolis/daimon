@@ -43,7 +43,7 @@ test("production dispatcher starts each closed engine intent through Daimon", as
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-"));
   const priorPath = process.env.PATH;
   const priorRun = process.env.NOOPOLIS_RUN_ID;
-  const stub = `#!/usr/bin/env node\nconst args = process.argv.slice(2); const text = process.env.DAIMON_DISPATCH_CONTROL ?? "absent"; const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); if (args.includes("mcp")) process.stdout.write("ok"); else process.stdout.write(args.includes("--single") ? stream(text) : text);`;
+  const stub = `#!/usr/bin/env node\nconst args = process.argv.slice(2); const text = process.env.DAIMON_DISPATCH_CONTROL ?? "absent"; const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); const agy = (value) => JSON.stringify({ event: "result", result: { conversation_id: "fake", status: "SUCCESS", response: value, num_turns: 1, usage: { input_tokens: 11, output_tokens: 2, thinking_tokens: 1, cache_read_tokens: 0, total_tokens: 13 } } }); if (args.includes("mcp")) process.stdout.write("ok"); else process.stdout.write(args.includes("--single") ? stream(text) : args.includes("--output-format") ? agy(text) : text);`;
   try {
     for (const name of ["codex", "grok", "agy"]) {
       const file = path.join(root, name);
@@ -60,6 +60,39 @@ test("production dispatcher starts each closed engine intent through Daimon", as
       assert.equal(result.text, "absent");
       await handle.stop();
     }
+  } finally {
+    if (priorPath === undefined) delete process.env.PATH;
+    else process.env.PATH = priorPath;
+    if (priorRun === undefined) delete process.env.NOOPOLIS_RUN_ID;
+    else process.env.NOOPOLIS_RUN_ID = priorRun;
+    delete process.env.DAIMON_DISPATCH_CONTROL;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("engine dispatcher threads a declared memory bank into the Pi harness", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-memory-"));
+  const priorPath = process.env.PATH;
+  const priorRun = process.env.NOOPOLIS_RUN_ID;
+  const stub = `#!/usr/bin/env node\nconst args = process.argv.slice(2); const text = process.env.DAIMON_DISPATCH_CONTROL ?? "absent"; const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); const agy = (value) => JSON.stringify({ event: "result", result: { conversation_id: "fake", status: "SUCCESS", response: value, num_turns: 1, usage: { input_tokens: 11, output_tokens: 2, thinking_tokens: 1, cache_read_tokens: 0, total_tokens: 13 } } }); if (args.includes("mcp")) process.stdout.write("ok"); else process.stdout.write(args.includes("--single") ? stream(text) : args.includes("--output-format") ? agy(text) : text);`;
+  try {
+    const file = path.join(root, "codex");
+    await writeFile(file, stub);
+    await chmod(file, 0o700);
+    await seedAuth(root, "codex");
+    process.env.PATH = `${root}${path.delimiter}${priorPath ?? ""}`;
+    process.env.NOOPOLIS_RUN_ID = "dispatcher-memory-test";
+    process.env.DAIMON_DISPATCH_CONTROL = "host-only";
+    const memoryRuntimeHomePath = path.join(root, "memory-bank");
+    const config: OrganizationRuntimeAgentConfig = { ...rootConfig(root, "codex"), memory: { runtimeHomePath: memoryRuntimeHomePath, tokenBudget: 500 } };
+    const handle = await startOrganizationRuntimeEngine(config, "DAIMON_DISPATCH_CONTROL");
+    await handle.wake({ id: "memory-wake", kind: "manual", text: "probe" });
+    await handle.stop();
+    // createMemoryRuntime (in-process, via PiHarnessAdapter) provisions this
+    // SQLite index synchronously at the *configured* memory.runtimeHomePath,
+    // not the agent's own runtimeHomePath — the observable proof the option
+    // actually reached the harness rather than being silently dropped.
+    await access(path.join(memoryRuntimeHomePath, "memory", "index.sqlite"));
   } finally {
     if (priorPath === undefined) delete process.env.PATH;
     else process.env.PATH = priorPath;
@@ -141,7 +174,7 @@ test("Daimon frames one escaped identity envelope for every production engine", 
     "const stream = (value) => [{ type: 'assistant', parent_tool_use_id: null, session_id: 'fake', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: value }] } }, { type: 'result', subtype: 'success', is_error: false, result: value, stop_reason: 'end_turn', session_id: 'fake' }].map(JSON.stringify).join('\\n');",
     "if (args.includes('mcp')) process.stdout.write('ok');",
     "else if (args.includes('--single')) { const text = args[args.indexOf('--single') + 1]; process.stdout.write(stream(text)); }",
-    "else if (args.includes('--print')) process.stdout.write(args[args.indexOf('--print') + 1]);",
+    "else if (args.includes('--print')) process.stdout.write(JSON.stringify({ event: 'result', result: { conversation_id: 'fake', status: 'SUCCESS', response: args[args.indexOf('--print') + 1], num_turns: 1 } }));",
     "else { const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk); process.stdout.write(Buffer.concat(chunks).toString('utf8')); }"
   ].join("\n");
   try {
