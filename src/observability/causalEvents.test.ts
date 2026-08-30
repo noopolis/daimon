@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -197,4 +198,66 @@ test("replyCauseEventIds is pure and matches the emitted turn.output.completed i
   assert.deepEqual(replyCauseEventIds("wake-9"), [output.event_id]);
   // Deterministic from turn_id alone: no model output, no I/O, no dependency on emission having happened.
   assert.deepEqual(replyCauseEventIds("wake-9"), replyCauseEventIds("wake-9"));
+});
+
+test("concurrent seq allocations in one process each receive a distinct increasing seq", async () => {
+  const runtimeHomePath = await tempDir();
+  const stream = { runId: "run-1", runtimeHomePath, streamId: "agent:mapper" };
+
+  const allocated = await Promise.all(Array.from({ length: 64 }, () => nextCausalSeq(stream)));
+
+  assert.deepEqual(allocated.toSorted((left, right) => left - right), Array.from({ length: 64 }, (_, index) => index + 1));
+});
+
+test("concurrent seq allocations across separate processes each receive a distinct increasing seq", { timeout: 30_000 }, async () => {
+  const runtimeHomePath = await tempDir();
+  const moduleUrl = new URL("./causalEvents.ts", import.meta.url).href;
+  const child = `
+    import { nextCausalSeq } from ${JSON.stringify(moduleUrl)};
+    const out = await Promise.all(Array.from({ length: 8 }, () =>
+      nextCausalSeq({ runId: "run-1", runtimeHomePath: process.env.CAUSAL_TEST_HOME, streamId: "agent:mapper" })));
+    process.stdout.write(JSON.stringify(out));
+  `;
+  const repoRoot = new URL("../../", import.meta.url);
+  const runChild = (): Promise<number[]> => new Promise((resolve, reject) => {
+    const processHandle = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", child], {
+      cwd: repoRoot,
+      env: { ...process.env, CAUSAL_TEST_HOME: runtimeHomePath }
+    });
+    let stdout = "";
+    let stderr = "";
+    processHandle.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    processHandle.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    processHandle.on("error", reject);
+    processHandle.on("close", (code) => {
+      if (code !== 0) reject(new Error(`child exited ${code}: ${stderr}`));
+      else resolve(JSON.parse(stdout) as number[]);
+    });
+  });
+
+  const allocated = (await Promise.all(Array.from({ length: 4 }, runChild))).flat();
+
+  assert.deepEqual(allocated.toSorted((left, right) => left - right), Array.from({ length: 32 }, (_, index) => index + 1));
+});
+
+test("the seq counter file is only ever observable as complete JSON, and leaves no temp files behind", async () => {
+  const runtimeHomePath = await tempDir();
+  const stream = { runId: "run-1", runtimeHomePath, streamId: "agent:mapper" };
+  let complete = false;
+  const allocations = Promise.all(Array.from({ length: 32 }, () => nextCausalSeq(stream))).finally(() => {
+    complete = true;
+  });
+
+  while (!complete) {
+    try {
+      JSON.parse(await readFile(path.join(runtimeHomePath, "telemetry", "causal.seq.json"), "utf8"));
+    } catch (error) {
+      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+    }
+  }
+  await allocations;
+
+  const entries = await readdir(path.join(runtimeHomePath, "telemetry"));
+  assert.equal(entries.some((entry) => /\.tmp$/u.test(entry)), false);
+  assert.equal(entries.includes("causal.seq.lock"), false);
 });

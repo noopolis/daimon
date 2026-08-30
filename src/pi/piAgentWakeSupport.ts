@@ -37,7 +37,19 @@ export type PiSession = Awaited<ReturnType<typeof createAgentSession>>["session"
 export interface PiSessionLike {
   subscribe(listener: Parameters<PiSession["subscribe"]>[0]): () => void;
   prompt(text: string, options?: Parameters<PiSession["prompt"]>[1]): Promise<void>;
+  /** Optional per-turn context for isolated CLI child environments. */
+  bindWake?(event?: WakeEvent): void;
+  /** Kept synchronous for existing Pi session implementations. */
   dispose(): void;
+  /** Optional additive hook for sessions that must asynchronously quiesce children. */
+  disposeAsync?(): Promise<void>;
+}
+
+export type PiWakeEnvironmentContextRef = { current?: string };
+
+export async function disposePiSession(session: PiSessionLike): Promise<void> {
+  await Promise.resolve(session.dispose());
+  await session.disposeAsync?.();
 }
 export type PiSessionCreator = (
   mode: MemoryWakeMode,

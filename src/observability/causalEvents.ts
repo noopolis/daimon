@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { appendFile, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -86,6 +87,8 @@ export const replyCauseEventIds = (turnId: string): string[] => [turnOutputCompl
 const telemetryDir = (runtimeHomePath: string): string => path.join(runtimeHomePath, "telemetry");
 const seqFilePath = (runtimeHomePath: string): string => path.join(telemetryDir(runtimeHomePath), "causal.seq.json");
 const jsonlFilePath = (runtimeHomePath: string): string => path.join(telemetryDir(runtimeHomePath), "causal.jsonl");
+const STALE_LOCK_MS = 30_000;
+const seqAllocationQueues = new Map<string, Promise<unknown>>();
 
 /** run_id -> stream_id -> last assigned seq. */
 type CausalSeqStore = Record<string, Record<string, number>>;
@@ -103,28 +106,103 @@ const readSeqStore = async (runtimeHomePath: string): Promise<CausalSeqStore> =>
 };
 
 const writeSeqStore = async (runtimeHomePath: string, store: CausalSeqStore): Promise<void> => {
-  await mkdir(telemetryDir(runtimeHomePath), { recursive: true });
-  await writeFile(seqFilePath(runtimeHomePath), `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  const directory = telemetryDir(runtimeHomePath);
+  await mkdir(directory, { recursive: true });
+  const file = seqFilePath(runtimeHomePath);
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(store, null, 2)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await rename(temporary, file);
+    await syncDirectory(directory);
+  } finally {
+    await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  }
+};
+
+const syncDirectory = async (directory: string): Promise<void> => {
+  const handle = await open(directory, constants.O_RDONLY);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+};
+
+const acquireSeqLock = async (lockPath: string): Promise<void> => {
+  const startedAt = Date.now();
+  let backoffMs = 2;
+  while (Date.now() - startedAt < 5_000) {
+    try {
+      const handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+      await handle.close();
+      return;
+    } catch (error) {
+      if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error;
+    }
+    try {
+      const observed = await stat(lockPath);
+      if (Date.now() - observed.mtimeMs > STALE_LOCK_MS) {
+        const confirmed = await stat(lockPath);
+        if (confirmed.mtimeMs === observed.mtimeMs) {
+          await unlink(lockPath).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT") throw error;
+          });
+          continue;
+        }
+      }
+    } catch (error) {
+      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    backoffMs = Math.min(backoffMs * 2, 25);
+  }
+  throw new Error(`Timed out acquiring causal sequence lock: ${lockPath}`);
 };
 
 /**
  * Allocates the next contiguous seq number for `(run_id, stream_id)`,
- * persisted under `runtimeHome/telemetry/causal.seq.json`. Daimon runs at
- * most one wake at a time per agent (`PiAgentHandle.wakeQueue` serializes
- * them), so read-modify-write here does not need extra locking.
+ * persisted under `runtimeHome/telemetry/causal.seq.json`. Allocation is
+ * serialized in-process and mutually excluded across processes by a lock
+ * file; the counter is written atomically and fsynced.
  */
 export const nextCausalSeq = async (input: {
   runId: string;
   runtimeHomePath: string;
   streamId: string;
 }): Promise<number> => {
-  const store = await readSeqStore(input.runtimeHomePath);
-  const forRun = store[input.runId] ?? {};
-  const next = (forRun[input.streamId] ?? 0) + 1;
-  forRun[input.streamId] = next;
-  store[input.runId] = forRun;
-  await writeSeqStore(input.runtimeHomePath, store);
-  return next;
+  const lockPath = path.resolve(telemetryDir(input.runtimeHomePath), "causal.seq.lock");
+  const previous = seqAllocationQueues.get(lockPath) ?? Promise.resolve();
+  const allocation = previous.catch(() => undefined).then(async () => {
+    await mkdir(telemetryDir(input.runtimeHomePath), { recursive: true });
+    await acquireSeqLock(lockPath);
+    try {
+      const store = await readSeqStore(input.runtimeHomePath);
+      const forRun = store[input.runId] ?? {};
+      const next = (forRun[input.streamId] ?? 0) + 1;
+      forRun[input.streamId] = next;
+      store[input.runId] = forRun;
+      await writeSeqStore(input.runtimeHomePath, store);
+      return next;
+    } finally {
+      await unlink(lockPath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
+  });
+  seqAllocationQueues.set(lockPath, allocation);
+  void allocation.finally(() => {
+    if (seqAllocationQueues.get(lockPath) === allocation) seqAllocationQueues.delete(lockPath);
+  }).catch(() => undefined);
+  return allocation;
 };
 
 /** Appends one CausalEvent record as a line of `runtimeHome/telemetry/causal.jsonl`. */

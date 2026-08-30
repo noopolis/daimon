@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { ResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -11,10 +12,13 @@ import { createPiMemoryTools } from "../pi/memoryTools.js";
 import { createPiWorldTools } from "../pi/worldTools.js";
 import type { PiWorldToolContextRef } from "../pi/worldNudge.js";
 import {
+  AGY_SERVER_DISCOVER_METHOD,
   createPiToolMcpServer,
   McpToolTurnLimitError,
   McpWakeDeadlineError
 } from "./toolServer.js";
+
+const PassthroughResultSchema = ResultSchema;
 
 const call = async (server: ReturnType<typeof createPiToolMcpServer>, name: string, args: Record<string, unknown>) => {
   const client = new Client({ name: "daimon-test-client", version: "0.1.0" });
@@ -276,4 +280,45 @@ test("mounted tool execution receives no Pi ExtensionContext", async () => {
   const result = await call(createPiToolMcpServer([mounted], { maxToolTurns: 1, wakeDeadline: Date.now() + 10_000 }), "context_probe", {});
   assert.notEqual(result.isError, true, JSON.stringify(result));
   assert.equal(received, undefined);
+});
+
+const rawRequest = async (
+  server: ReturnType<typeof createPiToolMcpServer>,
+  method: string
+): Promise<{ error?: { code: number; message: string }; result?: unknown }> => {
+  const client = new Client({ name: "daimon-raw-client", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    // `z.any()`-shaped passthrough: the point is what the *server* answers to a
+    // method the SDK has no schema for, not what the client's parser prefers.
+    const result = await client.request({ method, params: {} }, PassthroughResultSchema);
+    return { result };
+  } catch (error) {
+    const candidate = error as { code?: number; message?: string };
+    return { error: { code: candidate.code ?? 0, message: candidate.message ?? String(error) } };
+  } finally {
+    await client.close();
+    await server.close();
+  }
+};
+
+test("the AGY handshake's non-standard server/discover is answered, not refused", async () => {
+  // Captured live from `agy --print … --output-format stream-json`: AGY sends
+  // `initialize`, `notifications/initialized`, `server/discover`, `tools/list`,
+  // `tools/call`. `server/discover` is not in the MCP spec, and the probe that
+  // proved AGY's tool calling work answered it with `{}`. A MethodNotFound here
+  // is the one difference between this server and that probe.
+  const answered = await rawRequest(createPiToolMcpServer([], {}), AGY_SERVER_DISCOVER_METHOD);
+  assert.equal(answered.error, undefined, JSON.stringify(answered.error));
+  assert.deepEqual(answered.result, {});
+});
+
+test("every other unknown method still gets MethodNotFound", async () => {
+  for (const method of ["resources/list", "prompts/list", "completion/complete", "server/anything-else"]) {
+    const refused = await rawRequest(createPiToolMcpServer([], {}), method);
+    assert.equal(refused.result, undefined, method);
+    assert.equal(refused.error?.code, -32_601, `${method}: ${JSON.stringify(refused.error)}`);
+  }
 });

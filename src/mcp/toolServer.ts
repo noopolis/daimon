@@ -27,9 +27,27 @@ export class McpWakeDeadlineError extends Error {
   }
 }
 
+/**
+ * A non-standard request AGY issues during its MCP handshake.
+ *
+ * Captured live from `agy --print … --output-format stream-json`, the client
+ * sends `initialize`, `notifications/initialized`, **`server/discover`**,
+ * `tools/list`, `tools/call`. `server/discover` is not in the MCP
+ * specification, and the throwaway probe that proved AGY's headless tool
+ * calling answered it with `{}`. Codex and Grok never send it.
+ *
+ * This server answers it the same way that working probe did, rather than the
+ * SDK default of `MethodNotFound`, because a refusal here is the one observable
+ * difference between this server and the one AGY is known to work against, and
+ * the cost of being wrong is that every AGY agent silently loses every tool.
+ * The allowance is exactly this one method: any other unknown method still gets
+ * `MethodNotFound`, so a genuine protocol mistake is never hidden.
+ */
+export const AGY_SERVER_DISCOVER_METHOD = "server/discover" as const;
+
 export interface PiToolMcpServerOptions {
-  readonly maxToolTurns: number;
-  readonly wakeDeadline: number;
+  readonly maxToolTurns?: number;
+  readonly wakeDeadline?: number;
 }
 
 type JsonSchema = Record<string, unknown>;
@@ -59,10 +77,10 @@ const toolError = (error: unknown): CallToolResult => ({
 const NO_PI_EXTENSION_CONTEXT = undefined as never;
 
 const validateOptions = (options: PiToolMcpServerOptions): void => {
-  if (!Number.isSafeInteger(options.maxToolTurns) || options.maxToolTurns < 1) {
+  if (options.maxToolTurns !== undefined && (!Number.isSafeInteger(options.maxToolTurns) || options.maxToolTurns < 1)) {
     throw new TypeError("maxToolTurns must be a positive safe integer");
   }
-  if (!Number.isFinite(options.wakeDeadline)) {
+  if (options.wakeDeadline !== undefined && !Number.isFinite(options.wakeDeadline)) {
     throw new TypeError("wakeDeadline must be a finite epoch-millisecond deadline");
   }
 };
@@ -73,6 +91,12 @@ export const createPiToolMcpServer = (
 ): Server => {
   validateOptions(options);
   const server = new Server({ name: "daimon-pi-tools", version: "0.1.2" });
+  server.fallbackRequestHandler = async (request) => {
+    if (request.method !== AGY_SERVER_DISCOVER_METHOD) {
+      throw new McpError(ErrorCode.MethodNotFound, `Method not found: ${request.method}`);
+    }
+    return {};
+  };
   const validators = new Map(tools.map((tool): [string, ValidateFunction] => {
     const schema = jsonSchema(tool.parameters);
     return [tool.name, new Ajv2020({ strict: false }).compile(schema)];
@@ -92,8 +116,8 @@ export const createPiToolMcpServer = (
     CallToolRequestSchema,
     async (request, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       try {
-        if (Date.now() >= options.wakeDeadline) throw new McpWakeDeadlineError();
-        if (toolTurns >= options.maxToolTurns) throw new McpToolTurnLimitError(options.maxToolTurns);
+        if (options.wakeDeadline !== undefined && Date.now() >= options.wakeDeadline) throw new McpWakeDeadlineError();
+        if (options.maxToolTurns !== undefined && toolTurns >= options.maxToolTurns) throw new McpToolTurnLimitError(options.maxToolTurns);
         const tool = tools.find((candidate) => candidate.name === request.params.name);
         const validator = validators.get(request.params.name);
         if (tool === undefined || validator === undefined) {
@@ -106,29 +130,20 @@ export const createPiToolMcpServer = (
         toolTurns += 1;
         // Ajv validated this value against this tool's own schema immediately above.
         const validatedArgs = args as Parameters<typeof tool.execute>[1];
-        const deadlineController = new AbortController();
-        const remainingMs = Math.max(0, options.wakeDeadline - Date.now());
-        const deadlineTimer = setTimeout(() => deadlineController.abort(), remainingMs);
-        const signal = extra.signal === undefined
-          ? deadlineController.signal
-          : AbortSignal.any([extra.signal, deadlineController.signal]);
-        const deadline = new Promise<never>((_resolve, reject) => {
+        const deadlineController = options.wakeDeadline === undefined ? undefined : new AbortController();
+        const remainingMs = options.wakeDeadline === undefined ? undefined : Math.max(0, options.wakeDeadline - Date.now());
+        const deadlineTimer = deadlineController === undefined ? undefined : setTimeout(() => deadlineController.abort(), remainingMs);
+        const signal = deadlineController === undefined ? extra.signal
+          : extra.signal === undefined ? deadlineController.signal : AbortSignal.any([extra.signal, deadlineController.signal]);
+        const deadline = deadlineController === undefined ? undefined : new Promise<never>((_resolve, reject) => {
           deadlineController.signal.addEventListener("abort", () => reject(new McpWakeDeadlineError()), { once: true });
         });
         let result: Awaited<ReturnType<typeof tool.execute>>;
         try {
-          result = await Promise.race([
-            tool.execute(
-              `mcp-tool-turn-${toolTurns}`,
-              validatedArgs,
-              signal,
-              undefined,
-              NO_PI_EXTENSION_CONTEXT
-            ),
-            deadline
-          ]);
+          const execution = tool.execute(`mcp-tool-turn-${toolTurns}`, validatedArgs, signal, undefined, NO_PI_EXTENSION_CONTEXT);
+          result = deadline === undefined ? await execution : await Promise.race([execution, deadline]);
         } finally {
-          clearTimeout(deadlineTimer);
+          if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
         }
         return toolResult(result);
       } catch (error) {

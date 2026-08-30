@@ -1,11 +1,14 @@
 {
   "name": "@noopolis/daimon",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Noopolis native per-agent runtime harness built on Pi.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "daimon-runtime": "dist/runtime/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -18,6 +21,10 @@
     "./observability": {
       "types": "./dist/observability/index.d.ts",
       "import": "./dist/observability/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js"
     }
   },
   "files": [
@@ -32,11 +39,14 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc --project tsconfig.build.json",
+    "build": "rm -rf dist && tsc --project tsconfig.build.json && node --import tsx scripts/emitRuntimeContractManifest.mjs && node src/runtime/native/copyArtifact.mjs",
+    "build:test-runtime": "rm -rf dist-test-runtime && tsc --project tsconfig.test-runtime.json",
     "clean": "rm -rf dist",
     "prepack": "npm run build",
     "prepublishOnly": "npm run typecheck && npm test",
     "typecheck": "tsc --project tsconfig.json --noEmit",
+    "verify:contract-manifest": "node --import tsx scripts/emitRuntimeContractManifest.mjs --check",
+    "verify:production-closure": "node scripts/verifyProductionClosure.mjs",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "emit-causal-fixture": "tsx src/observability/emitCausalFixture.ts",
     "emit-causal-fixture:spoof": "tsx src/observability/emitCausalFixture.ts --spoof",
