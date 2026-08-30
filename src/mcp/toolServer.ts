@@ -27,6 +27,24 @@ export class McpWakeDeadlineError extends Error {
   }
 }
 
+/**
+ * A non-standard request AGY issues during its MCP handshake.
+ *
+ * Captured live from `agy --print … --output-format stream-json`, the client
+ * sends `initialize`, `notifications/initialized`, **`server/discover`**,
+ * `tools/list`, `tools/call`. `server/discover` is not in the MCP
+ * specification, and the throwaway probe that proved AGY's headless tool
+ * calling answered it with `{}`. Codex and Grok never send it.
+ *
+ * This server answers it the same way that working probe did, rather than the
+ * SDK default of `MethodNotFound`, because a refusal here is the one observable
+ * difference between this server and the one AGY is known to work against, and
+ * the cost of being wrong is that every AGY agent silently loses every tool.
+ * The allowance is exactly this one method: any other unknown method still gets
+ * `MethodNotFound`, so a genuine protocol mistake is never hidden.
+ */
+export const AGY_SERVER_DISCOVER_METHOD = "server/discover" as const;
+
 export interface PiToolMcpServerOptions {
   readonly maxToolTurns?: number;
   readonly wakeDeadline?: number;
@@ -73,6 +91,12 @@ export const createPiToolMcpServer = (
 ): Server => {
   validateOptions(options);
   const server = new Server({ name: "daimon-pi-tools", version: "0.1.2" });
+  server.fallbackRequestHandler = async (request) => {
+    if (request.method !== AGY_SERVER_DISCOVER_METHOD) {
+      throw new McpError(ErrorCode.MethodNotFound, `Method not found: ${request.method}`);
+    }
+    return {};
+  };
   const validators = new Map(tools.map((tool): [string, ValidateFunction] => {
     const schema = jsonSchema(tool.parameters);
     return [tool.name, new Ajv2020({ strict: false }).compile(schema)];

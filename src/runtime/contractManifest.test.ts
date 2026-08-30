@@ -41,3 +41,19 @@ test("canonical JSON rejects values with lossy or environment-dependent encoding
   assert.throws(() => canonicalJson({ value: undefined }));
   assert.throws(() => canonicalJson("\ud800"));
 });
+
+test("consumedConfigFields names every agent field the organization runtime schema accepts", () => {
+  const schemaAgentFields = Object.keys(
+    RUNTIME_CONTRACT_MANIFEST.organizationRuntimeConfigV2Schema.properties.agents.items.properties
+  ).sort();
+  const declaredAgentFields = [...new Set(
+    RUNTIME_CONTRACT_MANIFEST.consumedConfigFields
+      .filter((field) => field.startsWith("agents[]."))
+      .map((field) => field.slice("agents[].".length).split(".")[0])
+  )].sort();
+  assert.deepEqual(
+    schemaAgentFields.filter((field) => !declaredAgentFields.includes(field)),
+    [],
+    "every agent property the runtime parses must be listed in consumedConfigFields"
+  );
+});

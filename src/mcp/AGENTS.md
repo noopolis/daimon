@@ -11,3 +11,7 @@ This folder adapts Daimon's existing Pi `ToolDefinition` objects to MCP.
 - MCP exposes each supplied Pi TypeBox/JSON-Schema `parameters` object verbatim and
   validates calls against that same object with a JSON-Schema validator. There is
   no schema conversion layer that can silently discard constraints.
+- One non-standard client request is answered: AGY's handshake sends
+  `server/discover`, which is not in the MCP spec. It is answered with `{}`,
+  the way the probe that proved AGY's headless tool calling answered it. Every
+  other unknown method still gets `MethodNotFound`; do not widen that.

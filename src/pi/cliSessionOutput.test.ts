@@ -26,8 +26,7 @@ test("verbose progress stderr is drained without invalidating a bounded successf
       commandArgs: [engine],
       engine: "agy",
       maxToolTurns: 1,
-      timeoutMs: 10_000,
-      toolAccess: "none"
+      timeoutMs: 10_000
     }, "verbose", { cwd: root }, undefined);
     assert.equal(await readChild(child, 10_000, []), "valid assistant reply");
   } finally {
@@ -50,8 +49,7 @@ test("failed verbose stderr retains only a redacted bounded diagnostic tail", as
       commandArgs: [engine],
       engine: "agy",
       maxToolTurns: 1,
-      timeoutMs: 10_000,
-      toolAccess: "none"
+      timeoutMs: 10_000
     }, "verbose", { cwd: root }, undefined);
     await assert.rejects(readChild(child, 10_000, [secret]), (error: unknown) => {
       assert.ok(error instanceof Error);
@@ -78,7 +76,7 @@ test("redacts a 2000-byte exact secret before retaining a failed stderr tail", a
   try {
     const child = spawnEngine({
       command: process.execPath, commandArgs: [engine], engine: "agy",
-      maxToolTurns: 1, timeoutMs: 10_000, toolAccess: "none"
+      maxToolTurns: 1, timeoutMs: 10_000
     }, "verbose", { cwd: root }, undefined);
     await assert.rejects(readChild(child, 10_000, [secret]), (error: unknown) => {
       assert.ok(error instanceof Error);

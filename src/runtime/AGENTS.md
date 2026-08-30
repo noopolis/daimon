@@ -27,7 +27,23 @@ the provider's fail-open built-in profile with an exact custom profile denying
 the realm, bootstrap, and peer roots, and requires a kernel-enforcement event
 before every Grok setup, turn, and cleanup process.
 `organizationRuntimeReadiness.ts` composes portable credential preparation,
-AGY realm readiness, and physical path authority before any agent starts.
+AGY realm readiness, and physical path authority before any agent starts. AGY
+fails closed on enrolment: `verifyAgySubscriptionEnrollment` runs there at host
+start and again through `prepareEngineReadiness` before and after every wake,
+so an unenrolled realm or an unopenable keyring refuses the agent with "run the
+Daimon AGY bootstrap command" rather than producing credential-less turns.
+
+All three engines now get the same per-wake MCP tool surface. AGY reaches it
+through `../pi/cliMcpRegistration.ts` (`agy mcp add --type http` into the
+agent's own `$HOME/.gemini/config/mcp_config.json`, removed again after the
+turn) rather than a command-line flag, because AGY has no equivalent of Codex's
+`-c mcp_servers.daimon.url=`. `AGY_MAX_TOOL_TURNS` in `../pi/cliSession.ts` is
+the only place its per-wake tool-call bound is decided.
+
+`turnUsageLedger.ts` is engine-neutral: the Grok broker appends through
+`finishBrokerTurnWithUsage`, and AGY — which has no broker — appends through the
+session's `onTurnUsage` sink wired in `engineDispatcher.ts`. Codex stays
+uninstrumented and must never be recorded as zero usage.
 `testRuntimeSubprocess.ts` is an unexported, explicit-test-only JSONL process
 surface for exercising the real control, schedule, and acceptance paths with a
 controlled clock and deterministic scripted cognition. Its ephemeral loopback

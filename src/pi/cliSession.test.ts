@@ -178,7 +178,6 @@ test("CLI engine failures include bounded redacted diagnostics", async () => {
       engine: "agy",
       maxToolTurns: 1,
       timeoutMs: 10_000,
-      toolAccess: "none",
       redactedEnvironmentNames: [tokenEnv]
     })({ cwd: root });
     await assert.rejects(session.prompt("fail"), (error: unknown) => {
@@ -211,7 +210,7 @@ test("CLI stdout cap counts multibyte replies and quiesces descendants", async (
   ].join("\n"));
   try {
     const child = spawnEngine({
-      command: process.execPath, commandArgs: [engine], engine: "agy", maxToolTurns: 1, timeoutMs: 10_000, toolAccess: "none"
+      command: process.execPath, commandArgs: [engine], engine: "agy", maxToolTurns: 1, timeoutMs: 10_000
     }, "overflow", { cwd: root }, undefined);
     await assert.rejects(readChild(child, 10_000, []), (error: unknown) => {
       assert.ok(error instanceof Error);
@@ -258,13 +257,13 @@ test("protected host control variables never reach Codex, Grok, or AGY children"
   process.env[unrelatedEnv] = "must-never-reach-engine";
   process.env[modelEnv] = "must-never-reach-engine";
   const probe = path.join(root, "probe.mjs");
-  await writeFile(probe, `#!/usr/bin/env node\nconst text = [process.env.${controlEnv} ?? "absent", process.env.${unrelatedEnv} ?? "absent", process.env.${modelEnv} ?? "absent", process.env.CODEX_HOME ?? process.env.GROK_HOME ?? process.env.ANTIGRAVITY_CLI_HOME ?? "missing", process.env.DAIMON_WAKE_ID ?? "absent"].join("|"); const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); process.stdout.write(process.argv.includes("--single") ? stream(text) : text);`);
+  await writeFile(probe, `#!/usr/bin/env node\nconst text = [process.env.${controlEnv} ?? "absent", process.env.${unrelatedEnv} ?? "absent", process.env.${modelEnv} ?? "absent", process.env.CODEX_HOME ?? process.env.GROK_HOME ?? process.env.ANTIGRAVITY_CLI_HOME ?? "missing", process.env.DAIMON_WAKE_ID ?? "absent"].join("|"); const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); const agy = (value) => JSON.stringify({ event: "result", result: { conversation_id: "fake", status: "SUCCESS", response: value, num_turns: 1, usage: { input_tokens: 11, output_tokens: 2, thinking_tokens: 1, cache_read_tokens: 0, total_tokens: 13 } } }); process.stdout.write(process.argv.includes("--single") ? stream(text) : process.argv.includes("--output-format") ? agy(text) : text);`);
   await chmod(probe, 0o700);
   try {
     for (const engine of ["codex", "grok", "agy"] as const) {
       const engineHomePath = path.join(root, engine, engine === "codex" ? ".codex" : engine === "grok" ? ".grok" : ".antigravity-cli");
       const options = engine === "agy"
-        ? { engine, command: probe, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000, toolAccess: "none" as const, redactedEnvironmentNames: [controlEnv], engineHomePath }
+        ? { engine, command: probe, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000 as const, redactedEnvironmentNames: [controlEnv], engineHomePath }
         : { engine, command: probe, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000, redactedEnvironmentNames: [controlEnv], engineHomePath };
       const { session } = await createCliSessionFactory(options)({ cwd: root, runtimeHomePath: path.join(root, engine) });
       session.bindWake?.({ id: "moltnet:msg_1", kind: "message", text: "probe" });
@@ -296,7 +295,7 @@ test("disposing a CLI session kills a stubborn process group before returning", 
   await chmod(stubborn, 0o700);
   try {
     const { session } = await createCliSessionFactory({
-      engine: "agy", command: stubborn, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000, toolAccess: "none"
+      engine: "agy", command: stubborn, commandArgs: [], maxToolTurns: 1, timeoutMs: 10_000
     })({ cwd: root });
     const running = session.prompt("hold");
     void running.catch(() => undefined);

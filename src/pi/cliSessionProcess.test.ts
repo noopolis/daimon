@@ -18,7 +18,7 @@ test("terminates a process group after its leader has exited", async (context) =
   const leader = path.join(root, "leader.mjs");
   await writeFile(leader, `import { spawn } from "node:child_process"; import { writeFileSync } from "node:fs"; const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => undefined); setInterval(() => undefined, 1000)"], { stdio: "ignore" }); child.unref(); writeFileSync(${JSON.stringify(descendant)}, String(child.pid));`);
   try {
-    const child = spawnEngine({ engine: "agy", command: process.execPath, commandArgs: [leader], maxToolTurns: 1, timeoutMs: 10_000, toolAccess: "none" }, "exit", { cwd: root }, undefined);
+    const child = spawnEngine({ engine: "agy", command: process.execPath, commandArgs: [leader], maxToolTurns: 1, timeoutMs: 10_000 }, "exit", { cwd: root }, undefined);
     await readChild(child, 10_000, []);
     await waitForFile(descendant);
     const pid = Number(await readFile(descendant, "utf8"));

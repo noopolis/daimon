@@ -13,7 +13,8 @@ test("one-shot CLI helpers pass the assigned runtime home to every child", async
   const command = path.join(root, "agy");
   await writeFile(command, [
     "#!/usr/bin/env node",
-    "process.stdout.write(JSON.stringify({ home: process.env.HOME, config: process.env.XDG_CONFIG_HOME, data: process.env.XDG_DATA_HOME, state: process.env.XDG_STATE_HOME, cache: process.env.XDG_CACHE_HOME, tmp: process.env.TMPDIR }));"
+    "const response = JSON.stringify({ home: process.env.HOME, config: process.env.XDG_CONFIG_HOME, data: process.env.XDG_DATA_HOME, state: process.env.XDG_STATE_HOME, cache: process.env.XDG_CACHE_HOME, tmp: process.env.TMPDIR });",
+    "process.stdout.write(JSON.stringify({ event: \"result\", result: { conversation_id: \"fake\", status: \"SUCCESS\", response, num_turns: 1 } }));"
   ].join("\n"));
   await chmod(command, 0o700);
   try {

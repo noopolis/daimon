@@ -19,15 +19,44 @@ import { cliChildEnvironment } from "./cliEnvironment.js";
 import {
   GROK_STRICT_SANDBOX_PROFILE,
   renderCodexArgs,
-  renderGrokSandboxArgs,
   spawnEngine
 } from "./cliEngineSpawn.js";
+import {
+  registerCliMcpServer,
+  renderAgyMcpAddArgs,
+  renderAgyMcpRemoveArgs,
+  renderGrokMcpAddArgs,
+  renderGrokMcpRemoveArgs,
+  type CliMcpRegistration
+} from "./cliMcpRegistration.js";
+import { decodeAgyHeadlessTurn, type AgyTurnUsage } from "./agyHeadlessResult.js";
 import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
 import type { PiSessionFactoryInput } from "./piHarness.js";
 
 export type CliEngineKind = "agy" | "codex" | "grok";
+
+/**
+ * The per-wake tool-call bound for AGY, and the one place it is decided.
+ *
+ * Codex and Grok leave this `undefined` — their only bound is the wake
+ * deadline. AGY does not get that treatment, for a measured reason: its
+ * terminal usage frame is the *sum* over the turn's model steps, and each tool
+ * step resends the whole context. The live capture is 13,796 total tokens for a
+ * tool-free turn and 45,381 for a turn with a single call against an
+ * empty-schema tool — one call roughly triples the wake. An unbounded loop on
+ * the one engine whose subscription quota is currently the operator's only
+ * working credential is a cost hazard, not a capability.
+ *
+ * 16 is chosen so a realistic wake is never truncated (read a few declared MCP
+ * tools, then send one or two Moltnet messages) while the worst case is bounded
+ * at roughly a quarter-million tokens instead of "whatever fits in 180s". The
+ * bound degrades gracefully rather than failing the wake: exceeding it returns
+ * `McpToolTurnLimitError` to the model as a tool *error*, so the agent can still
+ * finish its turn and reply.
+ */
+export const AGY_MAX_TOOL_TURNS = 16;
 
 export type CliEngineOptions = {
   readonly commandArgs?: readonly string[];
@@ -48,13 +77,17 @@ export type CliEngineOptions = {
   readonly verifyGrokSandbox?: () => Promise<void>;
   readonly grokSandboxProfile?: string;
   readonly grokBrokerTurn?: (prompt: string, mcpEndpoint: string, signal: AbortSignal) => Promise<string>;
+  /**
+   * Advisory per-turn metering sink for the engines whose headless stream
+   * reports token usage and that do not run behind the Grok engine broker
+   * (which meters its own turns). It never fails a turn that published.
+   */
+  readonly onTurnUsage?: (usage: AgyTurnUsage) => Promise<void>;
 } & ({
   readonly engine: "codex" | "grok";
 } | {
   readonly dbusSessionBusAddress?: string;
-  /** AGY has no MCP client. Selecting this state explicitly permits tool-free participation. */
   readonly engine: "agy";
-  readonly toolAccess: "none";
 });
 
 export type CliSessionInput = {
@@ -158,53 +191,6 @@ const startMcp = async (
   }
 };
 
-type GrokRegistration = { close: () => Promise<void> };
-
-const grokCommand = async (
-  args: readonly string[], cwd: string, env: NodeJS.ProcessEnv, command: string, secretValues: readonly string[],
-  onChild: (child: ChildProcess) => void, onChildSettled: (child: ChildProcess) => void
-): Promise<void> => {
-  const child = trackCliChild(spawn(command, args, {
-    cwd,
-    env,
-    detached: process.platform !== "win32",
-    stdio: ["ignore", "pipe", "pipe"]
-  }));
-  onChild(child);
-  try {
-    await readChild(child, 30_000, secretValues, {
-      failureClassifier: classifyGrokAuthenticationDiagnostic
-    });
-  } finally {
-    // The Grok CLI may let an auxiliary process outlive its leader. Do not
-    // release the tracked setup child until its detached group is quiescent.
-    await terminateChild(child);
-    onChildSettled(child);
-  }
-};
-
-const addGrokServer = async (
-  endpoint: string, cwd: string, env: NodeJS.ProcessEnv, command: string, commandArgs: readonly string[], secretValues: readonly string[],
-  onChild: (child: ChildProcess) => void, onChildSettled: (child: ChildProcess) => void,
-  profile: string, verifySandbox: (() => Promise<void>) | undefined
-): Promise<GrokRegistration> => {
-  await verifySandbox?.();
-  await grokCommand(
-    [...renderGrokSandboxArgs(commandArgs, profile), "mcp", "add", "--transport", "http", "--scope", "project", "daimon", endpoint],
-    cwd, env, command, secretValues, onChild, onChildSettled
-  );
-  let closePromise: Promise<void> | undefined;
-  return {
-    close: (): Promise<void> => closePromise ??= (async () => {
-      await verifySandbox?.();
-      await grokCommand(
-        [...renderGrokSandboxArgs(commandArgs, profile), "mcp", "remove", "--scope", "project", "daimon"],
-        cwd, env, command, secretValues, onChild, onChildSettled
-      );
-    })()
-  };
-};
-
 class CliSession implements PiSessionLike {
   private readonly listeners = new Set<CliListener>();
   private readonly setupChildren = new Set<ChildProcess>();
@@ -212,7 +198,7 @@ class CliSession implements PiSessionLike {
   private activeChild: ChildProcess | undefined;
   private activeMount: { close: () => Promise<void> } | undefined;
   private activeBrokerTurn: AbortController | undefined;
-  private grokRegistration: GrokRegistration | undefined;
+  private mcpRegistration: CliMcpRegistration | undefined;
   private disposePromise: Promise<void> | undefined;
   private wakeId: string | undefined;
 
@@ -240,36 +226,58 @@ class CliSession implements PiSessionLike {
     ]);
     const stagedCredentialSecrets = await this.options.credentialSecretValues?.() ?? [];
     const secretValues = [...environmentSecretValues, ...stagedCredentialSecrets];
-    const needsMcp = this.options.engine !== "agy";
     let mount: { endpoint: string; close: () => Promise<void> } | undefined;
-    let registration: GrokRegistration | undefined;
+    let registration: CliMcpRegistration | undefined;
+    let turnUsage: AgyTurnUsage | undefined;
     let child: ChildProcess | undefined;
     let output: string | undefined;
     let cleanupFailure: unknown;
     let promptFailure: unknown;
     try {
-      mount = needsMcp
-        ? await startMcp(this.input.customTools ?? [], this.options.maxToolTurns, deadline, this.options.onToolsMounted, (started) => {
-          this.activeMount = started;
-          if (this.disposed) void started.close();
-        })
-        : undefined;
+      // Every CLI engine mounts the same tool surface. AGY used to be the one
+      // exception (`toolAccess: "none"`), which is exactly what made an AGY
+      // agent unable to reach Moltnet or a declared MCP server, and so unable
+      // to take part in an organization at all.
+      mount = await startMcp(this.input.customTools ?? [], this.options.maxToolTurns, deadline, this.options.onToolsMounted, (started) => {
+        this.activeMount = started;
+        if (this.disposed) void started.close();
+      });
       this.ensureLive();
       if (this.options.engine === "grok" && this.options.grokBrokerTurn !== undefined && mount !== undefined) {
         const controller=new AbortController();this.activeBrokerTurn=controller;
         try{output=await this.options.grokBrokerTurn(`${this.options.identityPrompt ?? ""}${text}`,mount.endpoint,controller.signal);}finally{if(this.activeBrokerTurn===controller)this.activeBrokerTurn=undefined;}
       } else {
-      if (this.options.engine === "grok" && mount !== undefined) {
+      if ((this.options.engine === "grok" || this.options.engine === "agy") && mount !== undefined) {
         await this.options.verifyExecutable?.();
-        registration = await addGrokServer(mount.endpoint, this.input.cwd, cliChildEnvironment([
-          ...(this.options.redactedEnvironmentNames ?? []),
-          ...(this.input.daimonSecretEnvironmentNames ?? [])
-        ], this.input.runtimeHomePath, { engine: this.options.engine, executablePath: this.options.command, engineHomePath: this.options.engineHomePath }), this.options.command ?? "grok", this.options.commandArgs ?? [], secretValues, (setupChild) => {
-          this.setupChildren.add(setupChild);
-        }, (setupChild) => this.setupChildren.delete(setupChild),
-        this.options.grokSandboxProfile ?? GROK_STRICT_SANDBOX_PROFILE,
-        this.options.verifyGrokSandbox);
-        this.grokRegistration = registration;
+        const profile = this.options.grokSandboxProfile ?? GROK_STRICT_SANDBOX_PROFILE;
+        const grok = this.options.engine === "grok";
+        registration = await registerCliMcpServer({
+          addArgs: grok
+            ? renderGrokMcpAddArgs(this.options.commandArgs, profile, mount.endpoint)
+            : renderAgyMcpAddArgs(this.options.commandArgs, mount.endpoint),
+          removeArgs: grok
+            ? renderGrokMcpRemoveArgs(this.options.commandArgs, profile)
+            : renderAgyMcpRemoveArgs(this.options.commandArgs),
+          command: this.options.command ?? this.options.engine,
+          cwd: this.input.cwd,
+          env: cliChildEnvironment([
+            ...(this.options.redactedEnvironmentNames ?? []),
+            ...(this.input.daimonSecretEnvironmentNames ?? [])
+          ], this.input.runtimeHomePath, {
+            ...(this.options.engine === "agy" && this.options.dbusSessionBusAddress !== undefined
+              ? { dbusSessionBusAddress: this.options.dbusSessionBusAddress }
+              : {}),
+            engine: this.options.engine,
+            executablePath: this.options.command,
+            engineHomePath: this.options.engineHomePath
+          }),
+          ...(grok ? { failureClassifier: classifyGrokAuthenticationDiagnostic } : {}),
+          onChild: (setupChild) => { this.setupChildren.add(setupChild); },
+          onChildSettled: (setupChild) => this.setupChildren.delete(setupChild),
+          secretValues,
+          ...(grok && this.options.verifyGrokSandbox !== undefined ? { verify: this.options.verifyGrokSandbox } : {})
+        });
+        this.mcpRegistration = registration;
       }
       this.ensureLive();
       await this.options.verifyRuntimePaths?.();
@@ -286,7 +294,12 @@ class CliSession implements PiSessionLike {
       await this.options.verifyRuntimePaths?.();
       await this.options.verifyExecutable?.();
       const childOutput = await outputPromise;
-      output = this.options.engine === "grok" ? decodeGrokHeadlessResult(childOutput) : childOutput;
+      if (this.options.engine === "grok") output = decodeGrokHeadlessResult(childOutput);
+      else if (this.options.engine === "agy") {
+        const decoded = decodeAgyHeadlessTurn(childOutput);
+        output = decoded.text;
+        turnUsage = decoded.usage;
+      } else output = childOutput;
       }
     } catch (error) {
       promptFailure = error;
@@ -295,7 +308,7 @@ class CliSession implements PiSessionLike {
       if (this.activeChild === child) this.activeChild = undefined;
       let registrationClosed = registration === undefined;
       cleanupFailure = await captureCleanup(cleanupFailure, async () => { await registration?.close(); registrationClosed = true; });
-      if (registrationClosed && this.grokRegistration === registration) this.grokRegistration = undefined;
+      if (registrationClosed && this.mcpRegistration === registration) this.mcpRegistration = undefined;
       cleanupFailure = await captureCleanup(cleanupFailure, async () => { await mount?.close(); });
       if (this.activeMount === mount) this.activeMount = undefined;
     }
@@ -325,6 +338,12 @@ class CliSession implements PiSessionLike {
         stopReason: "stop", timestamp: Date.now()
       }, toolResults: []
     } satisfies CliTurnEnd);
+    // Meter only after the turn has published, and never let metering failure
+    // rewrite a turn that succeeded: the same ordering rule the Grok engine
+    // broker states in `finishBrokerTurnWithUsage`.
+    if (turnUsage !== undefined) {
+      await this.options.onTurnUsage?.(turnUsage).catch(() => undefined);
+    }
   }
 
   public dispose(): void {
@@ -347,7 +366,7 @@ class CliSession implements PiSessionLike {
     cleanupFailure = await captureCleanup(cleanupFailure, async () => { if (this.activeChild !== undefined) await terminateChild(this.activeChild); });
     this.activeBrokerTurn?.abort();
     cleanupFailure = await captureCleanup(cleanupFailure, () => Promise.all([...this.setupChildren].map((child) => terminateChild(child))).then(() => undefined));
-    cleanupFailure = await captureCleanup(cleanupFailure, async () => { await this.grokRegistration?.close(); });
+    cleanupFailure = await captureCleanup(cleanupFailure, async () => { await this.mcpRegistration?.close(); });
     cleanupFailure = await captureCleanup(cleanupFailure, async () => { await this.activeMount?.close(); });
     if (cleanupFailure !== undefined) throw cleanupFailure;
   }
@@ -368,4 +387,4 @@ export const createCliSessionFactory = (options: CliEngineOptions) => async (
 };
 
 export { runEngine, runEngineDetailed, type EngineRunResult } from "./cliEngineRun.js";
-export { renderCodexArgs, spawnEngine } from "./cliEngineSpawn.js";
+export { renderAgyArgs, renderCodexArgs, spawnEngine } from "./cliEngineSpawn.js";
