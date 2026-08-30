@@ -16,6 +16,17 @@ import type { PiWakeEnvironmentContextRef } from "../pi/piAgentWakeSupport.js";
 
 const MAX_RESULT = 65_536; const TIMEOUT = 10_000;
 
+/**
+ * Action and delivery identifiers are prefixed with a hyphen, never a colon.
+ *
+ * Moltnet's machine protocol rejects any identifier that parses as a scoped
+ * agent id, and `ParseScopedAgentID` treats *every* `left:right` string as one
+ * (`moltnet/pkg/protocol/identity.go`). A `daimon:<digest>` delivery id
+ * therefore failed `delivery_id must be a local id`, and the CLI answered
+ * `error: invalid request` for every send an agent ever attempted.
+ */
+const DAIMON_ACTION_ID_PREFIX = "daimon-";
+
 export async function createProductionAgentTools(agent: OrganizationRuntimeAgentConfig, wakeContext: PiWakeEnvironmentContextRef = {}): Promise<ToolDefinition[]> {
   await mkdir(path.join(agent.runtimeHomePath, "tool-state"), { recursive: true, mode: 0o700 });
   const tools = [...await Promise.all((agent.mcp ?? []).map((server) => mcpTools(agent, server, wakeContext)))].flat();
@@ -41,7 +52,7 @@ async function mcpTools(agent: OrganizationRuntimeAgentConfig, server: Organizat
       parameters: declared.inputSchema as ToolDefinition["parameters"],
       async execute(_id, params) {
         if (!wakeContext.current) throw new Error("MCP call requires an active wake");
-        const actionId = `daimon:${createHash("sha256").update(JSON.stringify([wakeContext.current, agent.id, server.name, name, params])).digest("hex")}`;
+        const actionId = `${DAIMON_ACTION_ID_PREFIX}${createHash("sha256").update(JSON.stringify([wakeContext.current, agent.id, server.name, name, params])).digest("hex")}`;
         const prior = await priorReceipt(agent, actionId); if (prior !== undefined) return { content: [{ type: "text", text: JSON.stringify(prior) }], details: prior };
         const active = await connect(agent, server);
         try {
@@ -64,7 +75,7 @@ function moltnetTool(agent: OrganizationRuntimeAgentConfig, wakeContext: PiWakeE
       if (network === undefined || Buffer.byteLength(input.text) > 2_048) throw new Error("Moltnet action exceeds declared scope");
       const [kind, target] = input.target.split(":", 2); if ((kind === "room" && !network.rooms.includes(target ?? "")) || (kind === "dm" && !network.dms) || !target || !["room", "dm"].includes(kind ?? "")) throw new Error("Moltnet target is not declared");
       if (!wakeContext.current) throw new Error("Moltnet send requires an active wake");
-      const deliveryId = `daimon:${createHash("sha256").update(JSON.stringify([wakeContext.current, agent.id, input.network, input.target, input.text])).digest("hex")}`;
+      const deliveryId = `${DAIMON_ACTION_ID_PREFIX}${createHash("sha256").update(JSON.stringify([wakeContext.current, agent.id, input.network, input.target, input.text])).digest("hex")}`;
       const prior = await priorReceipt(agent, deliveryId); if (prior !== undefined) return { content: [{ type: "text", text: JSON.stringify(prior) }], details: prior };
       const response = await machine(agent.moltnet!.cliPath, agent.moltnet!.configPath, input.network, { version: "moltnet.machine.v1", correlation_id: deliveryId, operation: "send_nudge", send_nudge: { delivery_id: deliveryId, target: { kind, id: target }, body: input.text } });
       const result = response.send_nudge as { accepted?: boolean; message_id?: string } | undefined; if (result?.accepted !== true || typeof result.message_id !== "string") throw new Error("Moltnet send was not accepted");
@@ -87,7 +98,38 @@ function receiptPath(agent: OrganizationRuntimeAgentConfig, deliveryId: string):
 async function receipt(agent: OrganizationRuntimeAgentConfig, value: Record<string, unknown>): Promise<void> { const deliveryId = String(value.delivery_id); const file = receiptPath(agent, deliveryId); const temporary = `${file}.${process.pid}.${Date.now()}.tmp`; const bytes = `${JSON.stringify({ ...value, at: new Date().toISOString() })}\n`; if (Buffer.byteLength(bytes) > MAX_RESULT) throw new Error("tool receipt exceeds bound"); const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); } try { await rename(temporary, file); await pruneReceipts(path.dirname(file)); const directory = await open(path.dirname(file), constants.O_RDONLY); try { await directory.sync(); } finally { await directory.close(); } } catch (error) { await unlink(temporary).catch(() => undefined); throw error; } }
 async function pruneReceipts(directory: string): Promise<void> { const candidates = await Promise.all((await readdir(directory)).filter((name) => /^[a-f0-9]{64}\.json$/u.test(name)).map(async (name) => ({ name, info: await lstat(path.join(directory, name)) }))); if (candidates.some(({ info }) => !info.isFile() || info.nlink !== 1)) throw new Error("tool receipt directory contains an unsafe entry"); for (const candidate of candidates.sort((left, right) => right.info.mtimeMs - left.info.mtimeMs || right.name.localeCompare(left.name)).slice(2048)) await unlink(path.join(directory, candidate.name)); }
 async function priorReceipt(agent: OrganizationRuntimeAgentConfig, deliveryId: string): Promise<Record<string, unknown> | undefined> { const file = receiptPath(agent, deliveryId); let handle; try { handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } try { const entry = await handle.stat(); if (!entry.isFile() || entry.size > MAX_RESULT) throw new Error("tool receipt is unsafe or exceeds bound"); const value = JSON.parse(await handle.readFile("utf8")) as Record<string, unknown>; if (value.delivery_id !== deliveryId || value.agent_id !== agent.id || value.engine !== agent.engine.kind) throw new Error("tool receipt identity mismatch"); return value; } finally { await handle.close(); } }
-async function machine(cli: string, config: string, network: string, request: unknown): Promise<Record<string, unknown>> { return await new Promise((resolve, reject) => { const child = spawn(cli, ["machine", "--config", config, "--network", network], { stdio: ["pipe", "pipe", "pipe"] }); let output = "", error = ""; const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Moltnet machine timed out")); }, TIMEOUT); child.stdout.on("data", (chunk) => { output += chunk; if (Buffer.byteLength(output) > MAX_RESULT) child.kill("SIGKILL"); }); child.stderr.on("data", (chunk) => { error += chunk; }); child.once("error", reject); child.once("exit", (code) => { clearTimeout(timer); if (code !== 0) reject(new Error(`Moltnet machine failed: ${error.slice(0, 1024)}`)); else { try { resolve(JSON.parse(output.trim().split("\n")[0]!) as Record<string, unknown>); } catch (cause) { reject(cause); } } }); child.stdin.end(`${JSON.stringify(request)}\n`); }); }
+/**
+ * One request/response exchange with `moltnet machine`.
+ *
+ * Stdin is held open until the response line arrives. `moltnet machine` treats
+ * end-of-input as cancellation of everything still in flight, so ending stdin
+ * with the request — as this did — raced the send and lost: the CLI answered
+ * `{"error":{"code":"canceled"}}` and no message was ever delivered. The
+ * operation is complete once its line is on stdout, so closing stdin there can
+ * no longer cancel it.
+ */
+async function machine(cli: string, config: string, network: string, request: unknown): Promise<Record<string, unknown>> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(cli, ["machine", "--config", config, "--network", network], { stdio: ["pipe", "pipe", "pipe"] });
+    let output = "", error = "", settled = false;
+    const settle = (action: () => void): void => { if (settled) return; settled = true; clearTimeout(timer); action(); };
+    const timer = setTimeout(() => { child.kill("SIGKILL"); settle(() => reject(new Error("Moltnet machine timed out"))); }, TIMEOUT);
+    child.stdin.on("error", () => undefined);
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+      if (Buffer.byteLength(output) > MAX_RESULT) { child.kill("SIGKILL"); settle(() => reject(new Error("Moltnet machine response exceeds bound"))); return; }
+      const newline = output.indexOf("\n"); if (newline < 0) return;
+      const line = output.slice(0, newline).trim(); if (line.length === 0) return;
+      child.stdin.end();
+      settle(() => { try { resolve(JSON.parse(line) as Record<string, unknown>); } catch (cause) { reject(cause); } });
+      child.kill("SIGTERM");
+    });
+    child.stderr.on("data", (chunk) => { error += chunk; });
+    child.once("error", (cause) => settle(() => reject(cause)));
+    child.once("exit", () => settle(() => reject(new Error(`Moltnet machine failed: ${(error.slice(0, 1024) || "no response").trim()}`))));
+    child.stdin.write(`${JSON.stringify(request)}\n`);
+  });
+}
 function digest(value: string): string { return `sha256:${createHash("sha256").update(value).digest("hex")}`; }
 function safe(value: string): string { return value.replace(/[^A-Za-z0-9_]/gu, "_").slice(0, 48); }
 function stringEnvironment(value: NodeJS.ProcessEnv): Record<string, string> { return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => entry[1] !== undefined)); }

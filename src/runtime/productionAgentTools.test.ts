@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import url from "node:url";
 import test from "node:test";
 
 import { createProductionAgentTools } from "./productionAgentTools.js";
@@ -24,7 +25,7 @@ test("production cognition mounts only declared MCP tools and records a bounded 
 test("production Moltnet tool enforces compiled scope and records accepted message receipt", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-production-moltnet-"));
   try {
-    const cli = path.join(root, "moltnet"); await writeFile(cli, "#!/usr/bin/env node\nlet s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{const q=JSON.parse(s);process.stdout.write(JSON.stringify({version:'moltnet.machine.v1',correlation_id:q.correlation_id,operation:'send_nudge',send_nudge:{accepted:true,message_id:'msg-1'}})+'\\n')})\n"); await chmod(cli, 0o755);
+    const cli = path.join(root, "moltnet"); await writeFile(cli, `#!/usr/bin/env node\nimport(${JSON.stringify(url.pathToFileURL(path.resolve("src/runtime/fixtures/testMoltnetMachine.mjs")).href)});\n`); await chmod(cli, 0o755);
     const agent: OrganizationRuntimeAgentConfig = { id: "alpha", name: "Alpha", instructions: "work", workspacePath: root, runtimeHomePath: root, engine: { kind: "codex" }, moltnet: { cliPath: cli, configPath: path.join(root, "config.json"), networks: [{ id: "news", rooms: ["desk"], dms: false }] } };
     const tool = (await createProductionAgentTools(agent, { current: "schedule:occurrence" }))[0]!;
     await assert.rejects(tool.execute("call", { network: "news", target: "dm:beta", text: "no" } as never, undefined, undefined, {} as never), /not declared/u);
@@ -34,8 +35,22 @@ test("production Moltnet tool enforces compiled scope and records accepted messa
     await tool.execute("call", { network: "news", target: "room:desk", text: "hello" } as never, undefined, undefined, {} as never);
     const replacement = (await createProductionAgentTools(agent, { current: "schedule:occurrence" }))[0]!;
     await replacement.execute("call", { network: "news", target: "room:desk", text: "hello" } as never, undefined, undefined, {} as never);
-    const stored = await receipts(root); assert.match(stored.join(""), /"kind":"moltnet".*"delivery_id":"daimon:.*"message_id":"msg-1"/u); assert.equal(stored.length, 2);
+    const stored = await receipts(root); assert.match(stored.join(""), /"kind":"moltnet".*"delivery_id":"daimon-.*"message_id":"msg-1"/u); assert.equal(stored.length, 2);
     await writeFile(path.join(root, "tool-state", "unrelated-torn.json"), "{");
     await replacement.execute("call", { network: "news", target: "room:desk", text: "hello" } as never, undefined, undefined, {} as never);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Moltnet identifiers are local ids, never a colon-scoped agent id", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-production-moltnet-id-"));
+  try {
+    const cli = path.join(root, "moltnet"); await writeFile(cli, `#!/usr/bin/env node\nimport(${JSON.stringify(url.pathToFileURL(path.resolve("src/runtime/fixtures/testMoltnetMachine.mjs")).href)});\n`); await chmod(cli, 0o755);
+    const agent: OrganizationRuntimeAgentConfig = { id: "alpha", name: "Alpha", instructions: "work", workspacePath: root, runtimeHomePath: root, engine: { kind: "codex" }, moltnet: { cliPath: cli, configPath: path.join(root, "config.json"), networks: [{ id: "news", rooms: ["desk"], dms: false }] } };
+    const tool = (await createProductionAgentTools(agent, { current: "schedule:occurrence" }))[0]!;
+    await tool.execute("call", { network: "news", target: "room:desk", text: "hello" } as never, undefined, undefined, {} as never);
+    const stored = (await receipts(root)).join("");
+    const deliveryId = (JSON.parse(stored) as { delivery_id: string }).delivery_id;
+    assert.ok(!deliveryId.includes(":"), `delivery id must be a local id, got ${deliveryId}`);
+    assert.match(deliveryId, /^daimon-[0-9a-f]{64}$/u);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

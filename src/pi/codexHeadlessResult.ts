@@ -36,13 +36,26 @@ export type CodexTurnUsage = Readonly<{
 
 export type CodexHeadlessTurn = Readonly<{ text: string; usage?: CodexTurnUsage }>;
 
+/**
+ * Every field Codex actually emits on `turn.completed.usage`.
+ *
+ * `cache_write_input_tokens` is NOT in this list: Codex 0.142.3 and 0.151.0
+ * both emit exactly `{input_tokens, cached_input_tokens, output_tokens,
+ * reasoning_output_tokens}`, verified against a live turn inside the runtime
+ * image and against `token_count` in a session rollout. Requiring the cache
+ * write field made `decodeCodexTurnUsage` return `undefined` for *every* real
+ * turn, so the codex half of the usage ledger recorded nothing at all while
+ * every test passed against a fixture that invented the field.
+ */
 const USAGE_TOKEN_FIELDS = [
   "input_tokens",
   "cached_input_tokens",
-  "cache_write_input_tokens",
   "output_tokens",
   "reasoning_output_tokens"
 ] as const;
+
+/** Absent means zero; present-but-malformed still degrades the whole block. */
+const CACHE_WRITE_FIELD = "cache_write_input_tokens" as const;
 
 const tokenCount = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
@@ -59,7 +72,9 @@ const decodeCodexTurnUsage = (frame: JsonRecord, calls: number): CodexTurnUsage 
   const usage = frame.usage;
   const counts = USAGE_TOKEN_FIELDS.map((field) => tokenCount(usage[field]));
   if (counts.some((count) => count === undefined)) return undefined;
-  const [input, cacheRead, cacheWrite, output, reasoningOutput] = counts as [number, number, number, number, number];
+  const cacheWrite = usage[CACHE_WRITE_FIELD] === undefined ? 0 : tokenCount(usage[CACHE_WRITE_FIELD]);
+  if (cacheWrite === undefined) return undefined;
+  const [input, cacheRead, output, reasoningOutput] = counts as [number, number, number, number];
   const total = input + output;
   return {
     input,
