@@ -345,3 +345,4 @@ static pid_t launch(const struct dbl_registration *r, int executable,
   erase(mcp_env, sizeof(mcp_env));
   launch_fail(status_pipe[1], 6);
 }
+
