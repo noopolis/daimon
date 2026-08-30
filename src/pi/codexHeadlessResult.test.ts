@@ -31,6 +31,18 @@ test("cacheRead is a subset of input and is never added to total", () => {
   ));
   assert.equal(decoded.usage?.total, 18_110 + 5);
   assert.notEqual(decoded.usage?.total, 18_110 + 11_008 + 5);
+
+  const invalidCacheSubset = decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
+    { type: "turn.completed", usage: usage({ cached_input_tokens: 18_111 }) }
+  ));
+  assert.equal(invalidCacheSubset.usage?.complete, false);
+
+  const invalidReasoningSubset = decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
+    { type: "turn.completed", usage: usage({ reasoning_output_tokens: 6 }) }
+  ));
+  assert.equal(invalidReasoningSubset.usage?.complete, false);
 });
 
 test("tool frames are counted while the last agent message is published", () => {
@@ -49,8 +61,8 @@ test("tool frames are counted while the last agent message is published", () => 
 test("unknown future envelope and item types are skipped", () => {
   assert.equal(decodeCodexHeadlessResult(stream(
     { type: "future.envelope", payload: true },
-    { type: "item.completed", item: { type: "future_item", text: "wrong" } },
     { type: "item.completed", item: { type: "agent_message", text: "right" } },
+    { type: "item.completed", item: { type: "future_item", text: "wrong" } },
     { type: "turn.completed", usage: usage() }
   )), "right");
 });
@@ -68,12 +80,65 @@ test("absent or malformed usage remains advisory", () => {
 test("invalid subset relationships clear complete without failing publication", () => {
   const decoded = decodeCodexHeadlessTurn(stream(
     { type: "item.completed", item: { type: "agent_message", text: "ok" } },
-    { type: "turn.completed", usage: usage({ cached_input_tokens: 18_111 }) }
+    { type: "turn.completed", usage: usage({ reasoning_output_tokens: 6 }) }
   ));
   assert.equal(decoded.usage?.complete, false);
 });
 
-test("failed and empty streams reject", () => {
+test("a frame after turn.completed preserves the reply and usage", () => {
+  const decoded = decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
+    { type: "turn.completed", usage: usage() },
+    { type: "future.envelope", payload: true }
+  ));
+  assert.equal(decoded.text, "ok");
+  assert.equal(decoded.usage?.total, 18_115);
+});
+
+test("two turn.completed frames preserve the reply without ambiguous usage", () => {
+  const decoded = decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
+    { type: "turn.completed", usage: usage() },
+    { type: "turn.completed", usage: usage() }
+  ));
+  assert.equal(decoded.text, "ok");
+  assert.equal(decoded.usage, undefined);
+});
+
+test("a reply without turn.completed is published without usage", () => {
+  const decoded = decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { type: "agent_message", text: "ok" } }
+  ));
+  assert.deepEqual(decoded, { text: "ok" });
+});
+
+test("the last non-blank agent message wins", () => {
+  const decoded = decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
+    { type: "item.completed", item: { type: "agent_message", text: "   " } },
+    { type: "turn.completed", usage: usage() }
+  ));
+  assert.equal(decoded.text, "ok");
+  assert.equal(decoded.usage?.total, 18_115);
+});
+
+test("only a blank agent message rejects", () => {
+  assert.throws(() => decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { type: "agent_message", text: "   " } }
+  )), /empty response/u);
+});
+
+test("turn.failed after a reply publishes text without usage", () => {
+  assert.deepEqual(decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
+    { type: "turn.failed", error: "no" }
+  )), { text: "ok" });
+});
+
+test("turn.failed without a reply rejects", () => {
   assert.throws(() => decodeCodexHeadlessTurn(stream({ type: "turn.failed", error: "no" })), /failed turn/u);
+});
+
+test("empty streams reject", () => {
   assert.throws(() => decodeCodexHeadlessTurn(""), /empty stream/u);
 });

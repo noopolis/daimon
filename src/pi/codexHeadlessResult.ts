@@ -77,33 +77,39 @@ const decodeCodexTurnUsage = (frame: JsonRecord, calls: number): CodexTurnUsage 
  * Decode Codex's NDJSON stream without mistaking tool/progress items for the
  * reply. Unknown envelopes and item types are skipped because Codex owns the
  * vocabulary and a future frame must not fail a turn that published.
- * `turn.completed` is required to be terminal, matching both the captured
- * Codex 0.151.0 stream and AGY's publication boundary: accepting later frames
- * would make the asserted terminal accounting ambiguous.
+ * A Codex turn that spent subscription money and produced a reply must reach
+ * the organization: uncertainty about accounting degrades to `usage:
+ * undefined` and never discards publishable text. Unlike AGY's stricter
+ * envelope, Codex may omit, repeat, or follow `turn.completed` with another
+ * frame, so only exactly one completion frame supplies trustworthy usage.
  */
 export const decodeCodexHeadlessTurn = (output: string): CodexHeadlessTurn => {
   const lines = output.split(/\r?\n/).filter((line) => line.trim().length > 0);
   if (lines.length === 0) throw invalidResult("empty stream");
   let text: string | undefined;
-  let completed: JsonRecord | undefined;
+  const completed: JsonRecord[] = [];
+  let failed = false;
   let calls = 0;
-  for (const [index, line] of lines.entries()) {
+  for (const line of lines) {
     let frame: unknown;
     try { frame = JSON.parse(line); } catch { throw invalidResult("invalid JSON"); }
     if (!isRecord(frame) || typeof frame.type !== "string") throw invalidResult("invalid event");
-    if (frame.type === "turn.failed") throw invalidResult("failed turn");
+    if (frame.type === "turn.failed") {
+      failed = true;
+      continue;
+    }
     if (frame.type === "turn.completed") {
-      if (index !== lines.length - 1) throw invalidResult("non-terminal completion");
-      completed = frame;
+      completed.push(frame);
       continue;
     }
     if (frame.type !== "item.completed" || !isRecord(frame.item) || typeof frame.item.type !== "string") continue;
     if (frame.item.type === "command_execution" || frame.item.type === "mcp_tool_call") calls += 1;
-    if (frame.item.type === "agent_message" && typeof frame.item.text === "string") text = frame.item.text;
+    if (frame.item.type === "agent_message" && typeof frame.item.text === "string" && frame.item.text.trim().length > 0) {
+      text = frame.item.text;
+    }
   }
-  if (completed === undefined) throw invalidResult("no completion frame");
-  if (typeof text !== "string" || text.trim().length === 0) throw invalidResult("empty response");
-  const usage = decodeCodexTurnUsage(completed, calls);
+  if (typeof text !== "string") throw invalidResult(failed ? "failed turn" : "empty response");
+  const usage = !failed && completed.length === 1 ? decodeCodexTurnUsage(completed[0], calls) : undefined;
   return usage === undefined ? { text: text.trim() } : { text: text.trim(), usage };
 };
 
