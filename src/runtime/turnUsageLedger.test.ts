@@ -116,7 +116,18 @@ test("an AGY turn renders the same record shape, labelled agy", () => {
     input: 44_937, output: 444, cache_read: 0, cache_write: 0,
     total: 45_381, calls: 1, notional_usd: 0, complete: true
   });
-  assert.deepEqual([...TURN_USAGE_ENGINES], ["agy", "grok"], "codex is uninstrumented and must not claim zero usage");
+  assert.deepEqual([...TURN_USAGE_ENGINES], ["agy", "codex", "grok"]);
+});
+
+test("a Codex turn renders measured cache writes and subset-safe totals", () => {
+  const parsed = JSON.parse(renderTurnUsageLine(entry({
+    engine: "codex",
+    usage: { input: 18_110, output: 5, cacheRead: 11_008, cacheWrite: 0, total: 18_115, calls: 0, notionalUsd: 0, complete: true }
+  })));
+  assert.equal(parsed.engine, "codex");
+  assert.equal(parsed.total, 18_115);
+  assert.equal(parsed.cache_read, 11_008);
+  assert.equal(parsed.cache_write, 0);
 });
 
 test("the ledger path override is honoured only when it is absolute", () => {

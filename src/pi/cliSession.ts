@@ -30,6 +30,7 @@ import {
   type CliMcpRegistration
 } from "./cliMcpRegistration.js";
 import { decodeAgyHeadlessTurn, type AgyTurnUsage } from "./agyHeadlessResult.js";
+import { decodeCodexHeadlessTurn, type CodexTurnUsage } from "./codexHeadlessResult.js";
 import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
@@ -82,7 +83,7 @@ export type CliEngineOptions = {
    * reports token usage and that do not run behind the Grok engine broker
    * (which meters its own turns). It never fails a turn that published.
    */
-  readonly onTurnUsage?: (usage: AgyTurnUsage) => Promise<void>;
+  readonly onTurnUsage?: (usage: AgyTurnUsage | CodexTurnUsage) => Promise<void>;
 } & ({
   readonly engine: "codex" | "grok";
 } | {
@@ -228,7 +229,7 @@ class CliSession implements PiSessionLike {
     const secretValues = [...environmentSecretValues, ...stagedCredentialSecrets];
     let mount: { endpoint: string; close: () => Promise<void> } | undefined;
     let registration: CliMcpRegistration | undefined;
-    let turnUsage: AgyTurnUsage | undefined;
+    let turnUsage: AgyTurnUsage | CodexTurnUsage | undefined;
     let child: ChildProcess | undefined;
     let output: string | undefined;
     let cleanupFailure: unknown;
@@ -295,6 +296,11 @@ class CliSession implements PiSessionLike {
       await this.options.verifyExecutable?.();
       const childOutput = await outputPromise;
       if (this.options.engine === "grok") output = decodeGrokHeadlessResult(childOutput);
+      else if (this.options.engine === "codex") {
+        const decoded = decodeCodexHeadlessTurn(childOutput);
+        output = decoded.text;
+        turnUsage = decoded.usage;
+      }
       else if (this.options.engine === "agy") {
         const decoded = decodeAgyHeadlessTurn(childOutput);
         output = decoded.text;

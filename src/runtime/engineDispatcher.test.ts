@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -43,7 +43,9 @@ test("production dispatcher starts each closed engine intent through Daimon", as
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-"));
   const priorPath = process.env.PATH;
   const priorRun = process.env.NOOPOLIS_RUN_ID;
-  const stub = `#!/usr/bin/env node\nconst args = process.argv.slice(2); const text = process.env.DAIMON_DISPATCH_CONTROL ?? "absent"; const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); const agy = (value) => JSON.stringify({ event: "result", result: { conversation_id: "fake", status: "SUCCESS", response: value, num_turns: 1, usage: { input_tokens: 11, output_tokens: 2, thinking_tokens: 1, cache_read_tokens: 0, total_tokens: 13 } } }); if (args.includes("mcp")) process.stdout.write("ok"); else process.stdout.write(args.includes("--single") ? stream(text) : args.includes("--output-format") ? agy(text) : text);`;
+  const priorLedger = process.env.DAIMON_TURN_USAGE_LEDGER_PATH;
+  const ledger = path.join(root, "usage.jsonl");
+  const stub = `#!/usr/bin/env node\nconst args = process.argv.slice(2); const text = process.env.DAIMON_DISPATCH_CONTROL ?? "absent"; const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); const codex = (value) => [{ type: "item.completed", item: { type: "agent_message", text: value } }, { type: "turn.completed", usage: { input_tokens: 11, cached_input_tokens: 3, cache_write_input_tokens: 0, output_tokens: 2, reasoning_output_tokens: 1 } }].map(JSON.stringify).join("\\n"); const agy = (value) => JSON.stringify({ event: "result", result: { conversation_id: "fake", status: "SUCCESS", response: value, num_turns: 1, usage: { input_tokens: 11, output_tokens: 2, thinking_tokens: 1, cache_read_tokens: 0, total_tokens: 13 } } }); if (args.includes("mcp")) process.stdout.write("ok"); else process.stdout.write(args.includes("--single") ? stream(text) : args.includes("--output-format") ? agy(text) : args.includes("--json") ? codex(text) : text);`;
   try {
     for (const name of ["codex", "grok", "agy"]) {
       const file = path.join(root, name);
@@ -53,6 +55,7 @@ test("production dispatcher starts each closed engine intent through Daimon", as
     }
     process.env.PATH = `${root}${path.delimiter}${priorPath ?? ""}`;
     process.env.NOOPOLIS_RUN_ID = "dispatcher-test";
+    process.env.DAIMON_TURN_USAGE_LEDGER_PATH = ledger;
     process.env.DAIMON_DISPATCH_CONTROL = "host-only";
     for (const kind of ["codex", "grok", "agy"] as const) {
       const handle = await startOrganizationRuntimeEngine(rootConfig(root, kind), "DAIMON_DISPATCH_CONTROL", undefined, kind === "agy" ? "unix:path=/private/realm/bus" : undefined);
@@ -60,11 +63,18 @@ test("production dispatcher starts each closed engine intent through Daimon", as
       assert.equal(result.text, "absent");
       await handle.stop();
     }
+    const metered = (await readFile(ledger, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(metered.map(({ engine, wake, total }) => ({ engine, wake, total })), [
+      { engine: "codex", wake: "codex-wake", total: 13 },
+      { engine: "agy", wake: "agy-wake", total: 13 }
+    ], "Codex and AGY carry advisory session meters while unbrokered Grok remains unchanged");
   } finally {
     if (priorPath === undefined) delete process.env.PATH;
     else process.env.PATH = priorPath;
     if (priorRun === undefined) delete process.env.NOOPOLIS_RUN_ID;
     else process.env.NOOPOLIS_RUN_ID = priorRun;
+    if (priorLedger === undefined) delete process.env.DAIMON_TURN_USAGE_LEDGER_PATH;
+    else process.env.DAIMON_TURN_USAGE_LEDGER_PATH = priorLedger;
     delete process.env.DAIMON_DISPATCH_CONTROL;
     await rm(root, { recursive: true, force: true });
   }
@@ -74,7 +84,7 @@ test("engine dispatcher threads a declared memory bank into the Pi harness", asy
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-memory-"));
   const priorPath = process.env.PATH;
   const priorRun = process.env.NOOPOLIS_RUN_ID;
-  const stub = `#!/usr/bin/env node\nconst args = process.argv.slice(2); const text = process.env.DAIMON_DISPATCH_CONTROL ?? "absent"; const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); const agy = (value) => JSON.stringify({ event: "result", result: { conversation_id: "fake", status: "SUCCESS", response: value, num_turns: 1, usage: { input_tokens: 11, output_tokens: 2, thinking_tokens: 1, cache_read_tokens: 0, total_tokens: 13 } } }); if (args.includes("mcp")) process.stdout.write("ok"); else process.stdout.write(args.includes("--single") ? stream(text) : args.includes("--output-format") ? agy(text) : text);`;
+  const stub = `#!/usr/bin/env node\nconst args = process.argv.slice(2); const text = process.env.DAIMON_DISPATCH_CONTROL ?? "absent"; const stream = (value) => [{ type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: value }] } }, { type: "result", subtype: "success", is_error: false, result: value, stop_reason: "end_turn", session_id: "fake" }].map(JSON.stringify).join("\\n"); const codex = (value) => [{ type: "item.completed", item: { type: "agent_message", text: value } }, { type: "turn.completed", usage: { input_tokens: 11, cached_input_tokens: 3, cache_write_input_tokens: 0, output_tokens: 2, reasoning_output_tokens: 1 } }].map(JSON.stringify).join("\\n"); const agy = (value) => JSON.stringify({ event: "result", result: { conversation_id: "fake", status: "SUCCESS", response: value, num_turns: 1, usage: { input_tokens: 11, output_tokens: 2, thinking_tokens: 1, cache_read_tokens: 0, total_tokens: 13 } } }); if (args.includes("mcp")) process.stdout.write("ok"); else process.stdout.write(args.includes("--single") ? stream(text) : args.includes("--output-format") ? agy(text) : args.includes("--json") ? codex(text) : text);`;
   try {
     const file = path.join(root, "codex");
     await writeFile(file, stub);
@@ -175,7 +185,7 @@ test("Daimon frames one escaped identity envelope for every production engine", 
     "if (args.includes('mcp')) process.stdout.write('ok');",
     "else if (args.includes('--single')) { const text = args[args.indexOf('--single') + 1]; process.stdout.write(stream(text)); }",
     "else if (args.includes('--print')) process.stdout.write(JSON.stringify({ event: 'result', result: { conversation_id: 'fake', status: 'SUCCESS', response: args[args.indexOf('--print') + 1], num_turns: 1 } }));",
-    "else { const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk); process.stdout.write(Buffer.concat(chunks).toString('utf8')); }"
+    "else { const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk); const text = Buffer.concat(chunks).toString('utf8'); process.stdout.write([{ type: 'item.completed', item: { type: 'agent_message', text } }, { type: 'turn.completed' }].map(JSON.stringify).join('\\n')); }"
   ].join("\n");
   try {
     for (const kind of ["codex", "grok", "agy"] as const) {

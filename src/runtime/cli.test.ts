@@ -47,7 +47,7 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
   const readinessReceipt = path.join(root, "state", "runtime-readiness.json");
   await writeFile(inboundAuth, JSON.stringify({ tokens: { access_token: "test-access", refresh_token: "test-refresh" } }), { mode: 0o600 });
   await chmod(inboundAuth, 0o600);
-  await writeFile(program, `#!/usr/bin/env node\nif (process.argv.includes('--version')) process.stdout.write('test'); else { process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(process.env.${tokenEnv} ?? 'absent')); }`);
+  await writeFile(program, `#!/usr/bin/env node\nif (process.argv.includes('--version')) process.stdout.write('test'); else { process.stdin.resume(); process.stdin.on('end', () => { const text = process.env.${tokenEnv} ?? 'absent'; process.stdout.write([{ type: 'item.completed', item: { type: 'agent_message', text } }, { type: 'turn.completed' }].map(JSON.stringify).join('\\n')); }); }`);
   await chmod(program, 0o700);
   await writeFile(configPath, JSON.stringify({
     version: ORGANIZATION_RUNTIME_VERSION,
