@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { decodeGrokHeadlessResult } from "../pi/grokHeadlessResult.js";
+import { decodeGrokHeadlessTurn } from "../pi/grokHeadlessResult.js";
+import { recordTurnUsage, TURN_USAGE_LEDGER, type TurnUsageEntry } from "./turnUsageLedger.js";
 import { DurableGrokBrokerCredentialAuthority } from "./grokBrokerCredentialAuthority.js";
 import { NativeBrokerTurnFailure, runNativeBrokerTurn, type NativeBrokerDiagnostic } from "./engineBrokerNativeClient.js";
 import { EngineBrokerTurnRegistry } from "./engineBrokerTurnRegistry.js";
@@ -11,7 +12,28 @@ import { GrokWorkerAttestationFailure,prepareGrokWorkerAttestation,verifyGrokWor
 export type GrokEngineBrokerRegistration = Readonly<{ agentId:string;slot:number;workerUid:number;workspace:string;profilePath:string;eventsPath:string;profileSha256:string }>;
 export type GrokEngineBroker = Awaited<ReturnType<typeof startGrokEngineBroker>>;
 export class EngineBrokerTurnFailure extends Error{constructor(readonly code:"auth_stale"|"cancelled"|"engine_failed",readonly diagnostic?:NativeBrokerDiagnostic){super("engine broker turn failed");}}
-export async function startGrokEngineBroker(options: Readonly<{ grokCommand: string; nativeClient: string; credentialHome: string; turnStore: string; registrations: readonly GrokEngineBrokerRegistration[] }>) {
+
+/**
+ * Seal a completed turn, then meter it.
+ *
+ * Order is load-bearing. `turns.finish` publishes the durable *completed*
+ * record; only after that does the advisory usage line get appended. A replayed
+ * turn returns before the enclosing `try` block and never reaches here, so a
+ * crash-recovered turn cannot double-count. Usage is deliberately kept out of
+ * the `completed` frame itself: that record is re-validated by the strict wire
+ * parser on the next `begin()`, whose exact field set would reject an extra key
+ * and break crash-recovery replay permanently.
+ *
+ * `recordTurnUsage` never rejects, so an append failure cannot escape into the
+ * caller's `catch` and rewrite this already-completed turn as failed.
+ */
+export async function finishBrokerTurnWithUsage(turns: EngineBrokerTurnRegistry, request: Parameters<EngineBrokerTurnRegistry["begin"]>[0], completed: Parameters<EngineBrokerTurnRegistry["finish"]>[1], usageLedgerPath: string, usage: TurnUsageEntry["usage"] | undefined, agentId: string, wakeId: string): Promise<void> {
+  await turns.finish(request, completed);
+  if (usage === undefined) return;
+  await recordTurnUsage(usageLedgerPath, { agent: agentId, wake: wakeId, engine: "grok", usage });
+}
+export async function startGrokEngineBroker(options: Readonly<{ grokCommand: string; nativeClient: string; credentialHome: string; turnStore: string; registrations: readonly GrokEngineBrokerRegistration[]; usageLedgerPath?: string }>) {
+  const usageLedgerPath = options.usageLedgerPath ?? TURN_USAGE_LEDGER.filePath;
   const registrations = new Map(options.registrations.map((entry) => [entry.agentId, entry])); if (registrations.size !== options.registrations.length) throw new Error("engine broker registration conflict");
   const lease=await acquireGrokBrokerRealmLease(options.credentialHome);const authority = new DurableGrokBrokerCredentialAuthority(options.grokCommand, options.credentialHome);try{await authority.initialize();}catch(error){await lease.close();throw error;} let proxy:Awaited<ReturnType<typeof startGrokBrokerProxy>>;try{proxy=await startGrokBrokerProxy(authority);}catch(error){await lease.close();throw error;}let mcp:Awaited<ReturnType<typeof startEngineBrokerMcpFacade>>|undefined;try{mcp=await startEngineBrokerMcpFacade();for(const registration of registrations.values())await prepareGrokWorkerAttestation({...registration,brokerGid:2100});}catch(error){if(mcp)await mcp.close().catch(()=>undefined);await proxy.close();await lease.close();throw error;}if(!mcp)throw new Error("engine broker unavailable");const turns = new EngineBrokerTurnRegistry(options.turnStore); const active = new Map<string, { controller: AbortController; done: Promise<void>; resolve: () => void }>(); let closed = false;
   return {
@@ -21,7 +43,7 @@ export async function startGrokEngineBroker(options: Readonly<{ grokCommand: str
       const begun = await turns.begin(request); if (begun !== "start") { if (begun.replay.kind === "completed") return {text:begun.replay.text,workerPid:begun.replay.workerPid,workerUid:begun.replay.workerUid,workerStartTime:begun.replay.workerStartTime};const code=begun.replay.code==="auth_stale"||begun.replay.code==="cancelled"?begun.replay.code:"engine_failed";throw new EngineBrokerTurnFailure(code,begun.replay.diagnostic as NativeBrokerDiagnostic|undefined); }
       const isolation=await prepareGrokWorkerAttestation({...registration,brokerGid:2100});proxy.registerIsolationGuard(turnId,()=>verifyGrokWorkerAttestation({...registration,brokerGid:2100},isolation));const providerCapability = proxy.capabilities.issue(agentId, turnId);const mcpCapability=mcp.register(agentId,turnId,mcpEndpoint); const controller = new AbortController();const onAbort=()=>controller.abort();signal?.addEventListener("abort",onAbort,{once:true});if(signal?.aborted)controller.abort(); let resolve!:()=>void;const done=new Promise<void>((value)=>{resolve=value;});active.set(turnId,{controller,done,resolve});
       let nativeDiagnostic:NativeBrokerDiagnostic|undefined,attested=false;
-      try { const result = await runNativeBrokerTurn(options.nativeClient, { slot: registration.slot, requestId: request.requestId, turnId, agentId, wakeId, prompt, providerCapability,mcpCapability }, controller.signal);nativeDiagnostic=result.diagnostic;if(result.workerUid!==registration.workerUid)throw new Error();await verifyGrokWorkerAttestation({...registration,brokerGid:2100},isolation);attested=true; const text = decodeGrokHeadlessResult(result.text);const completed={ version: request.version, kind: "completed", requestId: request.requestId, turnId, text, workerPid: result.workerPid, workerUid: result.workerUid, workerStartTime: result.startTicks.toString() } as const; await turns.finish(request,completed); return {text,workerPid:result.workerPid,workerUid:result.workerUid,workerStartTime:result.startTicks.toString()}; }
+      try { const result = await runNativeBrokerTurn(options.nativeClient, { slot: registration.slot, requestId: request.requestId, turnId, agentId, wakeId, prompt, providerCapability,mcpCapability }, controller.signal);nativeDiagnostic=result.diagnostic;if(result.workerUid!==registration.workerUid)throw new Error();await verifyGrokWorkerAttestation({...registration,brokerGid:2100},isolation);attested=true; const decoded = decodeGrokHeadlessTurn(result.text);const text = decoded.text;const completed={ version: request.version, kind: "completed", requestId: request.requestId, turnId, text, workerPid: result.workerPid, workerUid: result.workerUid, workerStartTime: result.startTicks.toString() } as const; await finishBrokerTurnWithUsage(turns,request,completed,usageLedgerPath,decoded.usage,agentId,wakeId); return {text,workerPid:result.workerPid,workerUid:result.workerUid,workerStartTime:result.startTicks.toString()}; }
       catch(error) { const code=authority.isStale()?"auth_stale":controller.signal.aborted?"cancelled":"engine_failed";const diagnostic=error instanceof NativeBrokerTurnFailure?error.diagnostic:nativeDiagnostic&&!attested?{...nativeDiagnostic,status:"worker_failed" as const,stage:"attestation" as const,failureClass:error instanceof GrokWorkerAttestationFailure?error.failureClass:"profile_invalid" as const,profileApplied:false}:undefined;await turns.finish(request, { version: request.version, kind: "failed", requestId: request.requestId, turnId, code,...(diagnostic?{diagnostic}:{}) }); throw new EngineBrokerTurnFailure(code,diagnostic); }
       finally { signal?.removeEventListener("abort",onAbort);active.get(turnId)?.resolve(); active.delete(turnId); proxy.revokeIsolationGuard(turnId);proxy.capabilities.revoke(turnId);mcp.revoke(turnId); }
     },

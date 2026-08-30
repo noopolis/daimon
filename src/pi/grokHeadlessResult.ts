@@ -10,6 +10,72 @@ const invalidResult = (detail: string): Error =>
 
 type TerminalAssistant = Readonly<{ sessionId: string; stopReason: string; text: string }>;
 
+/**
+ * Token accounting for one turn, as the engine itself reported it.
+ *
+ * These are subscription-backed CLIs, so nothing here is billed: the counts are
+ * real quota consumption and `notionalUsd` is what the same turn would have cost
+ * at metered API rates. Kept away from anything named `cost` so a later reader
+ * cannot mistake it for a charge.
+ *
+ * Field provenance is the `streaming-messages-json` terminal `result` frame,
+ * which production hardcodes (`grokBrokerWorkerConfig.ts`). Its `result.usage`
+ * is the Messages API `message.usage` shape with three *disjoint* prompt-side
+ * buckets, so the full turn cost is
+ * `input_tokens + cache_read_input_tokens + cache_creation_input_tokens + output_tokens`.
+ */
+export type GrokTurnUsage = Readonly<{
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+  calls: number;
+  notionalUsd: number;
+  complete: boolean;
+}>;
+
+export type GrokHeadlessTurn = Readonly<{ text: string; usage?: GrokTurnUsage }>;
+
+/**
+ * The four disjoint token buckets grok emits on `result.usage`. All four must be
+ * present and be non-negative safe integers; a renamed, stringified, negative,
+ * or fractional field rejects the whole block rather than silently contributing
+ * a zero, because a zero bucket is byte-indistinguishable from a real one.
+ */
+const USAGE_TOKEN_FIELDS = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"] as const;
+
+const tokenCount = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+
+const nonNegativeAmount = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+
+/**
+ * Extract per-turn usage from the terminal `result` frame.
+ *
+ * Advisory: a malformed or absent usage block yields `undefined` rather than
+ * failing a turn that published correctly, and never throws.
+ *
+ * `complete` is a stated heuristic, not a wire-observable signal. grok's own
+ * embedded documentation for this stream says any bucket it cannot account for
+ * "falls back to `0`, because the Messages API schema has no marker for
+ * incomplete or absent usage", and instructs consumers to "read an all-zero
+ * `usage` here as 'unknown', not 'free'". That is exactly the rule below. It
+ * cannot catch a *partially* zero-filled turn, which sums to a plausible total
+ * and is stamped `complete: true` while under-counting — so every count this
+ * decoder produces is a lower bound.
+ */
+const decodeTurnUsage = (result: JsonRecord): GrokTurnUsage | undefined => {
+  if (!isRecord(result.usage)) return undefined;
+  const usage = result.usage;
+  const counts = USAGE_TOKEN_FIELDS.map((field) => tokenCount(usage[field]));
+  if (counts.some((count) => count === undefined)) return undefined;
+  const [input, output, cacheRead, cacheWrite] = counts as [number, number, number, number];
+  const total = input + cacheRead + cacheWrite + output;
+  return { input, output, cacheRead, cacheWrite, total, calls: tokenCount(result.num_turns) ?? 0, notionalUsd: nonNegativeAmount(result.total_cost_usd), complete: total > 0 };
+};
+
 const decodeTerminalAssistant = (event: JsonRecord): TerminalAssistant | undefined => {
   if (event.type !== "assistant" || event.parent_tool_use_id !== null) return undefined;
   if (typeof event.session_id !== "string" || !isRecord(event.message)) throw invalidResult("invalid assistant event");
@@ -31,8 +97,11 @@ const decodeTerminalAssistant = (event: JsonRecord): TerminalAssistant | undefin
   return { sessionId: event.session_id, stopReason: message.stop_reason, text };
 };
 
-/** Decode Grok's terminal message stream without treating progress messages as a reply. */
-export const decodeGrokHeadlessResult = (output: string): string => {
+/**
+ * Decode Grok's terminal message stream without treating progress messages as a
+ * reply, and extract the turn's own token accounting from the same frame.
+ */
+export const decodeGrokHeadlessTurn = (output: string): GrokHeadlessTurn => {
   const lines = output.split(/\r?\n/).filter((line) => line.length > 0);
   if (lines.length === 0) throw invalidResult("empty stream");
   let finalAssistant: TerminalAssistant | undefined;
@@ -61,6 +130,10 @@ export const decodeGrokHeadlessResult = (output: string): string => {
       finalAssistant.sessionId !== result.session_id || finalAssistant.text !== result.result) {
     throw invalidResult("terminal result mismatch");
   }
-  return result.result.trim();
+  const usage = decodeTurnUsage(result);
+  return usage === undefined ? { text: result.result.trim() } : { text: result.result.trim(), usage };
 };
+
+/** Text-only view of {@link decodeGrokHeadlessTurn}, for callers that do not meter. */
+export const decodeGrokHeadlessResult = (output: string): string => decodeGrokHeadlessTurn(output).text;
 import { asGrokAuthenticationRejected } from "../runtime/grokAuthenticationError.js";
