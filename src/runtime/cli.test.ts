@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/p
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import { ORGANIZATION_RUNTIME_VERSION } from "./organizationRuntime.js";
 import { parseOrganizationRuntimeCliArguments, runOrganizationRuntimeCli } from "./cli.js";
@@ -27,7 +27,7 @@ test("CLI rejects an oversized config before JSON parsing", async () => {
   }
 });
 
-test("CLI strictly authenticates and routes a production Daimon engine", async () => {
+test("CLI strictly authenticates and routes a production Daimon engine", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-runtime-cli-"));
   const port = await availablePort();
   const tokenEnv = "DAIMON_RUNTIME_CLI_TEST_TOKEN";
@@ -64,7 +64,7 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
   child.stdout?.on("data", (chunk: Buffer) => output.push(chunk));
   child.stderr?.on("data", (chunk: Buffer) => output.push(chunk));
   try {
-    await waitForHealth(port, token, child, output);
+    await waitForHealth(t, port, token, child, output);
     assert.deepEqual(JSON.parse(await readFile(readinessReceipt, "utf8")), { version: "noopolis.daimon.readiness-receipt.v1", agents: [{ agent_id: "agent", engine: "codex" }] });
     assert.equal(await readFile(runtimeAuth, "utf8"), await readFile(inboundAuth, "utf8"));
     assert.equal((await lstat(path.dirname(runtimeAuth))).mode & 0o777, 0o700);
@@ -109,7 +109,7 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
     const activityBody = await activityV2.json() as { version: string; items: Array<{ delivery_id: string }> };
     assert.equal(activityBody.version, "noopolis.daimon.organization-runtime-activity.v2");
     assert.equal(activityBody.items.some((item) => item.delivery_id === "delivery-1"), true);
-    await waitForReceipt(port, token, acceptance.acceptance_id);
+    await waitForReceipt(t, port, token, acceptance.acceptance_id);
     const conflict = await fetch(`http://127.0.0.1:${port}/v2/wakes`, {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ agent_id: "agent", delivery_id: "delivery-1", event: {
         version: "noopolis.daimon.wake.v2", kind: "manual", text: "different", occurred_at: "2026-08-17T00:00:00.000Z"
@@ -144,22 +144,62 @@ async function availablePort(): Promise<number> {
   return address.port;
 }
 
-async function waitForHealth(port: number, token: string, child: ReturnType<typeof spawn>, output: Buffer[]): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+const POLL_INTERVAL_MS = 20;
+const GENEROUS_WAIT_MS = 60_000;
+
+/**
+ * Whether a completion wait may keep polling.
+ *
+ * Nothing below measures speed, only that something eventually happens. The CLI
+ * is spawned through `tsx`, so it compiles TypeScript before it can bind a port
+ * at all, which makes "time to healthy" a property of the machine rather than of
+ * the product. The fixed budget this replaces — 100 polls x 20ms = 2s — was
+ * therefore a cap on how slow the runner was allowed to be: measured at 978ms on
+ * an 18-core laptop and 1320ms on a cold 2-core container, it left almost no
+ * headroom, and CI blew through it at 2354ms with the process still `running`
+ * (alive, not crashed, simply not finished booting).
+ *
+ * The budget now ends at whichever comes first: the test's own timeout, since
+ * node aborts `t.signal` then and the harness `--test-timeout` governs it, or a
+ * generous cap that still fails a genuine hang in bounded time instead of
+ * stalling until the job is killed.
+ */
+function stillWaiting(t: TestContext, startedAt: number): boolean {
+  return !t.signal.aborted && Date.now() - startedAt < GENEROUS_WAIT_MS;
+}
+
+async function waitForHealth(t: TestContext, port: number, token: string, child: ReturnType<typeof spawn>, output: Buffer[]): Promise<void> {
+  const startedAt = Date.now();
+  let attempts = 0, lastProbe = "never attempted";
+  while (stillWaiting(t, startedAt)) {
+    attempts += 1;
     try {
       const response = await fetch(`http://127.0.0.1:${port}/v1/health`, { headers: { authorization: `Bearer ${token}` } });
       if (response.status === 200) return;
-    } catch { /* process has not bound yet */ }
-    await new Promise((resolve) => setTimeout(resolve, 20));
+      lastProbe = `HTTP ${response.status}`;
+    } catch (error) { lastProbe = error instanceof Error ? error.message : String(error); }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
-  throw new Error(`runtime CLI did not become healthy: ${Buffer.concat(output).toString("utf8")}; exit=${child.exitCode ?? child.signalCode ?? "running"}`);
+  // Carry the evidence. This used to interpolate an empty output buffer, so the
+  // failure read "did not become healthy: ; exit=running" and said nothing about
+  // why — which is exactly why this took so long to diagnose from CI alone.
+  const text = Buffer.concat(output).toString("utf8").trim();
+  throw new Error(`runtime CLI did not become healthy after ${Date.now() - startedAt}ms across ${attempts} probes; exit=${child.exitCode ?? child.signalCode ?? "running"}; last probe: ${lastProbe}; child output: ${text === "" ? "(none — the process had not logged anything yet)" : text}`);
 }
 
-async function waitForReceipt(port: number, token: string, acceptanceId: string): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitForReceipt(t: TestContext, port: number, token: string, acceptanceId: string): Promise<void> {
+  const startedAt = Date.now();
+  let attempts = 0, lastState = "never observed";
+  while (stillWaiting(t, startedAt)) {
+    attempts += 1;
     const response = await fetch(`http://127.0.0.1:${port}/v2/wake-receipts/${acceptanceId}`, { headers: { authorization: `Bearer ${token}` } });
-    if (response.status === 200 && (await response.json() as { state: string }).state === "completed") return;
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    if (response.status === 200) {
+      const { state } = await response.json() as { state: string };
+      if (state === "completed") return;
+      lastState = state;
+    } else lastState = `HTTP ${response.status}`;
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
-  throw new Error("v2 acceptance did not reach a terminal result");
+  // Same fixed-budget shape, and it reported no diagnostic at all.
+  throw new Error(`v2 acceptance ${acceptanceId} did not reach a terminal result after ${Date.now() - startedAt}ms across ${attempts} polls; last observed state: ${lastState}`);
 }
