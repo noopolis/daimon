@@ -32,6 +32,7 @@ type TestControlOptions = OrganizationRuntimeControlOptions & Readonly<{
   fuseEnvironment?: NodeJS.ProcessEnv;
   fusePollIntervalMsForTest?: number;
   beforeTripTerminalizationForTest?: () => Promise<void>;
+  afterFuseAdmissionForTest?: () => Promise<void>;
 }>;
 type CoreHost = OrganizationRuntimeHost;
 type AcceptanceRecord = Awaited<ReturnType<WakeAcceptanceStore["accept"]>>["record"];
@@ -189,6 +190,7 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
       await tripFuse(verdict.reason);
       return { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" };
     }
+    await options.afterFuseAdmissionForTest?.();
     if (stopping) return { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" };
     return await acceptRequest(request);
   };

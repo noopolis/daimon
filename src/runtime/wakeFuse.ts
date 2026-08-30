@@ -34,6 +34,7 @@ let warnedDisarmed = false;
 export class WakeFuse {
   private serial: Promise<void> = Promise.resolve();
   private reason: WakeFuseTripReason | undefined;
+  private tripMarkerMissing = false;
 
   private constructor(
     private readonly armed: boolean,
@@ -104,7 +105,7 @@ export class WakeFuse {
   async close(): Promise<void> { await this.serial; }
 
   private async admitNow(agentId: string, deliveryId: string): Promise<WakeFuseVerdict> {
-    if (this.reason !== undefined) return { state: "tripped", reason: this.reason };
+    if (this.reason !== undefined) return await this.trip(this.reason);
     try {
       if (await exists(path.join(this.directory, "fuse.stop"))) return await this.trip("operator_stop");
       const admissionKey = key(bounded(agentId), bounded(deliveryId));
@@ -124,7 +125,17 @@ export class WakeFuse {
   private async trip(reason: WakeFuseTripReason): Promise<WakeFuseVerdict> {
     if (this.reason === undefined) {
       this.reason = reason;
-      await writeTripMarker(this.directory, { v: WAKE_FUSE_VERSION, kind: "trip", epoch: this.epoch, at: this.now().toISOString(), reason });
+      this.tripMarkerMissing = true;
+    }
+    if (this.tripMarkerMissing) {
+      try {
+        await writeTripMarker(this.directory, { v: WAKE_FUSE_VERSION, kind: "trip", epoch: this.epoch, at: this.now().toISOString(), reason: this.reason });
+        this.tripMarkerMissing = false;
+      } catch {
+        // Keep the in-memory fuse closed and retry durability on every later
+        // admit/trip. Marker I/O must never turn a tripped verdict into an
+        // unhandled rejection at the HTTP boundary.
+      }
     }
     return { state: "tripped", reason: this.reason };
   }

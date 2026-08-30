@@ -147,6 +147,41 @@ test("a persistence that lands after the trip snapshot is terminalized", async (
   } finally { releaseTransition(); core.release(); await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
+test("a request admitted before a concurrent trip is refused before persistence", async () => {
+  const root = await privateRoot();
+  const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  let admissionReached!: () => void;
+  const reachedAdmission = new Promise<void>((resolve) => { admissionReached = resolve; });
+  let releaseAdmission!: () => void;
+  const admissionRelease = new Promise<void>((resolve) => { releaseAdmission = resolve; });
+  let tripReached!: () => void;
+  const reachedTrip = new Promise<void>((resolve) => { tripReached = resolve; });
+  let releaseTrip!: () => void;
+  const tripRelease = new Promise<void>((resolve) => { releaseTrip = resolve; });
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, new FakeCoreHost(), {
+    acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
+    fuseEnvironment: fuseEnvironment(usage, 10), fusePollIntervalMsForTest: 1,
+    afterFuseAdmissionForTest: async () => { admissionReached(); await admissionRelease; },
+    beforeTripTerminalizationForTest: async () => { tripReached(); await tripRelease; }
+  });
+  try {
+    await control.start();
+    const pending = control.accept(request("admitted-before-trip"));
+    await reachedAdmission;
+    await writeFile(path.join(usage, "fuse.stop"), "");
+    await Promise.race([reachedTrip, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("concurrent trip timed out")), 1_000))]);
+    releaseAdmission();
+    assert.deepEqual(await pending, { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
+    const items = (await control.activityV2(token))?.items ?? [];
+    assert.equal(items.some((item) => item.delivery_id === "admitted-before-trip"), false, "a request caught by the admit/persist trip window must not create a store record");
+  } finally {
+    releaseAdmission(); releaseTrip();
+    await control.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(usage, { recursive: true, force: true });
+  }
+});
+
 test("invalid authorities consume no admission and duplicate delivery is fuse-idempotent", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));

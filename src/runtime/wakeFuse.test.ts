@@ -152,3 +152,14 @@ test("once tripped the fuse never admits again", async () => await withDirectory
   assert.equal((await fuse.admit("alpha", "two")).state, "tripped");
   assert.equal((await fuse.admit("alpha", "one")).state, "tripped");
 }));
+
+test("a failed trip-marker write is retried without reopening admission", async () => await withDirectory(async (directory) => {
+  const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE_MAX_WAKES: "1" }) });
+  await fuse.admit("alpha", "one");
+  await mkdir(path.join(directory, "fuse.trip.json"));
+  assert.deepEqual(await fuse.admit("alpha", "two"), { state: "tripped", reason: "wake_ceiling" });
+  await rm(path.join(directory, "fuse.trip.json"), { recursive: true });
+  assert.deepEqual(await fuse.admit("alpha", "three"), { state: "tripped", reason: "wake_ceiling" });
+  const reopened = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE_MAX_WAKES: "1" }) });
+  assert.equal(reopened.tripped(), "wake_ceiling");
+}));
