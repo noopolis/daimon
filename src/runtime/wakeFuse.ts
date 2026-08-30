@@ -1,9 +1,9 @@
 import { constants } from "node:fs";
-import { open, readFile, readdir, rename, stat } from "node:fs/promises";
+import { open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
-import { TURN_USAGE_LEDGER, TURN_USAGE_MAX_IDENTIFIER_CHARS, TURN_USAGE_ROTATE_BYTES } from "./turnUsageLedger.js";
+import { resolveTurnUsageLedgerPath, TURN_USAGE_LEDGER, TURN_USAGE_MAX_IDENTIFIER_CHARS, TURN_USAGE_ROTATE_BYTES } from "./turnUsageLedger.js";
 
 export const WAKE_FUSE_VERSION = "noopolis.daimon.wake-fuse.v1" as const;
 export const WAKE_FUSE_DIRECTORY_ENV = "DAIMON_WAKE_FUSE_DIRECTORY" as const;
@@ -20,6 +20,9 @@ export type WakeFuseOptions = Readonly<{
 
 type Admission = Readonly<{ v: typeof WAKE_FUSE_VERSION; kind: "admission"; epoch: string; at: string; agent: string; delivery: string }>;
 type EpochStart = Readonly<{ v: typeof WAKE_FUSE_VERSION; kind: "epoch_start"; epoch: string; at: string }>;
+type TripMarker = Readonly<{ v: typeof WAKE_FUSE_VERSION; kind: "trip"; epoch: string; at: string; reason: WakeFuseTripReason }>;
+const TRIP_MARKER = "fuse.trip.json";
+let warnedDisarmed = false;
 
 /**
  * Durable catastrophic-wake admission fuse for one organization/container.
@@ -40,6 +43,7 @@ export class WakeFuse {
     private readonly maxWakes: number,
     private readonly maxTokens: number,
     private readonly admissions: Set<string>,
+    private readonly usageLedgerPath: string,
     private readonly now: () => Date
   ) {}
 
@@ -55,7 +59,14 @@ export class WakeFuse {
     const maxTokens = ceiling(environment.DAIMON_WAKE_FUSE_MAX_TOKENS, DEFAULT_WAKE_FUSE_MAX_TOKENS, "DAIMON_WAKE_FUSE_MAX_TOKENS");
     const directory = resolveWakeFuseDirectory(environment);
     const now = options.now ?? (() => new Date());
-    if (setting === "off") return new WakeFuse(false, directory, epoch, now().toISOString(), maxWakes, maxTokens, new Set(), now);
+    const usageLedgerPath = resolveTurnUsageLedgerPath(environment);
+    if (setting === "off") {
+      if (!warnedDisarmed) {
+        warnedDisarmed = true;
+        console.error("DAIMON WAKE FUSE IS OFF: wake admission is unbounded");
+      }
+      return new WakeFuse(false, directory, epoch, now().toISOString(), maxWakes, maxTokens, new Set(), usageLedgerPath, now);
+    }
 
     // Unbounded defaults would reproduce exactly the failure this module prevents.
     await readdir(directory);
@@ -66,8 +77,9 @@ export class WakeFuse {
     const admissions = new Set(records
       .filter((record): record is Admission => record.kind === "admission" && record.epoch === epoch)
       .map((record) => key(record.agent, record.delivery)));
-    const fuse = new WakeFuse(true, directory, epoch, epochStartedAt, maxWakes, maxTokens, admissions, now);
+    const fuse = new WakeFuse(true, directory, epoch, epochStartedAt, maxWakes, maxTokens, admissions, usageLedgerPath, now);
     if (await exists(path.join(directory, "fuse.stop"))) fuse.reason = "operator_stop";
+    else fuse.reason = await readTripMarker(directory, epoch);
     return fuse;
   }
 
@@ -83,8 +95,8 @@ export class WakeFuse {
   async pollOperatorStop(): Promise<WakeFuseTripReason | undefined> {
     if (!this.armed || this.reason !== undefined) return this.reason;
     try {
-      if (await exists(path.join(this.directory, "fuse.stop"))) this.reason = "operator_stop";
-    } catch { this.reason = "ledger_unavailable"; }
+      if (await exists(path.join(this.directory, "fuse.stop"))) await this.trip("operator_stop");
+    } catch { await this.trip("ledger_unavailable"); }
     return this.reason;
   }
 
@@ -94,23 +106,26 @@ export class WakeFuse {
   private async admitNow(agentId: string, deliveryId: string): Promise<WakeFuseVerdict> {
     if (this.reason !== undefined) return { state: "tripped", reason: this.reason };
     try {
-      if (await exists(path.join(this.directory, "fuse.stop"))) return this.trip("operator_stop");
+      if (await exists(path.join(this.directory, "fuse.stop"))) return await this.trip("operator_stop");
       const admissionKey = key(bounded(agentId), bounded(deliveryId));
       if (this.admissions.has(admissionKey)) return { state: "admitted" };
-      if (this.admissions.size >= this.maxWakes) return this.trip("wake_ceiling");
+      if (this.admissions.size >= this.maxWakes) return await this.trip("wake_ceiling");
       // Lagging indicator: usage is written after turn completion, so in-flight
       // spend can overshoot by one concurrent round. The wake ceiling bounds it;
       // design §5.2 owns the later pre-spawn reservation.
-      if (await sumTokens(this.directory, this.epochStartedAt) >= this.maxTokens) return this.trip("token_ceiling");
+      if (await sumTokens(this.usageLedgerPath, this.epochStartedAt) >= this.maxTokens) return await this.trip("token_ceiling");
       const record: Admission = { v: WAKE_FUSE_VERSION, kind: "admission", epoch: this.epoch, at: this.now().toISOString(), agent: bounded(agentId), delivery: bounded(deliveryId) };
       await append(this.directory, record);
       this.admissions.add(admissionKey);
       return { state: "admitted" };
-    } catch { return this.trip("ledger_unavailable"); }
+    } catch { return await this.trip("ledger_unavailable"); }
   }
 
-  private trip(reason: WakeFuseTripReason): WakeFuseVerdict {
-    this.reason ??= reason;
+  private async trip(reason: WakeFuseTripReason): Promise<WakeFuseVerdict> {
+    if (this.reason === undefined) {
+      this.reason = reason;
+      await writeTripMarker(this.directory, { v: WAKE_FUSE_VERSION, kind: "trip", epoch: this.epoch, at: this.now().toISOString(), reason });
+    }
     return { state: "tripped", reason: this.reason };
   }
 }
@@ -155,9 +170,9 @@ async function readFuseRecords(directory: string): Promise<Array<Admission | Epo
   return records;
 }
 
-async function sumTokens(directory: string, since: string): Promise<number> {
+async function sumTokens(ledgerPath: string, since: string): Promise<number> {
   let total = 0;
-  for (const file of [path.join(directory, "usage.jsonl.1"), path.join(directory, "usage.jsonl")]) {
+  for (const file of [`${ledgerPath}.1`, ledgerPath]) {
     for (const line of await lines(file)) {
       try {
         const value = JSON.parse(line) as { at?: unknown; total?: unknown };
@@ -167,5 +182,29 @@ async function sumTokens(directory: string, since: string): Promise<number> {
   }
   return total;
 }
+async function writeTripMarker(directory: string, marker: TripMarker): Promise<void> {
+  const target = path.join(directory, TRIP_MARKER);
+  const temporary = path.join(directory, `.${TRIP_MARKER}.${process.pid}.${randomUUID()}`);
+  const bytes = Buffer.from(`${JSON.stringify(marker)}\n`, "utf8");
+  try {
+    const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, TURN_USAGE_LEDGER.fileMode);
+    try { const result = await handle.write(bytes, 0, bytes.length); if (result.bytesWritten !== bytes.length) throw new Error("wake fuse trip marker write was torn"); }
+    finally { await handle.close(); }
+    await rename(temporary, target);
+  } finally { await unlink(temporary).catch(() => undefined); }
+}
+async function readTripMarker(directory: string, epoch: string): Promise<WakeFuseTripReason | undefined> {
+  try {
+    const value = JSON.parse(await readFile(path.join(directory, TRIP_MARKER), "utf8")) as Partial<TripMarker>;
+    if (value.v !== WAKE_FUSE_VERSION || value.kind !== "trip" || typeof value.epoch !== "string" || typeof value.at !== "string" || Number.isNaN(Date.parse(value.at)) || !isTripReason(value.reason)) return "ledger_unavailable";
+    // A valid marker belongs to one explicit counting window. Selecting a new
+    // epoch deliberately clears it; a corrupt marker cannot prove that and fails closed.
+    return value.epoch === epoch ? value.reason : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    return "ledger_unavailable";
+  }
+}
+function isTripReason(value: unknown): value is WakeFuseTripReason { return value === "wake_ceiling" || value === "token_ceiling" || value === "operator_stop" || value === "ledger_unavailable"; }
 async function lines(file: string): Promise<string[]> { try { return (await readFile(file, "utf8")).split("\n").filter(Boolean); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; } }
 async function exists(file: string): Promise<boolean> { try { await stat(file); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }

@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { ORGANIZATION_RUNTIME_VERSION, type OrganizationRuntimeHost, type OrganizationRuntimeWakeRequest } from "./organizationRuntime.js";
 import { createOrganizationRuntimeControlHostWithCoreForTest } from "./organizationRuntimeControl.js";
+import { WakeFuse } from "./wakeFuse.js";
 import { WakeAcceptanceStore, WakeTransitionLockBlockedError } from "./wakeAcceptanceStore.js";
 import { MAX_WAKE_COMPLETION_TEXT_BYTES, parseWakeAcceptanceRequest, wakeAcceptanceDigest } from "./wakeAcceptanceTypes.js";
 import { TERMINAL_RECEIPT_IDEMPOTENCY_HORIZON } from "./wakeAcceptanceRetention.js";
@@ -100,8 +101,50 @@ test("a fuse trip terminalizes queued deliveries, refuses arrivals, and awaits r
     core.release();
     assert.deepEqual(await trip, { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
     assert.deepEqual(await control.accept(request("later")), { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
+    const wakeCount = core.wakes.length;
+    assert.deepEqual(await control.wake({ token, agentId: "alpha", event: { version: "noopolis.daimon.wake.v1", id: "direct-after-trip", kind: "manual", text: "blocked", occurredAt: "2026-08-17T00:00:00.000Z" } }), {
+      version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: "alpha", wakeId: "direct-after-trip", code: "host_stopping"
+    });
+    assert.equal(core.wakes.length, wakeCount);
     await control.stop();
   } finally { core.release(); await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
+});
+
+test("a persistence that lands after the trip snapshot is terminalized", async () => {
+  const root = await privateRoot();
+  const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  let reachedTransition!: () => void;
+  const transitionReached = new Promise<void>((resolve) => { reachedTransition = resolve; });
+  let releaseTransition!: () => void;
+  const transitionRelease = new Promise<void>((resolve) => { releaseTransition = resolve; });
+  let blockOnce = true;
+  const core = new FakeCoreHost();
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
+    acceptanceStorePath: root, controlToken: token,
+    storeOptions: { ...testStoreOptions, afterFinalLockAssertion: async () => {
+      if (!blockOnce) return;
+      blockOnce = false;
+      reachedTransition();
+      await transitionRelease;
+    } },
+    fuseEnvironment: fuseEnvironment(usage, 2)
+  });
+  try {
+    await control.start();
+    const first = await control.accept(request("claim-blocked"));
+    assert.equal(first.state, "accepted");
+    await transitionReached;
+    const latePersistence = control.accept(request("persist-after-snapshot"));
+    const trip = control.accept(request("trip-after-snapshot"));
+    releaseTransition();
+    assert.equal((await latePersistence).state, "accepted");
+    core.release();
+    assert.deepEqual(await trip, { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
+    const items = (await control.activityV2(token))?.items ?? [];
+    assert.equal(items.filter((item) => item.state === "accepted").length, 0);
+    assert.equal(items.find((item) => item.delivery_id === "persist-after-snapshot")?.state, "stopped");
+    await control.stop();
+  } finally { releaseTransition(); core.release(); await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
 test("invalid authorities consume no admission and duplicate delivery is fuse-idempotent", async () => {
@@ -149,6 +192,31 @@ test("startup into an operator-tripped fuse terminalizes recovery without dispat
   } finally { await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
+test("startup into a ceiling-tripped fuse terminalizes accepted recovery without dispatch", async () => {
+  const root = await privateRoot();
+  const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  try {
+    const setup = await WakeAcceptanceStore.open(root, testStoreOptions);
+    const parked = await setup.accept(parseWakeAcceptanceRequest(request("ceiling-parked")));
+    await setup.close();
+    const fuse = await WakeFuse.open({ organizationKey: "alpha", environment: fuseEnvironment(usage, 1) });
+    await fuse.admit("alpha", "paid");
+    assert.deepEqual(await fuse.admit("alpha", "trip"), { state: "tripped", reason: "wake_ceiling" });
+    await fuse.close();
+    const core = new FakeCoreHost();
+    const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
+      acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
+      fuseEnvironment: fuseEnvironment(usage, 1)
+    });
+    await control.start();
+    const items = (await control.activityV2(token))?.items ?? [];
+    assert.equal(core.wakes.length, 0);
+    assert.equal(items.filter((item) => item.state === "accepted").length, 0);
+    assert.equal((await control.wakeReceipt(token, parked.record.acceptance_id))?.state, "stopped");
+    await control.stop();
+  } finally { await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
+});
+
 test("startup fails before the core host when the fuse cannot open", async () => {
   const root = await privateRoot();
   let starts = 0;
@@ -161,6 +229,35 @@ test("startup fails before the core host when the fuse cannot open", async () =>
     await assert.rejects(control.start(), /ENOENT/);
     assert.equal(starts, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a rejecting polled trip does not become an unhandled rejection", async () => {
+  const root = await privateRoot();
+  const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  const unhandled: unknown[] = [];
+  const listener = (reason: unknown): void => { unhandled.push(reason); };
+  process.on("unhandledRejection", listener);
+  let tripAttempted!: () => void;
+  const attempted = new Promise<void>((resolve) => { tripAttempted = resolve; });
+  const core = new FakeCoreHost();
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
+    acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
+    fuseEnvironment: fuseEnvironment(usage, 10), fusePollIntervalMsForTest: 1,
+    beforeTripTerminalizationForTest: async () => { tripAttempted(); throw new Error("injected terminalization failure"); }
+  });
+  try {
+    await control.start();
+    await writeFile(path.join(usage, "fuse.stop"), "");
+    await Promise.race([attempted, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("trip poll timed out")), 1_000))]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+    assert.deepEqual(await control.accept(request("after-partial-trip")), { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
+  } finally {
+    process.off("unhandledRejection", listener);
+    await control.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(usage, { recursive: true, force: true });
+  }
 });
 
 test("schedule acceptance preserves its WakeEvent kind through the durable FIFO", async () => {
@@ -456,7 +553,7 @@ class FakeCoreHost implements Pick<OrganizationRuntimeHost, "start" | "wake" | "
 
 async function privateRoot(): Promise<string> { const root = await mkdtemp(path.join(os.tmpdir(), "daimon-acceptance-")); await chmod(root, 0o700); return root; }
 function fuseEnvironment(directory: string, maxWakes: number): NodeJS.ProcessEnv {
-  return { DAIMON_WAKE_FUSE_DIRECTORY: directory, DAIMON_WAKE_FUSE_EPOCH: "integration", DAIMON_WAKE_FUSE_MAX_WAKES: String(maxWakes), DAIMON_WAKE_FUSE_MAX_TOKENS: "1000000" };
+  return { DAIMON_WAKE_FUSE_DIRECTORY: directory, DAIMON_TURN_USAGE_LEDGER_PATH: path.join(directory, "usage.jsonl"), DAIMON_WAKE_FUSE_EPOCH: "integration", DAIMON_WAKE_FUSE_MAX_WAKES: String(maxWakes), DAIMON_WAKE_FUSE_MAX_TOKENS: "1000000" };
 }
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;

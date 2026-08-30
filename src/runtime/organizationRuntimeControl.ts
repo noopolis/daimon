@@ -30,6 +30,8 @@ type TestControlOptions = OrganizationRuntimeControlOptions & Readonly<{
   scheduleOptions?: Pick<ScheduleControllerOptions, "clearTimer" | "now" | "setTimer">;
   storeOptions?: WakeAcceptanceStoreTestOptions;
   fuseEnvironment?: NodeJS.ProcessEnv;
+  fusePollIntervalMsForTest?: number;
+  beforeTripTerminalizationForTest?: () => Promise<void>;
 }>;
 type CoreHost = OrganizationRuntimeHost;
 type AcceptanceRecord = Awaited<ReturnType<WakeAcceptanceStore["accept"]>>["record"];
@@ -61,6 +63,7 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
   const agentTails = new Map<string, Promise<void>>();
   const acceptanceTails = new Map<string, Promise<void>>();
   const retryWaiters = new Set<() => void>();
+  const persistenceInFlight = new Set<Promise<unknown>>();
   let store: WakeAcceptanceStore | undefined;
   let schedules: ScheduleController | undefined;
   let fuse: WakeFuse | undefined;
@@ -141,12 +144,16 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
   };
 
   const persistRequest = async (request: OrganizationRuntimeWakeAcceptanceRequest): Promise<OrganizationRuntimeWakeAcceptanceResult> => {
+    const persistence: Promise<OrganizationRuntimeWakeAcceptanceResult> = (async () => {
       try {
         const accepted = await store!.accept(request); dispatch(accepted.record); return publicAcceptance(accepted.record);
       } catch (error) {
         if (error instanceof WakeAcceptanceConflictError) return { version: "noopolis.daimon.wake-acceptance.v2", state: "rejected", code: "delivery_conflict" };
         throw error;
       }
+    })();
+    persistenceInFlight.add(persistence);
+    try { return await persistence; } finally { persistenceInFlight.delete(persistence); }
   };
   const acceptRequest = async (request: OrganizationRuntimeWakeAcceptanceRequest): Promise<OrganizationRuntimeWakeAcceptanceResult> =>
     await serializeAcceptance(request.agent_id, async () => await persistRequest(request));
@@ -158,9 +165,17 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
       // await already-running turns without stopping the underlying host.
       stopping = true;
       for (const wake of retryWaiters) wake();
+      await options.beforeTripTerminalizationForTest?.();
       if (store !== undefined) {
-        const queued = (await store.activity()).filter((record) => record.state === "accepted");
-        await Promise.all(queued.map(async (record) => { await store!.transitionAcceptedToStopped(record.acceptance_id); }));
+        for (let pass = 0; pass < 16; pass += 1) {
+          const queued = (await store.activity()).filter((record) => record.state === "accepted");
+          await Promise.all(queued.map(async (record) => { await store!.transitionAcceptedToStopped(record.acceptance_id); }));
+          if (persistenceInFlight.size > 0) await Promise.allSettled([...persistenceInFlight]);
+          const remaining = (await store.activity()).some((record) => record.state === "accepted");
+          if (!remaining && persistenceInFlight.size === 0) break;
+          // The durable trip marker makes any remainder non-dispatchable on the
+          // next start if a pathological producer outlives this bounded drain.
+        }
       }
       await Promise.allSettled(inFlight.values());
       void reason;
@@ -174,11 +189,14 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
       await tripFuse(verdict.reason);
       return { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" };
     }
+    if (stopping) return { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" };
     return await acceptRequest(request);
   };
 
   return {
-    wake: async (request) => await host.wake(request),
+    wake: async (request) => stopping
+      ? { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" }
+      : await host.wake(request),
     health: async (agentId) => await host.health(agentId),
     activity: async (request) => await host.activity(request),
     async start(): Promise<void> {
@@ -196,7 +214,13 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
         const startupTrip = fuse.tripped();
         if (startupTrip !== undefined) await tripFuse(startupTrip);
         else for (const record of await opened.recoverable(knownAgents)) dispatch(record);
-        fusePoll = setInterval(() => { void fuse?.pollOperatorStop().then((reason) => { if (reason !== undefined) void tripFuse(reason); }); }, WAKE_FUSE_OPERATOR_POLL_MS);
+        fusePoll = setInterval(() => {
+          void fuse?.pollOperatorStop()
+            .then((reason) => { if (reason !== undefined) void tripFuse(reason).catch(() => undefined); })
+            .catch(() => undefined);
+          // A partial drain cannot cause an unhandled rejection; the durable
+          // marker keeps all remaining accepted work stopped on the next start.
+        }, options.fusePollIntervalMsForTest ?? WAKE_FUSE_OPERATOR_POLL_MS);
         fusePoll.unref();
         if (!stopping && config.version === "noopolis.daimon.organization-runtime.v2") {
           schedules = createScheduleController({
@@ -207,6 +231,7 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
               const request: OrganizationRuntimeWakeAcceptanceRequest = { token: expectedToken, agent_id: occurrence.agentId, delivery_id: occurrence.deliveryId, event: { version: "noopolis.daimon.wake.v2", kind: "schedule", text: occurrence.prompt, occurred_at: occurrence.occurredAt } };
               const verdict = await fuse!.admit(request.agent_id, request.delivery_id);
               if (verdict.state === "tripped") { await tripFuse(verdict.reason); return false; }
+              if (stopping) return false;
               const accepted = await persistRequest(request);
               if (accepted.state !== "accepted") throw new Error(`scheduled wake ${occurrence.deliveryId} was not durably accepted`);
               return true;
