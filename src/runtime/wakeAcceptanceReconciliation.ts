@@ -100,7 +100,22 @@ async function openStore(root: string, expected: Identity): Promise<{ path: stri
   } catch (error) { await directory.close().catch(() => undefined); throw error; }
 }
 async function assertStore(root: { path: string; directory: Awaited<ReturnType<typeof open>> }, expected: Identity): Promise<void> { await assertNoLinks(root.path); if (!same(await lstat(root.path), expected) || !same(await root.directory.stat(), expected) || await realpath(root.path) !== root.path) throw new OfflineTransitionReconciliationBlockedError(); }
-async function acquireLease(root: string, directory: Awaited<ReturnType<typeof open>>, owner: Lease, liveness: (lease: Lease) => Promise<boolean>): Promise<Lease | undefined> { const target = path.join(root, ".offline-reconciliation.lock"); const current = await readLeaseOptional(target); if (current !== undefined) { if (!sameNamespace(current, owner) || await liveness(current)) return undefined; await unlink(target); await directory.sync(); } try { await writeNew(target, owner); await directory.sync(); return owner; } catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined; throw error; } }
+/**
+ * Publishes `value` at `target` only if `target` does not already exist, and
+ * only ever under complete, fsynced content — the name never appears holding a
+ * partial or zero-byte document, which `readLease` would otherwise accept as a
+ * safe file and then fail to `JSON.parse`.
+ *
+ * `link(2)` is mandatory here and `rename(2)` is FORBIDDEN. rename overwrites
+ * its destination unconditionally, so two acquirers that both pass the
+ * (non-atomic) `readLeaseOptional` pre-check would both publish and both
+ * believe they hold the exclusive offline-reconciliation lease. link fails with
+ * EEXIST when the target exists, which is the mutual exclusion `acquireLease`
+ * converts into a blocked result. Exported solely so that contract can be
+ * asserted directly; it is not re-exported from `./index.ts`.
+ */
+export async function publishExclusive(target: string, value: unknown, directory: Awaited<ReturnType<typeof open>>): Promise<void> { const temp = `${target}.${randomUUID()}`; try { await writeNew(temp, value); await link(temp, target); await directory.sync(); } finally { await unlink(temp).catch(() => undefined); } }
+async function acquireLease(root: string, directory: Awaited<ReturnType<typeof open>>, owner: Lease, liveness: (lease: Lease) => Promise<boolean>): Promise<Lease | undefined> { const target = path.join(root, ".offline-reconciliation.lock"); const current = await readLeaseOptional(target); if (current !== undefined) { if (!sameNamespace(current, owner) || await liveness(current)) return undefined; await unlink(target); await directory.sync(); } try { await publishExclusive(target, owner, directory); return owner; } catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined; throw error; } }
 async function releaseLease(lease: Lease, directory: Awaited<ReturnType<typeof open>>, root: string): Promise<void> { const target = path.join(root, ".offline-reconciliation.lock"); const current = await readLease(target); if (!sameLease(current, lease)) throw new OfflineTransitionReconciliationBlockedError(); await unlink(target); await directory.sync(); }
 function lockPath(root: string, agent: string, delivery: string): string { return path.join(root, `${createHash("sha256").update(`${agent}\u0000${delivery}`).digest("hex")}.transition-lock`); }
 function recordPath(root: string, agent: string, delivery: string): string { return path.join(root, `${createHash("sha256").update(`${agent}\u0000${delivery}`).digest("hex")}.json`); }

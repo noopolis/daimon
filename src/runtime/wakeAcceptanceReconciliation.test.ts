@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { constants, readFileSync } from "node:fs";
+import { chmod, lstat, mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { reconcileOfflineWakeTransition, type OfflineTransitionReconciliationRequest } from "./wakeAcceptanceReconciliation.js";
+import { publishExclusive, reconcileOfflineWakeTransition, type OfflineTransitionReconciliationRequest } from "./wakeAcceptanceReconciliation.js";
 import { WakeAcceptanceStore } from "./wakeAcceptanceStore.js";
 import { hostRegistrationDigest } from "./storeCoordination.js";
 import { parseWakeAcceptanceRequest } from "./wakeAcceptanceTypes.js";
@@ -196,3 +197,75 @@ function receiptName(request: OfflineTransitionReconciliationRequest): string { 
 async function hostRegistrations(root: string): Promise<string[]> { return (await readdir(root)).filter((entry) => entry.startsWith(".host-online-")).sort(); }
 async function closeAbandonedStore(store: WakeAcceptanceStore): Promise<void> { await (store as unknown as { directory: { close(): Promise<void> } }).directory.close(); }
 async function privateRoot(): Promise<string> { const root = await mkdtemp(path.join(os.tmpdir(), "daimon-reconcile-")); await chmod(root, 0o700); return root; }
+
+test("the offline reconciliation lease is never published under its final name with unparseable content", async () => {
+  const root = await privateRoot();
+  try {
+    const request = await emptyReconciliationRequest(root);
+    const leasePath = path.join(root, ".offline-reconciliation.lock");
+    let torn = 0;
+    for (let trial = 0; trial < 25; trial += 1) {
+      let done = false;
+      const reconcile = reconcileOfflineWakeTransition(request, {
+        storePath: root, ...testLeaseOptions,
+        verifyDeploymentAttestation: async (context) => ({ request_digest: context.request_digest, nonce: context.nonce, exclusive_store: true, authorized_registration_digests: [] })
+      }).catch(() => undefined).finally(() => { done = true; });
+      const probe = new Promise<void>((resolve) => {
+        const tick = (): void => {
+          let raw: string | undefined;
+          try { raw = readFileSync(leasePath, "utf8"); } catch { raw = undefined; }
+          if (raw !== undefined) { try { JSON.parse(raw); } catch { torn += 1; } }
+          if (done) resolve(); else setImmediate(tick);
+        };
+        setImmediate(tick);
+      });
+      await Promise.all([reconcile, probe]);
+    }
+    assert.equal(torn, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a lease acquisition that loses the publish race is reported as blocked and leaves no temp files", async () => {
+  const root = await privateRoot();
+  try {
+    const request = await emptyReconciliationRequest(root);
+    let reached!: () => void;
+    let release!: () => void;
+    const acquired = new Promise<void>((resolve) => { reached = resolve; });
+    const paused = new Promise<void>((resolve) => { release = resolve; });
+    const first = reconcileOfflineWakeTransition(request, { storePath: root, ...testLeaseOptions, verifyDeploymentAttestation: async (context) => { reached(); await paused; return { request_digest: context.request_digest, nonce: context.nonce, exclusive_store: true, authorized_registration_digests: [] }; } });
+    await acquired;
+    const second = await reconcileOfflineWakeTransition(request, { storePath: root, ...testLeaseOptions, verifyDeploymentAttestation: async (context) => ({ request_digest: context.request_digest, nonce: context.nonce, exclusive_store: true, authorized_registration_digests: [] }) });
+    assert.equal(second.state, "blocked");
+    release();
+    await first;
+    assert.equal((await readdir(root)).some((entry) => /\.offline-reconciliation\.lock\./u.test(entry)), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("publishExclusive refuses to overwrite an existing name and leaves its content untouched", async () => {
+  const root = await privateRoot();
+  try {
+    const directory = await open(root, constants.O_RDONLY);
+    try {
+      const target = path.join(root, "publish-target.json");
+      const existing = JSON.stringify({ owner_id: "already-published" });
+      await writeFile(target, existing, { mode: 0o600 });
+
+      await assert.rejects(
+        publishExclusive(target, { owner_id: "usurper" }, directory),
+        (error: NodeJS.ErrnoException) => error.code === "EEXIST"
+      );
+
+      // rename(2) would have silently overwritten both of these assertions away.
+      assert.equal(await readFile(target, "utf8"), existing);
+      assert.equal((await readdir(root)).some((entry) => entry.startsWith("publish-target.json.")), false);
+
+      // The same primitive still publishes complete content onto a free name.
+      const fresh = path.join(root, "publish-fresh.json");
+      await publishExclusive(fresh, { owner_id: "published" }, directory);
+      assert.deepEqual(JSON.parse(await readFile(fresh, "utf8")), { owner_id: "published" });
+      assert.equal((await readdir(root)).some((entry) => entry.startsWith("publish-fresh.json.")), false);
+    } finally { await directory.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
