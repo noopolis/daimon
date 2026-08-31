@@ -293,6 +293,7 @@ class CliSession implements PiSessionLike {
         retainNdjson: this.options.engine === "codex" ? "codex" : undefined,
         retainStdoutTail: this.options.engine === "grok"
       });
+      void outputPromise.catch(() => undefined);
       await this.options.verifyRuntimePaths?.();
       await this.options.verifyExecutable?.();
       const childOutput = await outputPromise;

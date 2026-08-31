@@ -196,6 +196,43 @@ test("CLI engine failures include bounded redacted diagnostics", async () => {
   }
 });
 
+test("post-spawn verification failure cannot leave child output unhandled", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-post-spawn-verify-"));
+  const ready = path.join(root, "ready");
+  const stub = path.join(root, "running-engine.mjs");
+  const verifyError = new Error("post-spawn runtime verification failed");
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown): void => { unhandled.push(error); };
+  await writeFile(stub, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(ready)}, "ready"); setInterval(() => undefined, 1000);`);
+  let verificationCount = 0;
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const { session } = await createCliSessionFactory({
+      command: process.execPath,
+      commandArgs: [stub],
+      engine: "codex",
+      maxToolTurns: 1,
+      timeoutMs: 10_000,
+      verifyRuntimePaths: async () => {
+        verificationCount += 1;
+        if (verificationCount === 1) return;
+        await waitForFile(ready);
+        throw verifyError;
+      }
+    })({ cwd: root });
+    await assert.rejects(session.prompt("verify"), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, verifyError.message);
+      return true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("CLI stdout cap counts multibyte replies and quiesces descendants", async (context) => {
   if (!requirePosixProcessGroups(context)) return;
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-output-cap-"));
