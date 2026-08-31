@@ -178,9 +178,10 @@ export class WakeAcceptanceStore {
     });
   }
 
+  /** `text` carries the completion output on success and the engine failure cause on failure. */
   transitionClaimed(acceptanceId: string, claim: WakeExecutionClaim, state: WakeReceiptState, code?: WakeReceiptCode, completedText?: string): Promise<Stored> {
     return this.serialize(async () => {
-      if (completedText !== undefined && state !== "completed") throw new Error("wake completion text requires completed state");
+      if (completedText !== undefined && state !== "completed" && state !== "failed") throw new Error("wake text requires completed or failed state");
       const initial = await this.findByAcceptanceId(acceptanceId);
       if (initial === undefined) throw new Error("wake acceptance receipt is unavailable");
       const lock = await this.acquireTransitionLock(initial, claim.owner_id);

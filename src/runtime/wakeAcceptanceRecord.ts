@@ -38,7 +38,7 @@ export function parseStoredWakeAcceptance(value: unknown): StoredWakeAcceptanceR
   if (code !== undefined && !(["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] as const).includes(code)) throw new Error("wake acceptance record is invalid");
   if ((state === "accepted" || state === "running" || state === "completed") && code !== undefined) throw new Error("wake acceptance record is invalid");
   if ((state === "failed" || state === "stopped") && code === undefined) throw new Error("wake acceptance record is invalid");
-  if ((state !== "completed" && completionText !== undefined) || completionText !== record.text) throw new Error("wake acceptance record is invalid");
+  if ((state !== "completed" && state !== "failed" && completionText !== undefined) || completionText !== record.text) throw new Error("wake acceptance record is invalid");
   if (string(record.request_digest) !== wakeAcceptanceDigest(parsed) || !uuid(string(record.acceptance_id))) throw new Error("wake acceptance record is invalid");
   return { acceptance_id: string(record.acceptance_id), agent_id: parsed.agent_id, delivery_id: parsed.delivery_id, request_digest: string(record.request_digest), event: parsed.event, state, accepted_at: timestamp(record.accepted_at), updated_at: timestamp(record.updated_at), ...(claimGeneration === undefined ? {} : { claim_generation: claimGeneration }), ...(code === undefined ? {} : { code }), ...(completionText === undefined ? {} : { text: completionText }) };
 }

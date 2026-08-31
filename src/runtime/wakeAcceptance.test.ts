@@ -328,7 +328,7 @@ test("schedule acceptance preserves its WakeEvent kind through the durable FIFO"
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("completed replies are bounded and credential-redacted while failures carry no text", async () => {
+test("completed replies and engine failure causes are both bounded and credential-redacted", async () => {
   const root = await privateRoot();
   try {
     const store = await WakeAcceptanceStore.open(root, testStoreOptions);
@@ -347,11 +347,13 @@ test("completed replies are bounded and credential-redacted while failures carry
     const failedClaim = await store.acquireClaim(failed.record.acceptance_id, "99999999-9999-4999-8999-999999999999");
     if (failedClaim.state !== "acquired") throw new Error("claim missing");
     await store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "running");
-    await store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "failed", "engine_failed");
-    assert.equal("text" in (await store.status(failed.record.acceptance_id) ?? {}), false);
+    // The engine failure cause is persisted: without it an engine_failed receipt is
+    // undiagnosable. Text on a non-terminal or stopped state is still rejected.
+    await store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "failed", "engine_failed", "grok: permission denied");
+    assert.equal((await store.status(failed.record.acceptance_id) ?? {}).text, "grok: permission denied");
     await assert.rejects(
-      store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "failed", "engine_failed", "must not persist"),
-      /completion text requires completed state/
+      store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "stopped", "host_stopped", "must not persist"),
+      /text requires completed or failed state/
     );
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }

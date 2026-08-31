@@ -43,7 +43,7 @@ export type OrganizationRuntimeWakeResult =
   | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "completed"; agentId: string; wakeId: string; text: string; durationMs: number }>
   | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "rejected"; agentId: string; wakeId: string; code: "invalid_request" | "unauthorized" | "unknown_agent" | "queue_full" }>
   | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "stopped"; agentId: string; wakeId: string; code: "host_stopping" | "host_stopped" | "queued_wake_stopped" | "active_wake_aborted" }>
-  | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "failed"; agentId: string; wakeId: string; code: "engine_failed" }>;
+  | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "failed"; agentId: string; wakeId: string; code: "engine_failed"; detail?: string }>;
 export type OrganizationRuntimeAgentHealth = Readonly<{ agentId: string; engine: OrganizationRuntimeEngineIntent["kind"]; state: OrganizationRuntimeLifecycleState | "idle" | "running" | "failed" }>;
 export type OrganizationRuntimeHealth = Readonly<{ version: "noopolis.daimon.organization-runtime-health.v1"; state: OrganizationRuntimeLifecycleState; agents: readonly OrganizationRuntimeAgentHealth[] }>;
 export type OrganizationRuntimeActivityRequest = Readonly<{ agentId?: string; cursor?: string; limit: number }>;
