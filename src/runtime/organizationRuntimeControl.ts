@@ -196,9 +196,15 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
   };
 
   return {
-    wake: async (request) => stopping
-      ? { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" }
-      : await host.wake(request),
+    wake: async (request) => {
+      if (stopping) return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
+      const verdict = await fuse!.admit(request.agentId, request.event.id);
+      if (verdict.state === "tripped") {
+        await tripFuse(verdict.reason);
+        return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
+      }
+      return await host.wake(request);
+    },
     health: async (agentId) => await host.health(agentId),
     activity: async (request) => await host.activity(request),
     async start(): Promise<void> {

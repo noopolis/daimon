@@ -76,6 +76,25 @@ test("control accepts before a fake turn finishes, redacts status, and rejects c
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("direct v1 wakes are durably admitted by the armed fuse", async () => {
+  const root = await privateRoot();
+  const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-direct-fuse-usage-"));
+  const core = new FakeCoreHost();
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
+    acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
+    fuseEnvironment: fuseEnvironment(usage, 2)
+  });
+  try {
+    await control.start();
+    const pending = control.wake({ token, agentId: "alpha", event: { version: "noopolis.daimon.wake.v1", id: "direct-1", kind: "manual", text: "wake", occurredAt: "2026-08-17T00:00:00.000Z" } });
+    await core.waitForWakes(1);
+    const admissions = (await import("node:fs/promises")).readFile(path.join(usage, "admissions.jsonl"), "utf8");
+    assert.match(await admissions, /"delivery":"direct-1"/u);
+    core.release();
+    assert.equal((await pending).status, "completed");
+  } finally { core.release(); await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
+});
+
 test("a fuse trip terminalizes queued deliveries, refuses arrivals, and awaits running work", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
