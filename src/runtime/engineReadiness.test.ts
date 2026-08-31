@@ -12,6 +12,33 @@ const agent = (root: string, kind: "codex" | "grok" | "agy"): OrganizationRuntim
   id: "safe-agent", name: "Safe", instructions: "Work.", workspacePath: path.join(root, "workspace"), runtimeHomePath: path.join(root, "home"), engine: { kind }
 });
 
+test("varying stderr is not a capability change while varying stdout is", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-engine-stderr-"));
+  const previousPath = process.env.PATH;
+  try {
+    const config = agent(root, "codex");
+    const executable = path.join(root, "codex");
+    await mkdir(config.workspacePath, { recursive: true, mode: 0o700 });
+    await mkdir(path.join(config.runtimeHomePath, ".codex"), { recursive: true, mode: 0o700 });
+    // Emulation-dependent allocator noise on stderr differs run to run; the version on stdout does not.
+    await writeFile(executable, "#!/usr/bin/env node\nif (process.argv.includes('--version')) { process.stderr.write(`<jemalloc>: warning ${Math.random()}`); process.stdout.write('1.0.13'); }", { mode: 0o700 });
+    await chmod(executable, 0o700);
+    await writeFile(path.join(config.runtimeHomePath, ".codex", "auth.json"), JSON.stringify({ tokens: { access_token: "not-logged", refresh_token: "not-logged" } }), { mode: 0o600 });
+    await chmod(path.join(config.runtimeHomePath, ".codex", "auth.json"), 0o600);
+    process.env.PATH = `${root}${path.delimiter}${previousPath ?? ""}`;
+    const readiness = await prepareEngineReadiness(config, config.runtimeHomePath);
+    await readiness.verify();
+    await readiness.verify();
+    // A real capability change is still caught.
+    await writeFile(executable, "#!/usr/bin/env node\nif (process.argv.includes('--version')) process.stdout.write('9.9.9');", { mode: 0o700 });
+    await chmod(executable, 0o700);
+    await assert.rejects(readiness.verify(), /is unavailable/u);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("pins an executable and accepts only a private refreshable local auth artifact", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-engine-ready-"));
   const previousPath = process.env.PATH;
