@@ -290,6 +290,7 @@ class CliSession implements PiSessionLike {
       // exit before an asynchronous post-spawn authority recheck completes.
       const outputPromise = readChild(child, deadline === undefined ? undefined : Math.max(1, deadline - Date.now()), secretValues, {
         failureClassifier: this.options.engine === "grok" ? classifyGrokAuthenticationDiagnostic : undefined,
+        retainNdjson: this.options.engine === "codex" ? "codex" : undefined,
         retainStdoutTail: this.options.engine === "grok"
       });
       await this.options.verifyRuntimePaths?.();

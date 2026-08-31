@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createServer, Server } from "node:http";
 import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -155,6 +156,7 @@ test("codex argv includes the configurable sandbox setting", () => {
   try {
     delete process.env.DAIMON_CODEX_SANDBOX;
     const defaultArgs = renderCodexArgs({ commandArgs: [] }, "/workspace", "http://127.0.0.1:1234/mcp");
+    assert.deepEqual(defaultArgs.slice(defaultArgs.indexOf("-c"), defaultArgs.indexOf("-c") + 2), ["-c", "mcp_servers.daimon.url=http://127.0.0.1:1234/mcp"]);
     assert.deepEqual(defaultArgs.slice(defaultArgs.indexOf("--sandbox"), defaultArgs.indexOf("--sandbox") + 2), ["--sandbox", "danger-full-access"]);
     process.env.DAIMON_CODEX_SANDBOX = "workspace-write";
     const overrideArgs = renderCodexArgs({ commandArgs: [] }, "/workspace", "http://127.0.0.1:1234/mcp");
@@ -224,6 +226,25 @@ test("CLI stdout cap counts multibyte replies and quiesces descendants", async (
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("codex NDJSON retention survives a large tool result and keeps reply plus terminal usage", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-codex-stream-retention-"));
+  const stub = path.join(root, "codex.mjs");
+  const secret = "stream-secret-must-be-redacted";
+  await writeFile(stub, [
+    `process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", output: ${JSON.stringify("x".repeat(2 * CLI_ENGINE_MAX_OUTPUT_BYTES))} } }) + "\\n");`,
+    `process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify(`answer ${secret}`)} } }) + "\\n");`,
+    `process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 11, cached_input_tokens: 3, output_tokens: 2, reasoning_output_tokens: 1 } }) + "\\n");`
+  ].join("\n"));
+  try {
+    const child = spawn(process.execPath, [stub], { stdio: ["ignore", "pipe", "pipe"] });
+    const output = await readChild(child, 10_000, [secret], { retainNdjson: "codex" });
+    assert.match(output, /answer \[REDACTED\]/u);
+    assert.equal(output.includes(secret), false);
+    assert.match(output, /turn\.completed/u);
+    assert.match(output, /command_execution/u);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("codex child stdin EPIPE does not replace the engine exit diagnostic", async () => {
