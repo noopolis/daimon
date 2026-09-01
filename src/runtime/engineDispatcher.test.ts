@@ -204,7 +204,7 @@ test("Daimon frames one escaped identity envelope for every production engine", 
       const envelope = JSON.stringify({ id: config.id, name: identity.name, instructions: identity.instructions });
       assert.equal(result.text.split(envelope).length - 1, 1);
       assert.match(result.text, /<daimon-agent-identity>/);
-      assert.match(result.text, /caller owns delivery to the source conversation/u);
+      assert.match(result.text, /Colleagues only hear you when you call moltnet_send/u);
       assert.match(result.text, /Do not seek transport credentials or invoke a transport CLI/u);
       assert.match(result.text, /payload/);
       await handle.stop();

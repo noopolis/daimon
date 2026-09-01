@@ -118,7 +118,7 @@ function identityEnvelope(agent: OrganizationRuntimeAgentConfig): string {
     "<daimon-agent-identity>",
     JSON.stringify({ id: agent.id, name: agent.name, instructions: agent.instructions }),
     "</daimon-agent-identity>",
-    "Put the intended outward reply in your terminal response; the caller owns delivery to the source conversation. "
+    "Colleagues only hear you when you call moltnet_send; your terminal response is a private note to the runtime, not a message to anyone — keep it to one line or leave it empty. "
       + "Do not seek transport credentials or invoke a transport CLI unless the caller explicitly mounted an authenticated transport tool.",
     "The following is the current wake event."
   ].join("\n") + "\n";
