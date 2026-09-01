@@ -30,7 +30,7 @@ const DAIMON_ACTION_ID_PREFIX = "daimon-";
 export async function createProductionAgentTools(agent: OrganizationRuntimeAgentConfig, wakeContext: PiWakeEnvironmentContextRef = {}): Promise<ToolDefinition[]> {
   await mkdir(path.join(agent.runtimeHomePath, "tool-state"), { recursive: true, mode: 0o700 });
   const tools = [...await Promise.all((agent.mcp ?? []).map((server) => mcpTools(agent, server, wakeContext)))].flat();
-  if (agent.moltnet !== undefined) tools.push(moltnetTool(agent, wakeContext));
+  if (agent.moltnet !== undefined) tools.push(moltnetTool(agent, wakeContext), moltnetReadTool(agent));
   if (new Set(tools.map((tool) => tool.name)).size !== tools.length) throw new Error("compiled cognition tool names collide");
   return tools;
 }
@@ -64,6 +64,34 @@ async function mcpTools(agent: OrganizationRuntimeAgentConfig, server: Organizat
       }
     } as ToolDefinition;
   });
+}
+
+/**
+ * Reading a declared room is a native Moltnet machine operation. Without it an agent can
+ * only learn what a wake pushed at it, so any role that weighs several peers' messages
+ * has to be woken once per message instead of reading the room once.
+ */
+function moltnetReadTool(agent: OrganizationRuntimeAgentConfig): ToolDefinition {
+  return {
+    name: "moltnet_read", label: "Read a scoped Moltnet room or DM", description: "Read recent messages from one room or DM declared for this agent.",
+    parameters: { type: "object", additionalProperties: false, required: ["network", "target"], properties: { network: { type: "string" }, target: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 }, before: { type: "string" }, after: { type: "string" } } },
+    async execute(_id, params) {
+      const input = params as { network: string; target: string; limit?: number; before?: string; after?: string };
+      const network = agent.moltnet!.networks.find((entry) => entry.id === input.network);
+      if (network === undefined) throw new Error("Moltnet action exceeds declared scope");
+      const [kind, target] = input.target.split(":", 2);
+      if ((kind === "room" && !network.rooms.includes(target ?? "")) || (kind === "dm" && !network.dms) || !target || !["room", "dm"].includes(kind ?? "")) throw new Error("Moltnet target is not declared");
+      const correlationId = `${DAIMON_ACTION_ID_PREFIX}${createHash("sha256").update(JSON.stringify([agent.id, input.network, input.target, input.limit ?? 20, input.before ?? "", input.after ?? ""])).digest("hex")}`;
+      const response = await machine(agent.moltnet!.cliPath, agent.moltnet!.configPath, input.network, {
+        version: "moltnet.machine.v1", correlation_id: correlationId, operation: "read",
+        read: { target: { kind, id: target }, limit: input.limit ?? 20, ...(input.before === undefined ? {} : { before: input.before }), ...(input.after === undefined ? {} : { after: input.after }) }
+      });
+      const result = response.read as { page?: { messages?: unknown[] } } | undefined;
+      if (result?.page?.messages === undefined) throw new Error("Moltnet read was not accepted");
+      const bytes = JSON.stringify(result); if (Buffer.byteLength(bytes) > MAX_RESULT) throw new Error("Moltnet read result exceeds bound");
+      return { content: [{ type: "text", text: bytes }], details: { messages: result.page.messages.length } };
+    }
+  } as ToolDefinition;
 }
 
 function moltnetTool(agent: OrganizationRuntimeAgentConfig, wakeContext: PiWakeEnvironmentContextRef): ToolDefinition {
