@@ -10,6 +10,15 @@ let buffer = "";
 let pending;
 
 const respond = (request) => {
+  if (request.operation === "read") {
+    process.stdout.write(`${JSON.stringify({
+      version: "moltnet.machine.v1",
+      correlation_id: request.correlation_id,
+      operation: "read",
+      read: { page: { messages: [] } }
+    })}\n`);
+    return;
+  }
   process.stdout.write(`${JSON.stringify({
     version: "moltnet.machine.v1",
     correlation_id: request.correlation_id,

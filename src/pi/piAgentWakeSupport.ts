@@ -45,7 +45,18 @@ export interface PiSessionLike {
   disposeAsync?(): Promise<void>;
 }
 
-export type PiWakeEnvironmentContextRef = { current?: string };
+export type PiWakeEnvironmentContextRef = {
+  current?: string;
+  /**
+   * Set to the delivery id of the current wake once `moltnet_send` has been
+   * accepted during it. An agent that spoke explicitly must not also echo
+   * through the terminal-text fallback (moltnet/internal/bridge/daimon
+   * AGENTS.md), so the wake completion path checks this against `current`
+   * before publishing the model's terminal text. Never a boolean: a boolean
+   * could survive a stale reset and silently suppress a later wake's text.
+   */
+  spokeFor?: string;
+};
 
 export async function disposePiSession(session: PiSessionLike): Promise<void> {
   await Promise.resolve(session.dispose());

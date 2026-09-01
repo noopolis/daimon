@@ -41,6 +41,34 @@ test("production Moltnet tool enforces compiled scope and records accepted messa
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("an accepted Moltnet send records the wake as having spoken, but a read never does", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-production-moltnet-spoke-"));
+  try {
+    const cli = path.join(root, "moltnet"); await writeFile(cli, `#!/usr/bin/env node\nimport(${JSON.stringify(url.pathToFileURL(path.resolve("src/runtime/fixtures/testMoltnetMachine.mjs")).href)});\n`); await chmod(cli, 0o755);
+    const agent: OrganizationRuntimeAgentConfig = { id: "alpha", name: "Alpha", instructions: "work", workspacePath: root, runtimeHomePath: root, engine: { kind: "codex" }, moltnet: { cliPath: cli, configPath: path.join(root, "config.json"), networks: [{ id: "news", rooms: ["desk"], dms: false }] } };
+    const wakeContext = { current: "schedule:occurrence" as string | undefined, spokeFor: undefined as string | undefined };
+    const [sendTool, readTool] = await createProductionAgentTools(agent, wakeContext);
+
+    await readTool!.execute("call", { network: "news", target: "room:desk" } as never, undefined, undefined, {} as never);
+    assert.equal(wakeContext.spokeFor, undefined, "moltnet_read must never mark the wake as spoken");
+
+    await sendTool!.execute("call", { network: "news", target: "room:desk", text: "hello" } as never, undefined, undefined, {} as never);
+    assert.equal(wakeContext.spokeFor, "schedule:occurrence", "an accepted send must record the delivery id of the wake that spoke");
+
+    // A retried tool call that replays the same accepted receipt (the
+    // idempotent path) still counts as having spoken this wake.
+    wakeContext.spokeFor = undefined;
+    await sendTool!.execute("call", { network: "news", target: "room:desk", text: "hello" } as never, undefined, undefined, {} as never);
+    assert.equal(wakeContext.spokeFor, "schedule:occurrence", "a replayed accepted send must also record the wake as spoken");
+
+    // A later wake for the same agent never inherits an earlier wake's flag.
+    wakeContext.current = "schedule:next-occurrence";
+    wakeContext.spokeFor = undefined;
+    await readTool!.execute("call", { network: "news", target: "room:desk" } as never, undefined, undefined, {} as never);
+    assert.equal(wakeContext.spokeFor, undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("Moltnet identifiers are local ids, never a colon-scoped agent id", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-production-moltnet-id-"));
   try {

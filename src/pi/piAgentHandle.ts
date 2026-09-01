@@ -155,6 +155,7 @@ export class PiAgentHandle implements AgentHandle {
     try {
       if (this.wakeEnvironmentContext !== undefined) {
         this.wakeEnvironmentContext.current = event.id;
+        this.wakeEnvironmentContext.spokeFor = undefined;
       }
       if (this.worldToolContext !== undefined) {
         this.worldToolContext.current = worldContext;
@@ -288,9 +289,18 @@ export class PiAgentHandle implements AgentHandle {
         worldTrajectory,
         worldTrajectoryIdentity: this.worldTrajectoryIdentity
       });
+      // An explicit `moltnet_send` during this wake already published the
+      // agent's message; the terminal-text fallback publish
+      // (moltnet/internal/bridge/daimon/receipt_tracker.go) is reserved for
+      // terminal-only agents that never spoke. Blanking the completion text
+      // here — the field that becomes both Daimon's own wake-receipt text
+      // and the bridge's fallback source, one and the same endpoint — is
+      // what stops the bridge from echoing a second message. `outputText`
+      // itself stays intact for the turn trace and memory record above.
+      const spokeDuringWake = this.wakeEnvironmentContext?.spokeFor === event.id;
       return {
         agentId: this.id,
-        text: outputText,
+        text: spokeDuringWake ? "" : outputText,
         durationMs: Date.now() - startedAtMs
       };
     } catch (error) {
@@ -363,6 +373,7 @@ export class PiAgentHandle implements AgentHandle {
       selectedSession?.session.bindWake?.();
       if (this.wakeEnvironmentContext !== undefined) {
         this.wakeEnvironmentContext.current = undefined;
+        this.wakeEnvironmentContext.spokeFor = undefined;
       }
       if (this.memoryToolContext !== undefined) {
         this.memoryToolContext.current = undefined;

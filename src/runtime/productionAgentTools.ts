@@ -104,10 +104,15 @@ function moltnetTool(agent: OrganizationRuntimeAgentConfig, wakeContext: PiWakeE
       const [kind, target] = input.target.split(":", 2); if ((kind === "room" && !network.rooms.includes(target ?? "")) || (kind === "dm" && !network.dms) || !target || !["room", "dm"].includes(kind ?? "")) throw new Error("Moltnet target is not declared");
       if (!wakeContext.current) throw new Error("Moltnet send requires an active wake");
       const deliveryId = `${DAIMON_ACTION_ID_PREFIX}${createHash("sha256").update(JSON.stringify([wakeContext.current, agent.id, input.network, input.target, input.text])).digest("hex")}`;
-      const prior = await priorReceipt(agent, deliveryId); if (prior !== undefined) return { content: [{ type: "text", text: JSON.stringify(prior) }], details: prior };
+      const prior = await priorReceipt(agent, deliveryId); if (prior !== undefined) { wakeContext.spokeFor = wakeContext.current; return { content: [{ type: "text", text: JSON.stringify(prior) }], details: prior }; }
       const response = await machine(agent.moltnet!.cliPath, agent.moltnet!.configPath, input.network, { version: "moltnet.machine.v1", correlation_id: deliveryId, operation: "send_nudge", send_nudge: { delivery_id: deliveryId, target: { kind, id: target }, body: input.text } });
       const result = response.send_nudge as { accepted?: boolean; message_id?: string } | undefined; if (result?.accepted !== true || typeof result.message_id !== "string") throw new Error("Moltnet send was not accepted");
       await receipt(agent, { kind: "moltnet", agent_id: agent.id, engine: agent.engine.kind, delivery_id: deliveryId, network: input.network, target: input.target, message_id: result.message_id });
+      // An explicit send and the bridge's terminal-text fallback share one
+      // publication slot (moltnet AGENTS.md); recording that this wake spoke
+      // lets the wake-completion path blank the terminal text so it is not
+      // echoed as a second message.
+      wakeContext.spokeFor = wakeContext.current;
       return { content: [{ type: "text", text: JSON.stringify({ accepted: true, message_id: result.message_id }) }], details: { accepted: true } };
     }
   } as ToolDefinition;
