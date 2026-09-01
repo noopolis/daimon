@@ -1,6 +1,7 @@
 import {
   ORGANIZATION_RUNTIME_MAX_AGENTS,
   ORGANIZATION_RUNTIME_MAX_CONFIG_BYTES,
+  ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_STRING_BYTES,
   ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES,
@@ -69,7 +70,7 @@ function parseAgent(value: unknown, label: string, v2: boolean): OrganizationRun
   const agent = object(value, label);
   exactOptional(agent, v2 ? ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine", "schedule"] : ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine"], ["mcp", "moltnet", "memory"], label);
   return {
-    id: nonEmpty(agent.id, `${label}.id`), name: nonEmpty(agent.name, `${label}.name`), instructions: nonEmpty(agent.instructions, `${label}.instructions`), workspacePath: absolute(agent.workspacePath, `${label}.workspacePath`), runtimeHomePath: absolute(agent.runtimeHomePath, `${label}.runtimeHomePath`), engine: engine(agent.engine, `${label}.engine`),
+    id: nonEmpty(agent.id, `${label}.id`), name: nonEmpty(agent.name, `${label}.name`), instructions: nonEmpty(agent.instructions, `${label}.instructions`, ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS), workspacePath: absolute(agent.workspacePath, `${label}.workspacePath`), runtimeHomePath: absolute(agent.runtimeHomePath, `${label}.runtimeHomePath`), engine: engine(agent.engine, `${label}.engine`),
     ...(v2 ? { schedule: schedule(agent.schedule, `${label}.schedule`) } : {}),
     ...(agent.mcp === undefined ? {} : { mcp: mcpServers(agent.mcp, `${label}.mcp`) }),
     ...(agent.moltnet === undefined ? {} : { moltnet: moltnet(agent.moltnet, `${label}.moltnet`) }),
@@ -238,8 +239,8 @@ function isolatedMemory(agents: readonly OrganizationRuntimeAgentConfig[]): void
     }
   }
 }
-function string(value: unknown, label: string): string { if (typeof value !== "string") throw new TypeError(`${label} must be a string`); if (Buffer.byteLength(value, "utf8") > ORGANIZATION_RUNTIME_MAX_STRING_BYTES || Array.from(value).length > ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS) throw new TypeError(`${label} exceeds the runtime string limit`); return value; }
-function nonEmpty(value: unknown, label: string): string { const result = string(value, label); if (!result.trim()) throw new TypeError(`${label} must not be empty`); return result; }
+function string(value: unknown, label: string, maxCodepoints: number = ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS): string { if (typeof value !== "string") throw new TypeError(`${label} must be a string`); if (Buffer.byteLength(value, "utf8") > ORGANIZATION_RUNTIME_MAX_STRING_BYTES || Array.from(value).length > maxCodepoints) throw new TypeError(`${label} exceeds the runtime string limit`); return value; }
+function nonEmpty(value: unknown, label: string, maxCodepoints?: number): string { const result = string(value, label, maxCodepoints); if (!result.trim()) throw new TypeError(`${label} must not be empty`); return result; }
 function absolute(value: unknown, label: string): string { const result = nonEmpty(value, label); if (!path.posix.isAbsolute(result)) throw new TypeError(`${label} must be an absolute POSIX path`); const normalized = path.posix.normalize(result); if (normalized === "/") throw new TypeError(`${label} must not overlap filesystem root`); return normalized.replace(/\/+$/, ""); }
 function envName(value: unknown, label: string): string { const result = nonEmpty(value, label); if (!ENV_NAME.test(result)) throw new TypeError(`${label} must be a safe environment variable name`); return result; }
 function port(value: unknown, label: string): number { if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 65_535) throw new TypeError(`${label} must be an integer between 1 and 65535`); return value; }

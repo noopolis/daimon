@@ -5,6 +5,8 @@ export const ORGANIZATION_RUNTIME_MAX_AGENTS = 32;
 export const ORGANIZATION_RUNTIME_MAX_CONFIG_BYTES = 1_048_576;
 export const ORGANIZATION_RUNTIME_MAX_STRING_BYTES = 16_384;
 export const ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS = 4_096;
+/** Wider codepoint bound for agent `instructions` only; every other bounded string keeps the shared 4,096 cap. */
+export const ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS = 16_384;
 export const ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES = 16_384;
 export const ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS = 31_536_000_000;
 
@@ -40,7 +42,7 @@ export const ORGANIZATION_RUNTIME_CONFIG_SCHEMA = {
       type: "object", additionalProperties: false, required: ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine"], properties: {
         id: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
         name: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
-        instructions: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
+        instructions: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS, pattern: "\\S" },
         workspacePath: { type: "string", maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "^/" },
         runtimeHomePath: { type: "string", maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "^/" },
         engine: { type: "object", additionalProperties: false, required: ["kind"], properties: {
