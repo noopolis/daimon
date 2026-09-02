@@ -179,21 +179,38 @@ test("a failed trip-marker write is retried without reopening admission", async 
  * never created — `recordTurnUsage` swallows its own append failures, and
  * `sumTokens` treats a missing ledger as an empty one, so a broken
  * provisioning/permissions setup let a 17.6M-token run pass a 5M ceiling
- * untouched. A missing or unreadable ledger must fail the organization's
- * startup with a clear message instead.
+ * untouched. An unenforceable ceiling (missing directory, or a present file
+ * that cannot be read) must fail the organization's startup with a clear
+ * message. A brand-new organization — directory provisioned, file simply
+ * never written yet — must still be able to start: that is a true zero, not
+ * an unknown one.
  */
-test("a missing usage ledger refuses to arm the fuse", async () => await withDirectory(async (directory) => {
-  // No usage.jsonl written: the default `environment()` ledger path never exists.
+test("a missing usage ledger directory refuses to arm the fuse", async () => await withDirectory(async (directory) => {
+  // The wake-fuse directory itself exists (mkdtemp), but the ledger is
+  // relocated under a subdirectory Spawnfile never provisioned.
+  const neverProvisioned = path.join(directory, "not-provisioned", "usage.jsonl");
   await assert.rejects(
-    WakeFuse.open({ organizationKey: "org", environment: environment(directory) }),
+    WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_TURN_USAGE_LEDGER_PATH: neverProvisioned }) }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /usage ledger/u);
-      assert.match(error.message, /missing or unreadable/u);
-      assert.match(error.message, new RegExp(path.join(directory, "usage.jsonl").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      assert.match(error.message, /missing/u);
+      assert.match(error.message, new RegExp(neverProvisioned.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
       return true;
     }
   );
+}));
+
+test("a provisioned directory with no ledger file yet creates an empty ledger and arms", async () => await withDirectory(async (directory) => {
+  const ledgerPath = path.join(directory, "usage.jsonl");
+  // No usage.jsonl written: the directory (mkdtemp) stands in for Spawnfile's
+  // provisioned, chowned volume; the file is what a fresh organization has
+  // never written.
+  const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory) });
+  const created = await readFile(ledgerPath, "utf8");
+  assert.equal(created, "");
+  // Zero recorded spend is a true zero: nothing trips and the wake admits.
+  assert.deepEqual(await fuse.admit("alpha", "one"), { state: "admitted" });
 }));
 
 test("an unreadable usage ledger (a directory where the file should be) refuses to arm the fuse", async () => await withDirectory(async (directory) => {
@@ -205,14 +222,6 @@ test("an unreadable usage ledger (a directory where the file should be) refuses 
       assert.match(error.message, /missing or unreadable/u);
       return true;
     }
-  );
-}));
-
-test("a relocated but missing usage ledger also refuses to arm the fuse", async () => await withDirectory(async (directory) => {
-  const elsewhere = path.join(directory, "never-provisioned.jsonl");
-  await assert.rejects(
-    WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_TURN_USAGE_LEDGER_PATH: elsewhere }) }),
-    /missing or unreadable/u
   );
 }));
 

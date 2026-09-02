@@ -71,7 +71,7 @@ export class WakeFuse {
 
     // Unbounded defaults would reproduce exactly the failure this module prevents.
     await readdir(directory);
-    await ensureUsageLedgerReadable(usageLedgerPath);
+    await ensureUsageLedgerUsable(usageLedgerPath);
     const records = await readFuseRecords(directory);
     const existingStart = records.filter((record): record is EpochStart => record.kind === "epoch_start" && record.epoch === epoch).at(-1);
     const epochStartedAt = existingStart?.at ?? now().toISOString();
@@ -221,20 +221,60 @@ function isTripReason(value: unknown): value is WakeFuseTripReason { return valu
 async function lines(file: string): Promise<string[]> { try { return (await readFile(file, "utf8")).split("\n").filter(Boolean); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; } }
 
 /**
- * A missing or unreadable usage ledger at arm time must never degrade to a
- * silent zero. `sumTokens` (used on every later `admit`) deliberately treats
- * a missing ledger as an empty one — if the ledger is deleted mid-epoch, the
+ * An unenforceable usage ledger at arm time must never degrade to a silent
+ * zero. `sumTokens` (used on every later `admit`) deliberately treats a
+ * missing ledger as an empty one — if the ledger is deleted mid-epoch, the
  * fuse still needs to keep functioning rather than wedge the organization —
  * but that same tolerance is exactly how a 17.6M-token run passed a 5M
  * ceiling untouched: the ledger was never created at all, so every sum read
- * zero and the ceiling never had anything to compare against. Requiring the
- * ledger to exist and be readable once, before the fuse ever admits a wake,
- * turns a broken provisioning/permissions/mount into an immediate, loud
- * startup failure — the same treatment `readdir(directory)` above already
- * gives a missing admissions directory — instead of a token ceiling that
- * silently never trips.
+ * zero and the ceiling never had anything to compare against.
+ *
+ * Four states, distinguished by what actually makes the ceiling
+ * unenforceable versus merely unwritten yet:
+ *  - The ledger directory is missing, or present but not writable by this
+ *    uid: the ceiling is genuinely unenforceable. Fails loudly, the same
+ *    treatment `readdir(directory)` above already gives a missing
+ *    admissions directory.
+ *  - The directory is present and writable but the ledger file itself is
+ *    absent: Spawnfile's entrypoint provisions and chows the directory as a
+ *    persistent volume before the first turn ever writes usage
+ *    (`renderDaimonUsageLedgerProvisioning`), so a brand-new organization
+ *    legitimately has zero recorded spend. That is a true zero, not an
+ *    unknown one — but only once this durably creates the (empty) ledger
+ *    itself and verifies the result is readable, rather than assuming a
+ *    missing file means zero.
+ *  - The ledger file exists and is readable: arm normally; `sumTokens` sums
+ *    whatever is in it.
+ *  - The ledger file exists but is unreadable (EACCES, EISDIR, ...): fails
+ *    loudly, exactly as before.
  */
-async function ensureUsageLedgerReadable(ledgerPath: string): Promise<void> {
+async function ensureUsageLedgerUsable(ledgerPath: string): Promise<void> {
+  try {
+    await readFile(ledgerPath, "utf8");
+    return;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      throw new Error(`DAIMON_WAKE_FUSE cannot start: usage ledger at ${ledgerPath} is missing or unreadable (${code ?? String(error)}); refusing to admit wakes against an unenforceable token ceiling`);
+    }
+  }
+
+  // Ledger file absent. Create it empty, matching the mode the broker itself
+  // writes usage records with, so a fresh organization can start.
+  try {
+    const handle = await open(ledgerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, TURN_USAGE_LEDGER.fileMode);
+    await handle.close();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // EEXIST means a concurrent writer created it first (e.g. a racing turn
+    // append); that is not a creation failure, so fall through to verify.
+    if (code !== "EEXIST") {
+      throw new Error(`DAIMON_WAKE_FUSE cannot start: usage ledger at ${ledgerPath} is missing and could not be created (${code ?? String(error)}); refusing to admit wakes against an unenforceable token ceiling`);
+    }
+  }
+
+  // Never assume the create succeeded: read the file back before treating
+  // the ceiling as enforceable.
   try { await readFile(ledgerPath, "utf8"); }
   catch (error) {
     const code = (error as NodeJS.ErrnoException).code ?? String(error);
