@@ -4,7 +4,7 @@ import { chmod, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createScheduleController, MAX_TIMER_DELAY_MS, nextOccurrence, occurrenceFor } from "./schedule.js";
+import { createScheduleController, jitterOffsetMs, MAX_TIMER_DELAY_MS, nextOccurrence, occurrenceFor } from "./schedule.js";
 import { WakeAcceptanceStore } from "./wakeAcceptanceStore.js";
 import { parseWakeAcceptanceRequest } from "./wakeAcceptanceTypes.js";
 
@@ -188,6 +188,104 @@ test("post-acceptance cut deduplicates one stable occurrence on a fresh replacem
     assert.equal((await replacementStore.recoverable(new Set(["alpha"]))).length, 1);
     assert.equal((await readState(root)).includes("latest_pending"), false);
     await replacementStore.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("jitter offset stays within [0, jitter_seconds * 1000] and zero/absent jitter is always exactly 0", () => {
+  const jittered = { ...every, jitter_seconds: 10 };
+  for (const draw of [0, 0.25, 0.5, 0.75, 0.999_999_999]) {
+    const offset = jitterOffsetMs(jittered, () => draw);
+    assert.ok(offset >= 0 && offset <= 10_000, `offset ${offset} out of bounds for draw ${draw}`);
+  }
+  assert.equal(jitterOffsetMs(jittered, () => 0), 0);
+  assert.equal(jitterOffsetMs(jittered, () => 0.999_999_999), 10_000);
+  assert.equal(jitterOffsetMs(every, () => 0.999_999_999), 0);
+  assert.equal(jitterOffsetMs({ ...every, jitter_seconds: 0 }, () => 0.999_999_999), 0);
+  const cronJittered = { kind: "cron" as const, cron: "0 10 * * *", timezone: "Europe/Berlin", prompt: "work", jitter_seconds: 900 };
+  assert.equal(jitterOffsetMs(cronJittered, () => 0), 0);
+  assert.equal(jitterOffsetMs(cronJittered, () => 0.999_999_999), 900_000);
+});
+
+test("jitter offsets drawn independently per firing differ across firings and never accumulate onto the true cron instant", async () => {
+  const root = await privateRoot();
+  const cron = { kind: "cron" as const, cron: "* * * * *", timezone: "UTC", prompt: "work", jitter_seconds: 30 };
+  let now = 0;
+  const draws = [0, 0.5, 0.999_999_999, 0.25];
+  let drawIndex = 0;
+  const random = () => draws[drawIndex++ % draws.length]!;
+  const delays: number[] = [];
+  let latest: (() => void) | undefined;
+  const setTimer = ((callback: () => void, delay: number) => { delays.push(delay); latest = callback; return { unref() {} } as never; });
+  const clearTimer = () => undefined;
+  try {
+    const controller = createScheduleController({ acceptanceStorePath: root, agents: [agent(cron)], accept: async () => undefined, now: () => now, random, setTimer, clearTimer });
+    await controller.start();
+    assert.equal(delays[0], 60_000); // due 60_000 + floor(0*30001) offset 0
+    now = 60_000; latest?.();
+    await eventually(async () => delays.length === 2);
+    assert.equal(delays[1], 60_000 + 15_000); // due 120_000, offset floor(0.5*30001)=15000, delay = 120000+15000-60000
+    now = 120_000; latest?.();
+    await eventually(async () => delays.length === 3);
+    assert.equal(delays[2], 60_000 + 30_000); // due 180_000, offset 30000 (bound), delay = 180000+30000-120000
+    now = 180_000; latest?.();
+    await eventually(async () => delays.length === 4);
+    assert.equal(delays[3], 60_000 + 7_500); // due 240_000, offset floor(0.25*30001)=7500
+    now = 240_000; latest?.();
+    await eventually(async () => {
+      const value = JSON.parse(await readState(root));
+      return value.schedules[Object.keys(value.schedules)[0]!].next_due_ms === 300_000;
+    });
+    // The persisted next_due_ms sequence stays locked to the exact per-minute cron
+    // cadence throughout — 60000, 120000, 180000, 240000, 300000 — never the jittered
+    // fire times, so per-firing jitter never accumulates onto the true instant.
+    const state = JSON.parse(await readState(root));
+    const entry = state.schedules[Object.keys(state.schedules)[0]!];
+    assert.equal(entry.next_due_ms, 300_000);
+    await controller.stop();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("absent jitter_seconds produces byte-identical delay to the un-jittered schedule", async () => {
+  const root = await privateRoot();
+  const delays: number[] = [];
+  try {
+    const controller = createScheduleController({
+      acceptanceStorePath: root, agents: [agent(every)], accept: async () => undefined, now: () => 0, random: () => 0.999_999_999,
+      setTimer: ((callback: () => void, delay: number) => { delays.push(delay); return { unref() {} } as never; }), clearTimer: () => undefined
+    });
+    await controller.start(); await controller.stop();
+    assert.deepEqual(delays, [60_000]); // no jitter_seconds on `every`: identical to today regardless of the random draw
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("restart mid-jittered-schedule neither double-fires nor drifts the persisted due time", async () => {
+  const root = await privateRoot();
+  const jittered = { ...every, jitter_seconds: 30 };
+  let now = 0;
+  try {
+    const first = createScheduleController({ acceptanceStorePath: root, agents: [agent(jittered)], accept: async () => { throw new Error("must not fire before due"); }, now: () => now, random: () => 0.5, ...fakeTimers().options });
+    await first.start();
+    const before = JSON.parse(await readState(root));
+    const dueBefore = before.schedules[Object.keys(before.schedules)[0]!].next_due_ms;
+    assert.equal(dueBefore, 60_000); // true cadence instant, unaffected by jitter
+    now = 30_000; // still short of the 60s due instant
+    await first.stop();
+
+    const restarted = createScheduleController({ acceptanceStorePath: root, agents: [agent(jittered)], accept: async () => { throw new Error("must not fire before due"); }, now: () => now, random: () => 0.9, ...fakeTimers().options });
+    await restarted.start();
+    const after = JSON.parse(await readState(root));
+    const dueAfter = after.schedules[Object.keys(after.schedules)[0]!].next_due_ms;
+    assert.equal(dueAfter, dueBefore, "restart before the due instant must not drift the persisted due time");
+    await restarted.stop();
+
+    now = 60_000;
+    const accepted: unknown[] = [];
+    const timers = fakeTimers();
+    const finalRun = createScheduleController({ acceptanceStorePath: root, agents: [agent(jittered)], accept: async (occurrence) => { accepted.push(occurrence); }, now: () => now, random: () => 0.5, ...timers.options });
+    await finalRun.start();
+    await eventually(async () => accepted.length === 1);
+    await finalRun.stop();
+    assert.deepEqual(accepted, [occurrenceFor("alpha", jittered, 60_000)]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

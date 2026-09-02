@@ -6,6 +6,7 @@ import {
   ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES,
   ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS,
+  ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS,
   ORGANIZATION_RUNTIME_V2_VERSION,
   ORGANIZATION_RUNTIME_VERSION,
   type OrganizationRuntimeAgentConfig,
@@ -120,19 +121,25 @@ function schedule(value: unknown, label: string): OrganizationRuntimeSchedule {
   const input = object(value, label); const kind = string(input.kind, `${label}.kind`);
   if (kind === "disabled") { exact(input, ["kind"], label); return { kind }; }
   if (kind === "every") {
-    exact(input, ["kind", "interval_ms", "prompt"], label);
+    exactOptional(input, ["kind", "interval_ms", "prompt"], ["jitter_seconds"], label);
     if (typeof input.interval_ms !== "number" || !Number.isInteger(input.interval_ms) || input.interval_ms < 1 || input.interval_ms > ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS) throw new TypeError(`${label}.interval_ms is outside its bound`);
-    return { kind, interval_ms: input.interval_ms, prompt: nonEmpty(input.prompt, `${label}.prompt`) };
+    return { kind, interval_ms: input.interval_ms, prompt: nonEmpty(input.prompt, `${label}.prompt`), ...jitterSeconds(input.jitter_seconds, label) };
   }
   if (kind === "cron") {
-    exact(input, ["kind", "cron", "timezone", "prompt"], label);
+    exactOptional(input, ["kind", "cron", "timezone", "prompt"], ["jitter_seconds"], label);
     const cron = nonEmpty(input.cron, `${label}.cron`).trim().replace(/\s+/gu, " ");
     if (!validCron(cron) || !cronCalendarPossible(cron)) throw new TypeError(`${label}.cron is invalid or impossible`);
     const timezone = nonEmpty(input.timezone, `${label}.timezone`);
     try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); } catch { throw new TypeError(`${label}.timezone is not an IANA timezone`); }
-    return { kind, cron, timezone, prompt: nonEmpty(input.prompt, `${label}.prompt`) };
+    return { kind, cron, timezone, prompt: nonEmpty(input.prompt, `${label}.prompt`), ...jitterSeconds(input.jitter_seconds, label) };
   }
   throw new TypeError(`${label}.kind is not supported`);
+}
+
+function jitterSeconds(value: unknown, label: string): { jitter_seconds?: number } {
+  if (value === undefined) return {};
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS) throw new TypeError(`${label}.jitter_seconds is outside its bound`);
+  return { jitter_seconds: value };
 }
 
 function validCron(value: string): boolean {

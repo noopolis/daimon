@@ -26,6 +26,8 @@ export type ScheduleControllerOptions = Readonly<{
   /** False means the agent is busy; the durable latest-pending slot remains. */
   accept(occurrence: ScheduledOccurrence): Promise<boolean | void>;
   now?: () => number;
+  /** Draws the fractional jitter offset; defaults to `Math.random`. Injectable so tests can assert bounds/independence without real randomness. */
+  random?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => Timer;
   clearTimer?: (timer: Timer) => void;
   /** @internal Observable durability stages for focused crash-order tests. */
@@ -35,6 +37,7 @@ export type ScheduleControllerOptions = Readonly<{
 /** Schedules create durable pending occurrences; engine execution remains elsewhere. */
 export function createScheduleController(options: ScheduleControllerOptions): ScheduleController {
   const now = options.now ?? Date.now;
+  const random = options.random ?? Math.random;
   const setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
   const clearTimer = options.clearTimer ?? clearTimeout;
   const statePath = path.join(options.acceptanceStorePath, STATE_FILE);
@@ -61,7 +64,11 @@ export function createScheduleController(options: ScheduleControllerOptions): Sc
     if (stopped) return;
     const due = state.schedules[key]?.next_due_ms;
     if (due === undefined) return;
-    const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, due - now()));
+    // The persisted due time stays the exact cron/interval instant; jitter only
+    // perturbs how long this arming waits before firing, drawn fresh every time
+    // a firing is (re-)armed, so it never accumulates onto the stored anchor.
+    const target = due + jitterOffsetMs(byKey.get(key)?.schedule, random);
+    const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, target - now()));
     const timer = setTimer(() => { void enqueue(async () => await onTimer(key)); }, delay);
     timer.unref?.();
     timers.set(key, timer);
@@ -145,6 +152,14 @@ export function nextOccurrence(agentId: string, schedule: ActiveSchedule, anchor
 }
 
 export function cronIsPossible(cron: string): boolean { try { return calendarPossible(parseCron(cron)); } catch { return false; } }
+
+/** Independent per-arming offset in `[0, jitter_seconds * 1000]`; absent/zero jitter always yields exactly 0. */
+export function jitterOffsetMs(schedule: ActiveSchedule | undefined, random: () => number): number {
+  const jitterSeconds = schedule?.jitter_seconds ?? 0;
+  if (jitterSeconds <= 0) return 0;
+  const bound = jitterSeconds * 1_000;
+  return Math.min(bound, Math.max(0, Math.floor(random() * (bound + 1))));
+}
 
 function latestEligibleOccurrence(schedule: ActiveSchedule, due: number, at: number): number {
   if (schedule.kind === "every") return due + Math.floor((at - due) / schedule.interval_ms) * schedule.interval_ms;

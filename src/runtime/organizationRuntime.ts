@@ -8,6 +8,7 @@ import {
   ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES,
   ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS,
+  ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS,
   ORGANIZATION_RUNTIME_V2_VERSION,
   ORGANIZATION_RUNTIME_VERSION
 } from "../contracts/organizationRuntimeContract.js";
@@ -22,6 +23,7 @@ export {
   ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES,
   ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS,
+  ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS,
   ORGANIZATION_RUNTIME_V2_VERSION,
   ORGANIZATION_RUNTIME_VERSION
 };
@@ -33,8 +35,8 @@ export type OrganizationRuntimeMoltnet = Readonly<{ cliPath: string; configPath:
 export type OrganizationRuntimeMemory = Readonly<{ runtimeHomePath: string; source?: string; tokenBudget?: number }>;
 export type OrganizationRuntimeSchedule =
   | Readonly<{ kind: "disabled" }>
-  | Readonly<{ kind: "every"; interval_ms: number; prompt: string }>
-  | Readonly<{ kind: "cron"; cron: string; timezone: string; prompt: string }>;
+  | Readonly<{ kind: "every"; interval_ms: number; prompt: string; jitter_seconds?: number }>
+  | Readonly<{ kind: "cron"; cron: string; timezone: string; prompt: string; jitter_seconds?: number }>;
 export type OrganizationRuntimeAgentConfig = Readonly<{ id: string; name: string; instructions: string; workspacePath: string; runtimeHomePath: string; engine: OrganizationRuntimeEngineIntent; schedule?: OrganizationRuntimeSchedule; mcp?: readonly OrganizationRuntimeMcpServer[]; moltnet?: OrganizationRuntimeMoltnet; memory?: OrganizationRuntimeMemory }>;
 export type OrganizationRuntimeHostConfig = Readonly<{ bindHost: string; port: number; /** Variable name only; never secret configuration data. */ controlTokenEnv: string }>;
 export type OrganizationRuntimeConfig = Readonly<{ version: typeof ORGANIZATION_RUNTIME_VERSION | typeof ORGANIZATION_RUNTIME_V2_VERSION; host: OrganizationRuntimeHostConfig; agents: readonly OrganizationRuntimeAgentConfig[] }>;

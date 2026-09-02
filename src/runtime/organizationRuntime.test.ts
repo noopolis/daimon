@@ -99,6 +99,22 @@ test("v2 schedules reject impossible cron, oversized prompt, and out-of-range ca
   assert.equal(parseOrganizationRuntimeConfig(scheduled({ kind: "every", interval_ms: 31_536_000_000, prompt: "work" })).version, "noopolis.daimon.organization-runtime.v2");
 });
 
+test("v2 schedules accept jitter_seconds within bounds and reject out-of-range or malformed values", () => {
+  const source = valid();
+  const scheduled = (schedule: unknown) => ({ ...source, version: "noopolis.daimon.organization-runtime.v2", agents: [{ ...source.agents[0], schedule }] });
+  const cronOk = parseOrganizationRuntimeConfig(scheduled({ kind: "cron", cron: "0 10 * * *", timezone: "Europe/Berlin", prompt: "work", jitter_seconds: 900 }));
+  assert.equal(cronOk.agents[0]?.schedule?.kind === "cron" ? cronOk.agents[0].schedule.jitter_seconds : undefined, 900);
+  const everyOk = parseOrganizationRuntimeConfig(scheduled({ kind: "every", interval_ms: 60_000, prompt: "work", jitter_seconds: 0 }));
+  assert.equal(everyOk.agents[0]?.schedule?.kind === "every" ? everyOk.agents[0].schedule.jitter_seconds : undefined, 0);
+  const noJitter = parseOrganizationRuntimeConfig(scheduled({ kind: "every", interval_ms: 60_000, prompt: "work" }));
+  assert.equal(noJitter.agents[0]?.schedule?.kind === "every" ? noJitter.agents[0].schedule.jitter_seconds : undefined, undefined);
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled({ kind: "cron", cron: "0 10 * * *", timezone: "UTC", prompt: "work", jitter_seconds: 3_601 })), /jitter_seconds is outside its bound/);
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled({ kind: "cron", cron: "0 10 * * *", timezone: "UTC", prompt: "work", jitter_seconds: -1 })), /jitter_seconds is outside its bound/);
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled({ kind: "cron", cron: "0 10 * * *", timezone: "UTC", prompt: "work", jitter_seconds: 1.5 })), /jitter_seconds is outside its bound/);
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled({ kind: "every", interval_ms: 60_000, prompt: "work", jitter_seconds: "900" })), /jitter_seconds is outside its bound/);
+  assert.throws(() => parseOrganizationRuntimeConfig(scheduled({ kind: "disabled", jitter_seconds: 900 })), /exactly kind/);
+});
+
 test("v2 cron schedules normalize whitespace and reject unbounded steps and text", () => {
   const source = valid();
   const scheduled = (cron: string) => ({ ...source, version: "noopolis.daimon.organization-runtime.v2", agents: [{ ...source.agents[0], schedule: { kind: "cron", cron, timezone: "UTC", prompt: "work" } }] });
