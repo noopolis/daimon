@@ -38,12 +38,26 @@ through `../pi/cliMcpRegistration.ts` (`agy mcp add --type http` into the
 agent's own `$HOME/.gemini/config/mcp_config.json`, removed again after the
 turn) rather than a command-line flag, because AGY has no equivalent of Codex's
 `-c mcp_servers.daimon.url=`. `AGY_MAX_TOOL_TURNS` in `../pi/cliSession.ts` is
-the only place its per-wake tool-call bound is decided.
+the only place its per-wake tool-call bound is decided. `maxToolTurns` only
+mediates daimon-MCP tool calls; Codex's own shell (`exec_command`) is never
+routed through it, so Codex gets its own bounds instead —
+`DEFAULT_CODEX_WAKE_TIMEOUT_MS` (wall clock) and
+`DEFAULT_CODEX_WAKE_TOKEN_CEILING`, both in `../pi/cliSession.ts`, overridable
+via `DAIMON_CODEX_WAKE_TIMEOUT_MS`/`DAIMON_CODEX_WAKE_TOKEN_CEILING`. The token
+ceiling can only be checked when Codex reports it: its `--json` stream carries
+usage exactly once, on the turn's own `turn.completed`, so crossing it kills
+the child immediately and fails the wake instead of letting an over-budget
+turn resolve as a normal success; the wall-clock bound is what actually
+interrupts a runaway turn in progress.
 
 `turnUsageLedger.ts` is engine-neutral: the Grok broker appends through
-`finishBrokerTurnWithUsage`, and AGY — which has no broker — appends through the
-session's `onTurnUsage` sink wired in `engineDispatcher.ts`. Codex stays
-uninstrumented and must never be recorded as zero usage.
+`finishBrokerTurnWithUsage`, and AGY and Codex — neither of which has a
+broker — both append through the session's `onTurnUsage` sink wired in
+`engineDispatcher.ts`, fed by their own decoded terminal-frame usage
+(`agyHeadlessResult.ts`, `codexHeadlessResult.ts`). `wakeFuse.ts`'s token
+ceiling depends on every engine actually reaching this ledger — a
+missing/unreadable ledger is a startup failure there, on purpose, rather than
+a silent zero that would let the ceiling sum nothing.
 `testRuntimeSubprocess.ts` is an unexported, explicit-test-only JSONL process
 surface for exercising the real control, schedule, and acceptance paths with a
 controlled clock and deterministic scripted cognition. Its ephemeral loopback

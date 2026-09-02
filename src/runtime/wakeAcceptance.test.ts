@@ -79,6 +79,7 @@ test("control accepts before a fake turn finishes, redacts status, and rejects c
 test("direct v1 wakes are durably admitted by the armed fuse", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-direct-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   const core = new FakeCoreHost();
   const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
     acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
@@ -98,6 +99,7 @@ test("direct v1 wakes are durably admitted by the armed fuse", async () => {
 test("a fuse trip terminalizes queued deliveries, refuses arrivals, and awaits running work", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   const core = new FakeCoreHost();
   const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
     acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
@@ -132,6 +134,7 @@ test("a fuse trip terminalizes queued deliveries, refuses arrivals, and awaits r
 test("a persistence that lands after the trip snapshot is terminalized", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   let reachedTransition!: () => void;
   const transitionReached = new Promise<void>((resolve) => { reachedTransition = resolve; });
   let releaseTransition!: () => void;
@@ -169,6 +172,7 @@ test("a persistence that lands after the trip snapshot is terminalized", async (
 test("a request admitted before a concurrent trip is refused before persistence", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   let admissionReached!: () => void;
   const reachedAdmission = new Promise<void>((resolve) => { admissionReached = resolve; });
   let releaseAdmission!: () => void;
@@ -204,6 +208,7 @@ test("a request admitted before a concurrent trip is refused before persistence"
 test("invalid authorities consume no admission and duplicate delivery is fuse-idempotent", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   const core = new FakeCoreHost();
   const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
     acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
@@ -229,6 +234,7 @@ test("invalid authorities consume no admission and duplicate delivery is fuse-id
 test("startup into an operator-tripped fuse terminalizes recovery without dispatch", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   try {
     const setup = await WakeAcceptanceStore.open(root, testStoreOptions);
     const parked = await setup.accept(parseWakeAcceptanceRequest(request("parked")));
@@ -249,6 +255,7 @@ test("startup into an operator-tripped fuse terminalizes recovery without dispat
 test("startup into a ceiling-tripped fuse terminalizes accepted recovery without dispatch", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   try {
     const setup = await WakeAcceptanceStore.open(root, testStoreOptions);
     const parked = await setup.accept(parseWakeAcceptanceRequest(request("ceiling-parked")));
@@ -288,6 +295,7 @@ test("startup fails before the core host when the fuse cannot open", async () =>
 test("a rejecting polled trip does not become an unhandled rejection", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   const unhandled: unknown[] = [];
   const listener = (reason: unknown): void => { unhandled.push(reason); };
   process.on("unhandledRejection", listener);

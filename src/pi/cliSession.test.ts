@@ -284,6 +284,56 @@ test("codex NDJSON retention survives a large tool result and keeps reply plus t
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("readChild kills a Codex child and rejects once turn.completed usage crosses the per-wake token ceiling", async (context) => {
+  if (!requirePosixProcessGroups(context)) return;
+  // Defect 2: Codex's `--json` stream reports usage exactly once, on
+  // `turn.completed`; there is no incremental total to watch mid-turn. This
+  // proves the ceiling is enforced at the earliest moment that frame is
+  // parsed — killing the whole process group (a detached grandchild proves
+  // the kill is real, not just that the process happened to exit) — rather
+  // than letting an over-budget turn resolve as a normal success.
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-codex-token-ceiling-"));
+  const pidFile = path.join(root, "descendant.pid");
+  const stub = path.join(root, "codex-over-budget.mjs");
+  await writeFile(stub, [
+    "import { spawn } from 'node:child_process';",
+    "import { writeFileSync } from 'node:fs';",
+    `const child = spawn(process.execPath, ['-e', ${JSON.stringify("process.on('SIGTERM', () => undefined); setInterval(() => undefined, 1000)")}], { stdio: 'ignore' });`,
+    `writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));`,
+    "process.on('SIGTERM', () => undefined);",
+    `process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "over budget" } }) + "\\n");`,
+    `process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 250000, cached_input_tokens: 0, output_tokens: 60000, reasoning_output_tokens: 0 } }) + "\\n");`,
+    // Stay alive after emitting usage: if the ceiling did not kill this
+    // process, the test would hang until its own 10s readChild timeout.
+    "setInterval(() => undefined, 1000);"
+  ].join("\n"));
+  try {
+    const child = spawn(process.execPath, [stub], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+    await assert.rejects(readChild(child, 10_000, [], { retainNdjson: "codex", codexTokenCeiling: 300_000 }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /300000-token per-wake ceiling/u);
+      assert.match(error.message, /310000 tokens/u);
+      return true;
+    });
+    const descendantPid = Number(await readFile(pidFile, "utf8"));
+    assert.throws(() => process.kill(descendantPid, 0), { code: "ESRCH" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("readChild names the wall-clock bound that was hit when a caller supplies timeoutErrorMessage", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-codex-timeout-message-"));
+  const stub = path.join(root, "hang.mjs");
+  await writeFile(stub, "setInterval(() => undefined, 1000);");
+  try {
+    const child = spawn(process.execPath, [stub], { stdio: ["ignore", "pipe", "pipe"] });
+    await assert.rejects(readChild(child, 50, [], { timeoutErrorMessage: "Codex wake exceeded its 50ms per-wake wall-clock bound" }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, "Codex wake exceeded its 50ms per-wake wall-clock bound");
+      return true;
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("codex child stdin EPIPE does not replace the engine exit diagnostic", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-epipe-"));
   const stub = path.join(root, "early-exit-engine.mjs");

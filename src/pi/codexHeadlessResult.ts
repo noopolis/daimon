@@ -67,7 +67,7 @@ const tokenCount = (value: unknown): number | undefined =>
  * a real zero. `complete` requires a non-zero derived total and valid subset
  * relationships. As with AGY, every emitted count remains a lower bound.
  */
-const decodeCodexTurnUsage = (frame: JsonRecord, calls: number): CodexTurnUsage | undefined => {
+export const decodeCodexTurnUsage = (frame: JsonRecord, calls: number): CodexTurnUsage | undefined => {
   if (!isRecord(frame.usage)) return undefined;
   const usage = frame.usage;
   const counts = USAGE_TOKEN_FIELDS.map((field) => tokenCount(usage[field]));

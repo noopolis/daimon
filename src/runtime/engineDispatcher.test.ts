@@ -218,6 +218,81 @@ test("Daimon frames one escaped identity envelope for every production engine", 
   }
 });
 
+test("a Codex wake whose reported usage crosses the configured per-wake token ceiling fails the wake with a named bound", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-codex-ceiling-"));
+  const priorCeiling = process.env.DAIMON_CODEX_WAKE_TOKEN_CEILING;
+  const priorPath = process.env.PATH;
+  const priorRun = process.env.NOOPOLIS_RUN_ID;
+  const config = rootConfig(root, "codex");
+  const stub = path.join(root, "codex");
+  await writeFile(stub, [
+    "#!/usr/bin/env node",
+    "if (!process.argv.includes('exec')) { process.stdout.write('codex-cli 0.0.0-test\\n'); process.exit(0); }",
+    `process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "over budget" } }) + "\\n");`,
+    `process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 4000, cached_input_tokens: 0, output_tokens: 1000, reasoning_output_tokens: 0 } }) + "\\n");`
+  ].join("\n"));
+  await chmod(stub, 0o700);
+  await seedAuth(root, "codex");
+  try {
+    process.env.PATH = `${root}${path.delimiter}${priorPath ?? ""}`;
+    process.env.NOOPOLIS_RUN_ID = "dispatcher-codex-ceiling-test";
+    process.env.DAIMON_CODEX_WAKE_TOKEN_CEILING = "1000";
+    const handle = await startOrganizationRuntimeEngine({ ...config, engine: { kind: "codex" } }, "DAIMON_UNUSED_CONTROL");
+    await assert.rejects(handle.wake({ id: "codex-over-budget-wake", kind: "manual", text: "probe" }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /1000-token per-wake ceiling/u);
+      assert.match(error.message, /5000 tokens/u);
+      return true;
+    });
+    await handle.stop();
+  } finally {
+    if (priorCeiling === undefined) delete process.env.DAIMON_CODEX_WAKE_TOKEN_CEILING;
+    else process.env.DAIMON_CODEX_WAKE_TOKEN_CEILING = priorCeiling;
+    if (priorPath === undefined) delete process.env.PATH;
+    else process.env.PATH = priorPath;
+    if (priorRun === undefined) delete process.env.NOOPOLIS_RUN_ID;
+    else process.env.NOOPOLIS_RUN_ID = priorRun;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a Codex wake that runs past the configured wall-clock bound fails the wake naming that bound", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-codex-timeout-"));
+  const priorTimeout = process.env.DAIMON_CODEX_WAKE_TIMEOUT_MS;
+  const priorPath = process.env.PATH;
+  const priorRun = process.env.NOOPOLIS_RUN_ID;
+  const config = rootConfig(root, "codex");
+  const stub = path.join(root, "codex");
+  // Never emits turn.completed: the wall-clock bound is what has to interrupt it.
+  await writeFile(stub, [
+    "#!/usr/bin/env node",
+    "if (!process.argv.includes('exec')) { process.stdout.write('codex-cli 0.0.0-test\\n'); process.exit(0); }",
+    "setInterval(() => undefined, 1000);"
+  ].join("\n"));
+  await chmod(stub, 0o700);
+  await seedAuth(root, "codex");
+  try {
+    process.env.PATH = `${root}${path.delimiter}${priorPath ?? ""}`;
+    process.env.NOOPOLIS_RUN_ID = "dispatcher-codex-timeout-test";
+    process.env.DAIMON_CODEX_WAKE_TIMEOUT_MS = "100";
+    const handle = await startOrganizationRuntimeEngine({ ...config, engine: { kind: "codex" } }, "DAIMON_UNUSED_CONTROL");
+    await assert.rejects(handle.wake({ id: "codex-hang-wake", kind: "manual", text: "probe" }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /100ms per-wake wall-clock bound/u);
+      return true;
+    });
+    await handle.stop();
+  } finally {
+    if (priorTimeout === undefined) delete process.env.DAIMON_CODEX_WAKE_TIMEOUT_MS;
+    else process.env.DAIMON_CODEX_WAKE_TIMEOUT_MS = priorTimeout;
+    if (priorPath === undefined) delete process.env.PATH;
+    else process.env.PATH = priorPath;
+    if (priorRun === undefined) delete process.env.NOOPOLIS_RUN_ID;
+    else process.env.NOOPOLIS_RUN_ID = priorRun;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function waitForFile(filePath: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try { await access(filePath); return; } catch { await new Promise((resolve) => setTimeout(resolve, 10)); }

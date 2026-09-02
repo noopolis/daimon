@@ -136,6 +136,10 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
     const rawTrainingCaptureRef: PiRawTrainingCaptureRef | undefined =
       this.options.rawTrainingCapture === undefined ? undefined : {};
     const wakeEnvironmentContext: PiWakeEnvironmentContextRef = this.options.wakeEnvironmentContext ?? {};
+    // Fixed for the life of this agent, not per wake: whether it can publish
+    // through `moltnet_send` at all. Gates the terminal-text fallback in
+    // `PiAgentHandle.runWake` (see `PiWakeEnvironmentContextRef.hasSendCapability`).
+    wakeEnvironmentContext.hasSendCapability = (this.options.productionTools ?? []).some((tool) => tool.name === "moltnet_send");
     const sessionInput = (mode: Parameters<PiSessionCreator>[0], sessionDirectory: string) => {
       const memoryTools = memory === undefined || memoryToolContext === undefined
         ? []

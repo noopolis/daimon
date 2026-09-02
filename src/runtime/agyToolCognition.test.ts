@@ -22,8 +22,8 @@ const sdkHttp = require_.resolve("@modelcontextprotocol/sdk/client/streamableHtt
  * per-wake `StreamableHTTPServerTransport` the session started, reached over
  * loopback by the child process the dispatcher spawned.
  */
-const agyStub = (logPath: string): string => `#!/usr/bin/env node
-import { appendFileSync, readFileSync } from "node:fs";
+const agyStub = (logPath: string, toolsPath: string): string => `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
 if (args[0] !== "--print") process.exit(0);
@@ -36,6 +36,10 @@ const client = new Client({ name: "agy-stub", version: "0.0.0" });
 await client.connect(new StreamableHTTPClientTransport(new URL(added.at(-1))));
 const listed = await client.listTools();
 await client.close();
+// This agent has a mounted moltnet_send tool, so its terminal reply is
+// always blanked by Defect 3 (piAgentHandle.ts). Prove tool visibility
+// through a side channel independent of that blanked terminal text.
+writeFileSync(${JSON.stringify(toolsPath)}, listed.tools.map((tool) => tool.name).sort().join(","));
 process.stdout.write(JSON.stringify({
   event: "result",
   result: {
@@ -76,9 +80,10 @@ test("an AGY agent reaches Daimon's declared cognition tools over its own MCP en
   const priorLedger = process.env[TURN_USAGE_LEDGER_PATH_ENV];
   const log = path.join(root, "agy-invocations.jsonl");
   const ledger = path.join(root, "usage.jsonl");
+  const toolsFile = path.join(root, "tools-seen.txt");
   try {
     const command = path.join(root, "agy");
-    await writeFile(command, agyStub(log));
+    await writeFile(command, agyStub(log, toolsFile));
     await chmod(command, 0o700);
     await seedAgyAuth(root);
     process.env.PATH = `${root}${path.delimiter}${priorPath ?? ""}`;
@@ -91,8 +96,12 @@ test("an AGY agent reaches Daimon's declared cognition tools over its own MCP en
 
     // A: the AGY agent can see the Moltnet surface Spawnfile declared for it.
     // Before this change AGY was pinned to `toolAccess: "none"` and this list
-    // could not exist at all.
-    assert.ok(result.text.split(",").includes("moltnet_send"), result.text);
+    // could not exist at all. This agent has a mounted moltnet_send tool, so
+    // its terminal text is unconditionally blanked (Defect 3) — verify tool
+    // visibility through the stub's side channel instead of `result.text`.
+    const toolsSeen = (await readFile(toolsFile, "utf8")).split(",");
+    assert.ok(toolsSeen.includes("moltnet_send"), toolsSeen.join(","));
+    assert.equal(result.text, "", "a send-capable agent's terminal text must never be published");
 
     const invocations: string[][] = (await readFile(log, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
     // B: the endpoint reached AGY through `agy mcp add --type http`, and was

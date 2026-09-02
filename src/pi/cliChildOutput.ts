@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 
 import { redactCredentialText } from "../core/credentialRedaction.js";
+import { decodeCodexTurnUsage } from "./codexHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 
 /** Maximum assistant reply bytes retained from stdout. */
@@ -36,6 +37,18 @@ export const readChild = (
     failureClassifier?: (diagnostic: string) => Error | undefined;
     retainNdjson?: "codex";
     retainStdoutTail?: boolean;
+    /** Overrides the generic wall-clock-timeout message so the caller can name which bound was hit. */
+    timeoutErrorMessage?: string;
+    /**
+     * Per-wake token ceiling for a Codex turn (`retainNdjson: "codex"` only).
+     * Codex's `--json` stream reports usage exactly once, on `turn.completed`
+     * — there is no incremental total to watch mid-turn — so this is
+     * enforced at the earliest and only moment the crossing is observable:
+     * the instant that frame is parsed off the stream. Crossing it kills the
+     * child immediately (rather than letting an over-budget turn resolve as
+     * a normal success) and fails the wake with a bound-named error.
+     */
+    codexTokenCeiling?: number;
   }> = {}
 ): Promise<string> => new Promise((resolve, reject) => {
   trackCliChild(child);
@@ -95,6 +108,13 @@ export const readChild = (
         if (frame.type === "item.completed" && (item?.type === "command_execution" || item?.type === "mcp_tool_call")) {
           stdout.push(Buffer.from(`${JSON.stringify({ type: frame.type, item: { type: item.type } })}\n`));
         } else if ((frame.type === "item.completed" && item?.type === "agent_message") || frame.type === "turn.completed" || frame.type === "turn.failed") {
+          if (frame.type === "turn.completed" && options.codexTokenCeiling !== undefined) {
+            const usage = decodeCodexTurnUsage(frame, 0);
+            if (usage !== undefined && usage.total >= options.codexTokenCeiling) {
+              abort(new Error(`Codex wake exceeded its ${options.codexTokenCeiling}-token per-wake ceiling (turn usage ${usage.total} tokens)`));
+              return;
+            }
+          }
           stdout.push(Buffer.from(`${line}\n`));
         }
         stdoutBytes = stdout.reduce((total, part) => total + part.length, 0);
@@ -154,7 +174,7 @@ export const readChild = (
   };
   child.stdout?.on("data", retainStdout);
   child.stderr?.on("data", retainStderrTail);
-  const timer = timeoutMs === undefined ? undefined : setTimeout(() => abort(new Error("CLI engine timed out")), timeoutMs);
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => abort(new Error(options.timeoutErrorMessage ?? "CLI engine timed out")), timeoutMs);
   child.once("error", abort);
   child.once("close", (code, signal) => {
     if (cleanupStarted) return;

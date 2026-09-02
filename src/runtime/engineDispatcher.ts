@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import type { AgentHandle } from "../core/types.js";
-import { AGY_MAX_TOOL_TURNS, createCliSessionFactory } from "../pi/cliSession.js";
+import { AGY_MAX_TOOL_TURNS, createCliSessionFactory, resolveCodexWakeTimeoutMs, resolveCodexWakeTokenCeiling } from "../pi/cliSession.js";
 import {
   GROK_DAIMON_SANDBOX_PROFILE,
   prepareAndVerifyGrokSandbox
@@ -97,7 +97,12 @@ function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: stri
         ...(engine === "codex" ? {
           // Codex has no broker to meter it, so publish terminal-frame usage
           // to the shared advisory ledger after the session publishes.
-          onTurnUsage: (usage: import("../pi/codexHeadlessResult.js").CodexTurnUsage) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "codex", usage })
+          onTurnUsage: (usage: import("../pi/codexHeadlessResult.js").CodexTurnUsage) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "codex", usage }),
+          // `maxToolTurns` mediates only daimon-MCP tool calls; Codex's own
+          // shell is never routed through it, so it gets its own wall-clock
+          // and per-wake token bounds instead (`cliSession.ts`).
+          timeoutMs: resolveCodexWakeTimeoutMs(),
+          codexTokenCeiling: resolveCodexWakeTokenCeiling()
         } : {}),
         ...(engine==="grok"&&grokBroker!==undefined?{}:{credentialSecretValues: () => readPortableEngineCredentialSecrets(agent.id, engine, engineHomePath)}),
         ...(engine==="grok"&&grokBroker!==undefined?{grokBrokerTurn:(prompt:string,endpoint:string,signal:AbortSignal)=>grokBroker.turn(agent.id,wakeEnvironmentContext.current??"wake",prompt,endpoint,signal)}:{}),

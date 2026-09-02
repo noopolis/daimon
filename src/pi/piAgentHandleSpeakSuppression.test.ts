@@ -12,12 +12,18 @@ import type { PiTurnTraceModel } from "./turnTrace.js";
 /**
  * Covers the fix for the newsroom echo cascade: `moltnet_send` and the
  * bridge's terminal-text fallback (moltnet/internal/bridge/daimon/
- * receipt_tracker.go) share one publication slot, so a wake that already
- * spoke through `moltnet_send` must complete with empty text. These tests
- * simulate the tool side of that contract directly on the shared
- * `PiWakeEnvironmentContextRef` — `productionAgentTools.test.ts` covers that
- * `moltnetTool`'s `execute` is what actually sets `spokeFor`, and that
- * `moltnetReadTool` never does.
+ * receipt_tracker.go) share one publication slot. An agent with a mounted
+ * `moltnet_send` tool must never publish through the fallback — whether it
+ * spoke, stayed silent, or narrated a failure back as its terminal reply
+ * (a tool error the model explains in its own words without ever calling
+ * `moltnet_send`, which still completes the wake structurally and used to
+ * leak that narration into the room). Publication is gated on
+ * `hasSendCapability`, set once per agent in `piHarness.ts` from the
+ * mounted tool list — never on `spokeFor`, which stays as per-wake
+ * bookkeeping only (`productionAgentTools.test.ts` covers that `moltnetTool`'s
+ * `execute` is what sets it, and that `moltnetReadTool` never does). These
+ * tests simulate the tool side of that contract directly on the shared
+ * `PiWakeEnvironmentContextRef`.
  */
 
 type PiEvent = { type: string; message?: { content?: string } };
@@ -60,9 +66,9 @@ const makeStubSession = (
   };
 };
 
-test("a wake that called moltnet_send completes with empty text, but the trace still records the full reply", async () => {
+test("a send-capable agent that called moltnet_send completes with empty text, but the trace still records the full reply", async () => {
   const root = await tempDir();
-  const wakeEnvironmentContext: PiWakeEnvironmentContextRef = {};
+  const wakeEnvironmentContext: PiWakeEnvironmentContextRef = { hasSendCapability: true };
   const tracedOutputs: string[] = [];
   const session = makeStubSession("spoken reply text", { wakeEnvironmentContext, simulateSend: true });
   const handle = new PiAgentHandle(
@@ -75,12 +81,36 @@ test("a wake that called moltnet_send completes with empty text, but the trace s
 
   const result = await handle.wake(wake("daimon:spoke-1", "hello"));
 
-  assert.equal(result.text, "", "completion text must be blanked once moltnet_send was accepted");
+  assert.equal(result.text, "", "completion text must be blanked for a send-capable agent");
   assert.deepEqual(tracedOutputs, ["spoken reply text"], "the turn trace must still record the model's actual reply");
   await handle.stop();
 });
 
-test("a wake that never called moltnet_send keeps its terminal text (the documented fallback)", async () => {
+test("a send-capable agent that never called moltnet_send still completes with empty text (a narrated failure is not a second message)", async () => {
+  const root = await tempDir();
+  // Reproduces the defect directly: a tool error the model explains back as
+  // its own terminal reply, without ever calling `moltnet_send`. The wake
+  // still completes structurally (no thrown error), so `spokeFor` is never
+  // set — but a mounted send tool means this text must never reach the room.
+  const wakeEnvironmentContext: PiWakeEnvironmentContextRef = { hasSendCapability: true };
+  const tracedOutputs: string[] = [];
+  const session = makeStubSession("Blocked: Moltnet auth is not mounted, cannot send", { wakeEnvironmentContext, simulateSend: false });
+  const handle = new PiAgentHandle(
+    "agent", session, async () => session, path.join(root, "runtime"), traceModel,
+    undefined, undefined,
+    { traceTurn: async (input) => { tracedOutputs.push(input.outputText); } },
+    undefined, undefined, undefined, undefined, undefined,
+    wakeEnvironmentContext
+  );
+
+  const result = await handle.wake(wake("daimon:blocked-1", "hello"));
+
+  assert.equal(result.text, "", "a narrated failure must never publish through the terminal-text fallback");
+  assert.deepEqual(tracedOutputs, ["Blocked: Moltnet auth is not mounted, cannot send"], "the turn trace still records what the model actually said");
+  await handle.stop();
+});
+
+test("an agent with no moltnet_send tool keeps its terminal text (the documented fallback)", async () => {
   const root = await tempDir();
   const wakeEnvironmentContext: PiWakeEnvironmentContextRef = {};
   const session = makeStubSession("fallback reply text", { wakeEnvironmentContext, simulateSend: false });
@@ -96,10 +126,12 @@ test("a wake that never called moltnet_send keeps its terminal text (the documen
   await handle.stop();
 });
 
-test("reading Moltnet without sending does not suppress the terminal-text fallback", async () => {
+test("reading Moltnet without sending does not itself mark the wake as having spoken", async () => {
   const root = await tempDir();
-  // `moltnet_read` never writes `spokeFor` (see productionAgentTools.test.ts);
-  // this reproduces that outcome by simply never simulating a send.
+  // `moltnet_read` never writes `spokeFor` (see productionAgentTools.test.ts).
+  // `spokeFor` is bookkeeping only now — publication is gated on
+  // `hasSendCapability`, left unset here to represent an agent with no send
+  // tool mounted — so the fallback still applies.
   const wakeEnvironmentContext: PiWakeEnvironmentContextRef = {};
   const session = makeStubSession("read-only reply text", { wakeEnvironmentContext, simulateSend: false });
   const handle = new PiAgentHandle(
@@ -111,16 +143,18 @@ test("reading Moltnet without sending does not suppress the terminal-text fallba
   const result = await handle.wake(wake("daimon:read-only-1", "hello"));
 
   assert.equal(result.text, "read-only reply text");
+  assert.equal(wakeEnvironmentContext.spokeFor, undefined);
   await handle.stop();
 });
 
-test("the spoken flag from one wake never leaks into the next wake on the same agent", async () => {
+test("a send-capable agent's blanked text is not affected by the per-wake spokeFor reset, across spoke/silent/narrated wakes", async () => {
   const root = await tempDir();
-  // `engineDispatcher.ts` shares one `PiWakeEnvironmentContextRef` across
-  // every wake of one agent's handle, and non-dream wakes reuse the same
-  // Pi session (`selectPiSessionForWake`) — so one mutable stub session
-  // driven by per-wake state faithfully reproduces both.
-  const wakeEnvironmentContext: PiWakeEnvironmentContextRef = {};
+  // `engineDispatcher.ts`/`piHarness.ts` set `hasSendCapability` once at
+  // agent construction and share one `PiWakeEnvironmentContextRef` across
+  // every wake of that agent's handle; non-dream wakes reuse the same Pi
+  // session (`selectPiSessionForWake`) — so one mutable stub session driven
+  // by per-wake state faithfully reproduces both.
+  const wakeEnvironmentContext: PiWakeEnvironmentContextRef = { hasSendCapability: true };
   let reply = "first reply";
   let simulateSend = true;
   const listeners = new Set<Listener>();
@@ -139,12 +173,12 @@ test("the spoken flag from one wake never leaks into the next wake on the same a
   );
 
   const first = await handle.wake(wake("daimon:leak-1", "hello"));
-  assert.equal(first.text, "", "first wake spoke, so its text must be blanked");
+  assert.equal(first.text, "", "first wake spoke, and is send-capable, so its text must be blanked");
 
-  reply = "second reply";
+  reply = "Blocked: cannot proceed";
   simulateSend = false;
   const second = await handle.wake(wake("daimon:leak-2", "hello again"));
-  assert.equal(second.text, "second reply", "second wake never spoke, so the first wake's flag must not leak into it");
+  assert.equal(second.text, "", "second wake never spoke, but remains send-capable, so its narrated failure must also be blanked");
 
   await handle.stop();
 });

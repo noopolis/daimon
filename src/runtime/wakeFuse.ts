@@ -71,6 +71,7 @@ export class WakeFuse {
 
     // Unbounded defaults would reproduce exactly the failure this module prevents.
     await readdir(directory);
+    await ensureUsageLedgerReadable(usageLedgerPath);
     const records = await readFuseRecords(directory);
     const existingStart = records.filter((record): record is EpochStart => record.kind === "epoch_start" && record.epoch === epoch).at(-1);
     const epochStartedAt = existingStart?.at ?? now().toISOString();
@@ -218,4 +219,26 @@ async function readTripMarker(directory: string, epoch: string): Promise<WakeFus
 }
 function isTripReason(value: unknown): value is WakeFuseTripReason { return value === "wake_ceiling" || value === "token_ceiling" || value === "operator_stop" || value === "ledger_unavailable"; }
 async function lines(file: string): Promise<string[]> { try { return (await readFile(file, "utf8")).split("\n").filter(Boolean); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; } }
+
+/**
+ * A missing or unreadable usage ledger at arm time must never degrade to a
+ * silent zero. `sumTokens` (used on every later `admit`) deliberately treats
+ * a missing ledger as an empty one — if the ledger is deleted mid-epoch, the
+ * fuse still needs to keep functioning rather than wedge the organization —
+ * but that same tolerance is exactly how a 17.6M-token run passed a 5M
+ * ceiling untouched: the ledger was never created at all, so every sum read
+ * zero and the ceiling never had anything to compare against. Requiring the
+ * ledger to exist and be readable once, before the fuse ever admits a wake,
+ * turns a broken provisioning/permissions/mount into an immediate, loud
+ * startup failure — the same treatment `readdir(directory)` above already
+ * gives a missing admissions directory — instead of a token ceiling that
+ * silently never trips.
+ */
+async function ensureUsageLedgerReadable(ledgerPath: string): Promise<void> {
+  try { await readFile(ledgerPath, "utf8"); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? String(error);
+    throw new Error(`DAIMON_WAKE_FUSE cannot start: usage ledger at ${ledgerPath} is missing or unreadable (${code}); refusing to admit wakes against an unenforceable token ceiling`);
+  }
+}
 async function exists(file: string): Promise<boolean> { try { await stat(file); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }

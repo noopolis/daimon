@@ -289,18 +289,18 @@ export class PiAgentHandle implements AgentHandle {
         worldTrajectory,
         worldTrajectoryIdentity: this.worldTrajectoryIdentity
       });
-      // An explicit `moltnet_send` during this wake already published the
-      // agent's message; the terminal-text fallback publish
-      // (moltnet/internal/bridge/daimon/receipt_tracker.go) is reserved for
-      // terminal-only agents that never spoke. Blanking the completion text
-      // here — the field that becomes both Daimon's own wake-receipt text
-      // and the bridge's fallback source, one and the same endpoint — is
-      // what stops the bridge from echoing a second message. `outputText`
-      // itself stays intact for the turn trace and memory record above.
-      const spokeDuringWake = this.wakeEnvironmentContext?.spokeFor === event.id;
+      // An agent with a mounted `moltnet_send` tool has exactly one
+      // legitimate publication channel; its terminal text is always a
+      // private note to the runtime — whether it spoke, stayed silent, or
+      // narrated a failure back as its reply — never the bridge's
+      // terminal-text fallback (moltnet/internal/bridge/daimon/
+      // receipt_tracker.go), which is reserved for agents with no send tool
+      // at all. `outputText` itself stays intact for the turn trace and
+      // memory record above.
+      const hasSendCapability = this.wakeEnvironmentContext?.hasSendCapability === true;
       return {
         agentId: this.id,
-        text: spokeDuringWake ? "" : outputText,
+        text: hasSendCapability ? "" : outputText,
         durationMs: Date.now() - startedAtMs
       };
     } catch (error) {
