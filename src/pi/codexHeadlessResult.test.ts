@@ -122,10 +122,32 @@ test("the last non-blank agent message wins", () => {
   assert.equal(decoded.usage?.total, 18_115);
 });
 
-test("only a blank agent message rejects", () => {
+test("only a blank agent message with no terminal frame rejects", () => {
   assert.throws(() => decodeCodexHeadlessTurn(stream(
     { type: "item.completed", item: { type: "agent_message", text: "   " } }
-  )), /empty response/u);
+  )), /no terminal frame/u);
+});
+
+test("turn.completed with no agent_message is a sanctioned silent success and is still metered", () => {
+  const decoded = decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { id: "item_0", type: "mcp_tool_call", server: "daimon", tool: "probe_ping", status: "completed" } },
+    { type: "turn.completed", usage: usage() }
+  ));
+  assert.equal(decoded.text, "");
+  assert.deepEqual(decoded.usage, {
+    input: 18_110, output: 5, cacheRead: 11_008, cacheWrite: 0, total: 18_115, calls: 1, notionalUsd: 0, complete: true
+  });
+  assert.equal(decodeCodexHeadlessResult(stream(
+    { type: "turn.completed", usage: usage() }
+  )), "");
+});
+
+test("a stream with neither turn.completed nor turn.failed rejects distinctly", () => {
+  assert.throws(() => decodeCodexHeadlessTurn(stream(
+    { type: "thread.started", thread_id: "01a053f6-4a8d-7851-93e2-7d7fb1853849" },
+    { type: "turn.started" },
+    { type: "item.started", item: { type: "command_execution" } }
+  )), /no terminal frame/u);
 });
 
 test("turn.failed after a reply publishes text without usage", () => {

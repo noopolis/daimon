@@ -97,6 +97,19 @@ export const decodeCodexTurnUsage = (frame: JsonRecord, calls: number): CodexTur
  * undefined` and never discards publishable text. Unlike AGY's stricter
  * envelope, Codex may omit, repeat, or follow `turn.completed` with another
  * frame, so only exactly one completion frame supplies trustworthy usage.
+ *
+ * Success is decided from the terminal frame, not from whether a reply was
+ * published: `engineDispatcher.ts`'s runtime envelope tells every agent its
+ * terminal response is a private note to the runtime, not an outward
+ * message, and that it may "leave it empty". A `turn.completed` with no
+ * `agent_message` is therefore a sanctioned silent success — `text: ""`,
+ * never a thrown failure — and its usage still reaches the ledger exactly as
+ * a spoken turn's would; do not reinstate throwing on empty text, it would
+ * both misreport a clean turn as failed and drop its usage from the ledger
+ * silently. Only `turn.failed` with no reply already published, or a stream
+ * with neither terminal frame at all (a truncated or killed child), reject
+ * the turn; the latter gets its own detail string so a genuinely truncated
+ * stream is never confused with a legitimately silent one.
  */
 export const decodeCodexHeadlessTurn = (output: string): CodexHeadlessTurn => {
   const lines = output.split(/\r?\n/).filter((line) => line.trim().length > 0);
@@ -123,7 +136,12 @@ export const decodeCodexHeadlessTurn = (output: string): CodexHeadlessTurn => {
       text = frame.item.text;
     }
   }
-  if (typeof text !== "string") throw invalidResult(failed ? "failed turn" : "empty response");
+  if (typeof text !== "string") {
+    if (failed) throw invalidResult("failed turn");
+    // No reply, but a completion frame arrived: a sanctioned silent success.
+    if (completed.length === 0) throw invalidResult("no terminal frame");
+    text = "";
+  }
   const usage = !failed && completed.length === 1 ? decodeCodexTurnUsage(completed[0], calls) : undefined;
   return usage === undefined ? { text: text.trim() } : { text: text.trim(), usage };
 };
