@@ -4,8 +4,21 @@ import { lstat,open } from "node:fs/promises";
 
 type Snapshot=Readonly<{dev:number;ino:number;size:number;mtimeMs:number;denyPaths:readonly string[]}>;
 export class GrokWorkerAttestationFailure extends Error { constructor(readonly failureClass:"profile_missing"|"profile_invalid"){super("Grok worker isolation attestation unavailable");} }
+// The deny-list floor used to be 3, assuming a fixed set of categories
+// (subscription realm, bootstrap credential, peer roots). Spawnfile's
+// renderer (`containerDaimonBrokerRender.ts`) no longer lists paths that are
+// already unix-denied to the worker unconditionally elsewhere — Grok 1.0.13+
+// opens every `deny` path at startup to confirm its own bwrap mount caused
+// the denial, and an already-denied path makes that unverifiable, so Grok
+// refuses to start. What remains is only the organization state directory,
+// the one path a worker uid can otherwise actually open (verified live
+// against a running deployment). The floor here still guards against an
+// accidentally-empty/spoofed profile — hash-pinning via `profileSha256`
+// above already guarantees byte-for-byte match with what was rendered, so
+// this is defense in depth against a rendering bug producing a trivial
+// profile that is nonetheless self-consistent with its own pinned hash.
 export async function prepareGrokWorkerAttestation(input:Readonly<{profilePath:string;eventsPath:string;profileSha256:string;workerUid:number;brokerGid:number}>):Promise<Snapshot>{
-  const profile=await secureOpen(input.profilePath,0,0,0o444,65_536);let bytes:Buffer|undefined;let denyPaths:readonly string[]=[];try{bytes=await profile.readFile();if(createHash("sha256").update(bytes).digest("hex")!==input.profileSha256)throw new Error();const line=bytes.toString("utf8").split("\n").find((entry)=>entry.startsWith("deny = "));const parsed=JSON.parse(line?.slice(7)??"null") as unknown;if(!Array.isArray(parsed)||parsed.length<3||parsed.some((entry)=>typeof entry!=="string")||new Set(parsed).size!==parsed.length)throw new Error();denyPaths=[...parsed].sort();}catch{throw new Error("Grok worker isolation attestation unavailable");}finally{bytes?.fill(0);await profile.close();}
+  const profile=await secureOpen(input.profilePath,0,0,0o444,65_536);let bytes:Buffer|undefined;let denyPaths:readonly string[]=[];try{bytes=await profile.readFile();if(createHash("sha256").update(bytes).digest("hex")!==input.profileSha256)throw new Error();const line=bytes.toString("utf8").split("\n").find((entry)=>entry.startsWith("deny = "));const parsed=JSON.parse(line?.slice(7)??"null") as unknown;if(!Array.isArray(parsed)||parsed.length<1||parsed.some((entry)=>typeof entry!=="string")||new Set(parsed).size!==parsed.length)throw new Error();denyPaths=[...parsed].sort();}catch{throw new Error("Grok worker isolation attestation unavailable");}finally{bytes?.fill(0);await profile.close();}
   const events=await secureOpen(input.eventsPath,input.workerUid,input.brokerGid,0o640,16*1024*1024);try{const stat=await events.stat();return{dev:Number(stat.dev),ino:Number(stat.ino),size:Number(stat.size),mtimeMs:Number(stat.mtimeMs),denyPaths};}finally{await events.close();}
 }
 export async function verifyGrokWorkerAttestation(input:Readonly<{eventsPath:string;workerUid:number;brokerGid:number;workspace:string}>,before:Snapshot):Promise<void>{
