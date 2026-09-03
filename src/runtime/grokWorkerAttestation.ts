@@ -4,21 +4,49 @@ import { lstat,open } from "node:fs/promises";
 
 type Snapshot=Readonly<{dev:number;ino:number;size:number;mtimeMs:number;denyPaths:readonly string[]}>;
 export class GrokWorkerAttestationFailure extends Error { constructor(readonly failureClass:"profile_missing"|"profile_invalid"){super("Grok worker isolation attestation unavailable");} }
-// The deny-list floor used to be 3, assuming a fixed set of categories
-// (subscription realm, bootstrap credential, peer roots). Spawnfile's
-// renderer (`containerDaimonBrokerRender.ts`) no longer lists paths that are
-// already unix-denied to the worker unconditionally elsewhere — Grok 1.0.13+
-// opens every `deny` path at startup to confirm its own bwrap mount caused
-// the denial, and an already-denied path makes that unverifiable, so Grok
-// refuses to start. What remains is only the organization state directory,
-// the one path a worker uid can otherwise actually open (verified live
-// against a running deployment). The floor here still guards against an
-// accidentally-empty/spoofed profile — hash-pinning via `profileSha256`
-// above already guarantees byte-for-byte match with what was rendered, so
-// this is defense in depth against a rendering bug producing a trivial
-// profile that is nonetheless self-consistent with its own pinned hash.
+/**
+ * Reads the `deny` list out of a worker sandbox profile, but only after the
+ * bytes match `profileSha256` exactly.
+ *
+ * There is no minimum length. The floor used to be 3 (subscription realm,
+ * bootstrap credential, peer roots), then 1, and an empty list is now the
+ * *expected* shape: Grok 1.0.13 re-execs itself inside bubblewrap whenever
+ * `deny` is non-empty and then opens each deny-path placeholder — which it
+ * created at mode 000 — from a capability-stripped process, gets EACCES, and
+ * refuses to start ("possible __GROK_INSIDE_BWRAP spoof") without ever
+ * emitting a `ProfileApplied` event. Spawnfile therefore renders `deny = []`
+ * and confines the worker with unix permissions plus builtin-`strict`
+ * Landlock instead (`containerDaimonBrokerRender.ts`).
+ *
+ * The integrity guarantee is the hash pin, not the length. `profileSha256`
+ * comes from `/etc/daimon-engine-broker/service.json`, which the root
+ * provisioning phase writes `0440 root:2100` with `flag: 'wx'` and computes
+ * from the same `profileFor()` bytes it writes to the profile; the broker
+ * reads that config as uid 2100 and cannot rewrite it. A weaker profile
+ * therefore cannot be attested: changing any byte — dropping
+ * `restrict_network`, swapping `extends = "strict"` for a permissive base,
+ * renaming the profile — changes the digest and fails here. And the deny list
+ * this returns is not merely parsed and discarded: it is carried into the
+ * snapshot and re-asserted against the kernel's own `ProfileApplied`
+ * `deny_paths` by `parseGrokWorkerProfileApplied`, which independently
+ * requires `enforced`, `restrict_network`, `platform === "linux/landlock"`
+ * and the exact workspace. A length floor would only have caught a Spawnfile
+ * rendering bug that produced a trivial profile *and* pinned it consistently
+ * — and Spawnfile's own tests pin the rendered bytes.
+ */
+export function parseGrokWorkerSandboxProfile(bytes:Uint8Array,profileSha256:string):readonly string[]{
+  // Never copy the caller's bytes: `prepareGrokWorkerAttestation` zeroes the
+  // buffer it owns, and a private copy here would survive that.
+  const buffer=Buffer.isBuffer(bytes)?bytes:Buffer.from(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  if(createHash("sha256").update(buffer).digest("hex")!==profileSha256)throw new Error("Grok worker isolation attestation unavailable");
+  const line=buffer.toString("utf8").split("\n").find((entry)=>entry.startsWith("deny = "));
+  let parsed:unknown;
+  try{parsed=JSON.parse(line?.slice(7)??"null");}catch{throw new Error("Grok worker isolation attestation unavailable");}
+  if(!Array.isArray(parsed)||parsed.some((entry)=>typeof entry!=="string")||new Set(parsed).size!==parsed.length)throw new Error("Grok worker isolation attestation unavailable");
+  return [...parsed as string[]].sort();
+}
 export async function prepareGrokWorkerAttestation(input:Readonly<{profilePath:string;eventsPath:string;profileSha256:string;workerUid:number;brokerGid:number}>):Promise<Snapshot>{
-  const profile=await secureOpen(input.profilePath,0,0,0o444,65_536);let bytes:Buffer|undefined;let denyPaths:readonly string[]=[];try{bytes=await profile.readFile();if(createHash("sha256").update(bytes).digest("hex")!==input.profileSha256)throw new Error();const line=bytes.toString("utf8").split("\n").find((entry)=>entry.startsWith("deny = "));const parsed=JSON.parse(line?.slice(7)??"null") as unknown;if(!Array.isArray(parsed)||parsed.length<1||parsed.some((entry)=>typeof entry!=="string")||new Set(parsed).size!==parsed.length)throw new Error();denyPaths=[...parsed].sort();}catch{throw new Error("Grok worker isolation attestation unavailable");}finally{bytes?.fill(0);await profile.close();}
+  const profile=await secureOpen(input.profilePath,0,0,0o444,65_536);let bytes:Buffer|undefined;let denyPaths:readonly string[]=[];try{bytes=await profile.readFile();denyPaths=parseGrokWorkerSandboxProfile(bytes,input.profileSha256);}catch{throw new Error("Grok worker isolation attestation unavailable");}finally{bytes?.fill(0);await profile.close();}
   const events=await secureOpen(input.eventsPath,input.workerUid,input.brokerGid,0o640,16*1024*1024);try{const stat=await events.stat();return{dev:Number(stat.dev),ino:Number(stat.ino),size:Number(stat.size),mtimeMs:Number(stat.mtimeMs),denyPaths};}finally{await events.close();}
 }
 export async function verifyGrokWorkerAttestation(input:Readonly<{eventsPath:string;workerUid:number;brokerGid:number;workspace:string}>,before:Snapshot):Promise<void>{
