@@ -11,6 +11,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import type { OrganizationRuntimeAgentConfig, OrganizationRuntimeMcpServer } from "./organizationRuntime.js";
+import { moltnetOperationResult, readMoltnetPages } from "./moltnetMachineRead.js";
 import { cliChildEnvironment } from "../pi/cliEnvironment.js";
 import type { PiWakeEnvironmentContextRef } from "../pi/piAgentWakeSupport.js";
 
@@ -70,6 +71,15 @@ async function mcpTools(agent: OrganizationRuntimeAgentConfig, server: Organizat
  * Reading a declared room is a native Moltnet machine operation. Without it an agent can
  * only learn what a wake pushed at it, so any role that weighs several peers' messages
  * has to be woken once per message instead of reading the room once.
+ *
+ * The whole payload goes in `details` as well as `content`, matching every other
+ * Daimon tool (`memoryTools.ts`, `worldTools.ts`). This tool was written by
+ * copying `moltnet_send`, whose useful payload genuinely *is* its details
+ * (`{"accepted":true}`) — but the MCP mount lowers `details` to
+ * `structuredContent` (`src/mcp/toolServer.ts`) and the engines render that in
+ * preference to `content`, so a read that put its messages only in `content`
+ * handed the model a bare `{"messages":5}` and dropped every message and the
+ * page cursor. It looked like a confused agent for a night; it was an empty tool.
  */
 function moltnetReadTool(agent: OrganizationRuntimeAgentConfig): ToolDefinition {
   return {
@@ -81,17 +91,46 @@ function moltnetReadTool(agent: OrganizationRuntimeAgentConfig): ToolDefinition 
       if (network === undefined) throw new Error("Moltnet action exceeds declared scope");
       const [kind, target] = input.target.split(":", 2);
       if ((kind === "room" && !network.rooms.includes(target ?? "")) || (kind === "dm" && !network.dms) || !target || !["room", "dm"].includes(kind ?? "")) throw new Error("Moltnet target is not declared");
-      const correlationId = `${DAIMON_ACTION_ID_PREFIX}${createHash("sha256").update(JSON.stringify([agent.id, input.network, input.target, input.limit ?? 20, input.before ?? "", input.after ?? ""])).digest("hex")}`;
-      const response = await machine(agent.moltnet!.cliPath, agent.moltnet!.configPath, input.network, {
-        version: "moltnet.machine.v1", correlation_id: correlationId, operation: "read",
-        read: { target: { kind, id: target }, limit: input.limit ?? 20, ...(input.before === undefined ? {} : { before: input.before }), ...(input.after === undefined ? {} : { after: input.after }) }
+      const read = await readMoltnetPages({
+        requested: input.limit ?? 20, maxBytes: MAX_RESULT,
+        ...(input.before === undefined ? {} : { before: input.before }),
+        ...(input.after === undefined ? {} : { after: input.after }),
+        fetch: (request) => moltnetReadPage(agent, input.network, kind!, target, request)
       });
-      const result = response.read as { page?: { messages?: unknown[] } } | undefined;
-      if (result?.page?.messages === undefined) throw new Error("Moltnet read was not accepted");
-      const bytes = JSON.stringify(result); if (Buffer.byteLength(bytes) > MAX_RESULT) throw new Error("Moltnet read result exceeds bound");
-      return { content: [{ type: "text", text: bytes }], details: { messages: result.page.messages.length } };
+      const payload = {
+        target: read.target ?? { kind, id: target },
+        messages: read.messages,
+        message_count: read.messages.length,
+        page: {
+          has_more: read.hasMore,
+          ...(read.nextBefore === undefined ? {} : { next_before: read.nextBefore }),
+          ...(read.nextAfter === undefined ? {} : { next_after: read.nextAfter })
+        },
+        ...(read.truncated === undefined ? {} : { truncated: read.truncated })
+      };
+      const bytes = JSON.stringify(payload); if (Buffer.byteLength(bytes) > MAX_RESULT) throw new Error("Moltnet read result exceeds bound");
+      return { content: [{ type: "text", text: bytes }], details: payload };
     }
   } as ToolDefinition;
+}
+
+/** One `machine` read request, unwrapped onto the shape the pager consumes. */
+async function moltnetReadPage(agent: OrganizationRuntimeAgentConfig, networkId: string, kind: string, target: string, request: { limit: number; before?: string; after?: string }) {
+  const correlationId = `${DAIMON_ACTION_ID_PREFIX}${createHash("sha256").update(JSON.stringify([agent.id, networkId, kind, target, request.limit, request.before ?? "", request.after ?? ""])).digest("hex")}`;
+  const response = await machine(agent.moltnet!.cliPath, agent.moltnet!.configPath, networkId, {
+    version: "moltnet.machine.v1", correlation_id: correlationId, operation: "read",
+    read: { target: { kind, id: target }, limit: request.limit, ...(request.before === undefined ? {} : { before: request.before }), ...(request.after === undefined ? {} : { after: request.after }) }
+  });
+  const result = moltnetOperationResult(response, "read", "read") as { target?: unknown; page?: { messages?: unknown[]; page?: { has_more?: unknown; next_before?: unknown; next_after?: unknown } } } | undefined;
+  if (result?.page?.messages === undefined) throw new Error("Moltnet read was not accepted");
+  const info = result.page.page ?? {};
+  return {
+    ...(result.target === undefined ? {} : { target: result.target }),
+    messages: result.page.messages,
+    hasMore: info.has_more === true,
+    ...(typeof info.next_before === "string" ? { nextBefore: info.next_before } : {}),
+    ...(typeof info.next_after === "string" ? { nextAfter: info.next_after } : {})
+  };
 }
 
 function moltnetTool(agent: OrganizationRuntimeAgentConfig, wakeContext: PiWakeEnvironmentContextRef): ToolDefinition {
@@ -106,7 +145,7 @@ function moltnetTool(agent: OrganizationRuntimeAgentConfig, wakeContext: PiWakeE
       const deliveryId = `${DAIMON_ACTION_ID_PREFIX}${createHash("sha256").update(JSON.stringify([wakeContext.current, agent.id, input.network, input.target, input.text])).digest("hex")}`;
       const prior = await priorReceipt(agent, deliveryId); if (prior !== undefined) { wakeContext.spokeFor = wakeContext.current; return { content: [{ type: "text", text: JSON.stringify(prior) }], details: prior }; }
       const response = await machine(agent.moltnet!.cliPath, agent.moltnet!.configPath, input.network, { version: "moltnet.machine.v1", correlation_id: deliveryId, operation: "send_nudge", send_nudge: { delivery_id: deliveryId, target: { kind, id: target }, body: input.text } });
-      const result = response.send_nudge as { accepted?: boolean; message_id?: string } | undefined; if (result?.accepted !== true || typeof result.message_id !== "string") throw new Error("Moltnet send was not accepted");
+      const result = moltnetOperationResult(response, "send_nudge", "send") as { accepted?: boolean; message_id?: string } | undefined; if (result?.accepted !== true || typeof result.message_id !== "string") throw new Error("Moltnet send was not accepted");
       await receipt(agent, { kind: "moltnet", agent_id: agent.id, engine: agent.engine.kind, delivery_id: deliveryId, network: input.network, target: input.target, message_id: result.message_id });
       // An explicit send and the bridge's terminal-text fallback share one
       // publication slot (moltnet AGENTS.md); recording that this wake spoke
