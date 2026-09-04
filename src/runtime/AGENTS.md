@@ -76,6 +76,38 @@ preference to `content`, so a tool that fills only `content` reaches the model
 empty. `moltnet_read` shipped that way and returned nothing but a message count
 for its whole life; `memoryTools.ts` and `worldTools.ts` are the pattern to copy.
 
+The declared `mcp_*` tools had the same defect one layer wider: every one of
+them returned `details: { server, tool, is_error }`, so an agent calling *any*
+declared MCP tool read routing metadata where the tool's own answer should have
+been — and, on a failure, read `is_error: true` with no reason for it.
+`mcpToolResult.ts` owns that lowering now, under three rules. **Both channels
+always carry the payload**, each mirroring whichever one the server left empty,
+because being wrong again about which channel an engine renders must cost
+nothing; an upstream `structuredContent` is forwarded verbatim so a declared
+`outputSchema` still describes what the model sees. **`isError` is raised, not
+reported** — Pi's `AgentToolResult` has no error channel, so a failing upstream
+tool throws `McpToolCallError` carrying the server's own words, which
+`toolServer.ts` lowers to `isError: true` plus that sentence. **The bound
+truncates rather than refusing**: an oversized result degrades to a head of
+itself plus an explicit marker naming both sizes, where it used to be thrown
+away whole. The wake-scoped receipt stores the rendered result so a repeated
+identical call replays the answer instead of a digest of it, and a repeated
+failing call fails again for the same stated cause.
+
+Daimon does not re-declare an upstream `outputSchema` on its own mount: a
+declared output schema obliges every result to carry conforming
+`structuredContent`, which neither a content-only response nor a truncation
+marker can satisfy, so declaring it would turn a degraded result back into a
+lost one. For the same reason `toolServer.ts` names the failing instance path
+and keyword when Ajv rejects a call — `Invalid arguments for tool X` on its own
+leaves trial and error as an agent's only route to a tool's argument shape.
+
+`fixtures/testMcpServer.mjs` has to keep modelling a server that answers the way
+real ones do — content only, structured only, both, an `isError` refusal
+carrying its own reason, and a result past the bound. It was a single
+never-failing text-only tool, which is exactly why a passthrough that dropped
+every payload passed every test.
+
 `moltnet_read` also has to page. Moltnet's frozen machine wire caps a response
 line at 16384 bytes and any single message part at 4096, and `projectRead`
 refuses an oversized page with `error.code: "transport"` rather than truncating
