@@ -66,6 +66,26 @@ const toolResult = (result: { content: CallToolResult["content"]; details?: unkn
     : {})
 });
 
+/** Bound on the rendered Ajv violations, so a pathological schema cannot flood a turn. */
+const MAX_SCHEMA_VIOLATION_BYTES = 2_048;
+
+/**
+ * Why the arguments were rejected, in the schema's own words.
+ *
+ * A bare `Invalid arguments for tool X` tells an agent that its call was wrong
+ * and nothing about how, which leaves trial and error as the only way to learn
+ * a tool's argument shape. Ajv already knows which instance path failed and
+ * which keyword it failed on; saying so turns a guessing loop into one
+ * correction.
+ */
+const schemaViolations = (validator: ValidateFunction): string => {
+  const rendered = (validator.errors ?? [])
+    .map((issue) => `${issue.instancePath === "" ? "(root)" : issue.instancePath} ${issue.message ?? "is invalid"}`.trim())
+    .join("; ");
+  if (rendered.length === 0) return "the arguments do not match the tool's declared input schema";
+  return rendered.length > MAX_SCHEMA_VIOLATION_BYTES ? `${rendered.slice(0, MAX_SCHEMA_VIOLATION_BYTES)}…` : rendered;
+};
+
 const toolError = (error: unknown): CallToolResult => ({
   content: [{ type: "text", text: error instanceof Error ? `${error.name}: ${error.message}` : String(error) }],
   isError: true
@@ -125,7 +145,7 @@ export const createPiToolMcpServer = (
         }
         const args = request.params.arguments ?? {};
         if (!validator(args)) {
-          throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for tool ${tool.name}`);
+          throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for tool ${tool.name}: ${schemaViolations(validator)}`);
         }
         toolTurns += 1;
         // Ajv validated this value against this tool's own schema immediately above.
