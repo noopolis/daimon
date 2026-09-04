@@ -284,7 +284,8 @@ test("mounted tool execution receives no Pi ExtensionContext", async () => {
 
 const rawRequest = async (
   server: ReturnType<typeof createPiToolMcpServer>,
-  method: string
+  method: string,
+  params: Record<string, unknown> = {}
 ): Promise<{ error?: { code: number; message: string }; result?: unknown }> => {
   const client = new Client({ name: "daimon-raw-client", version: "0.1.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -293,7 +294,7 @@ const rawRequest = async (
   try {
     // `z.any()`-shaped passthrough: the point is what the *server* answers to a
     // method the SDK has no schema for, not what the client's parser prefers.
-    const result = await client.request({ method, params: {} }, PassthroughResultSchema);
+    const result = await client.request({ method, params }, PassthroughResultSchema);
     return { result };
   } catch (error) {
     const candidate = error as { code?: number; message?: string };
@@ -321,4 +322,34 @@ test("every other unknown method still gets MethodNotFound", async () => {
     assert.equal(refused.result, undefined, method);
     assert.equal(refused.error?.code, -32_601, `${method}: ${JSON.stringify(refused.error)}`);
   }
+});
+
+test("rejected arguments say which field failed and how, not just that the call was invalid", async () => {
+  // An agent that is told only `Invalid arguments for tool X` has trial and
+  // error as its sole route to a tool's argument shape. Ajv already knows the
+  // path and the keyword; withholding them is what makes the loop unbounded.
+  // The refusal is returned as an `isError: true` result rather than a JSON-RPC
+  // error precisely so the model gets to read it and correct itself.
+  const filing = (): ToolDefinition => defineTool({
+    name: "file_article",
+    label: "File article",
+    description: "Files an article.",
+    parameters: Type.Object(
+      { headline: Type.String(), section: Type.Union([Type.Literal("news"), Type.Literal("opinion")]) },
+      { additionalProperties: false }
+    ),
+    async execute() {
+      return { content: [{ type: "text" as const, text: "filed" }], details: { filed: true } };
+    }
+  });
+
+  const missing = await call(createPiToolMcpServer([filing()], {}), "file_article", { section: "news" });
+  assert.equal(missing.isError, true);
+  const missingText = JSON.stringify(missing.content);
+  assert.match(missingText, /file_article/u);
+  assert.match(missingText, /headline/u, "the missing field must be named");
+
+  const wrong = await call(createPiToolMcpServer([filing()], {}), "file_article", { headline: "Strike", section: "sports" });
+  assert.equal(wrong.isError, true);
+  assert.match(JSON.stringify(wrong.content), /\/section/u, "the failing instance path must be named");
 });

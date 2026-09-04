@@ -6,6 +6,7 @@ import url from "node:url";
 import test from "node:test";
 
 import { createProductionAgentTools } from "./productionAgentTools.js";
+import { MCP_TOOL_RESULT_MAX_BYTES } from "./mcpToolResult.js";
 import type { OrganizationRuntimeAgentConfig } from "./organizationRuntime.js";
 
 async function receipts(root: string): Promise<string[]> {
@@ -18,7 +19,12 @@ test("production cognition mounts only declared MCP tools and records a bounded 
     const agent: OrganizationRuntimeAgentConfig = { id: "alpha", name: "Alpha", instructions: "work", workspacePath: root, runtimeHomePath: root, engine: { kind: "codex" }, mcp: [{ name: "lifecycle", transport: "stdio", command: process.execPath, args: [path.resolve("src/runtime/fixtures/testMcpServer.mjs")], env: {}, tools: ["checkpoint"] }] };
     const tools = await createProductionAgentTools(agent, { current: "schedule:release" }); assert.deepEqual(tools.map((tool) => tool.name), ["mcp_lifecycle_checkpoint"]);
     const result = await tools[0]!.execute("call", { phase: "release" } as never, undefined, undefined, {} as never);
-    assert.ok(JSON.stringify(result).includes(`release:home=${root}`)); assert.equal(await readFile(path.join(root, "mcp-home-writable"), "utf8"), "ok"); assert.match((await receipts(root)).join(""), /"kind":"mcp".*"agent_id":"alpha".*"engine":"codex".*"tool":"checkpoint"/u);
+    // Asserted on `details` specifically: it is lowered to `structuredContent`,
+    // which the engines render in preference to `content`, so a whole-result
+    // `JSON.stringify` check passes while the model still sees nothing.
+    assert.ok(JSON.stringify(result.details).includes(`release:home=${root}`), "the payload must reach the channel the engines render");
+    assert.ok(JSON.stringify(result.content).includes(`release:home=${root}`));
+    assert.equal(await readFile(path.join(root, "mcp-home-writable"), "utf8"), "ok"); assert.match((await receipts(root)).join(""), /"kind":"mcp".*"agent_id":"alpha".*"engine":"codex".*"tool":"checkpoint"/u);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -217,5 +223,106 @@ test("a Moltnet error reaches the caller with its own code, not a generic refusa
       (await readTool(root, cli)).execute("call", { network: "news", target: "room:desk", before: "msg_9999" } as never, undefined, undefined, {} as never),
       /Moltnet read failed: transport/u
     );
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+/**
+ * The declared-MCP passthrough, against a fixture that answers the way real
+ * servers do. Every `mcp_*` tool used to return `{ server, tool, is_error }`
+ * and nothing else, so each of these cases reached the model empty.
+ */
+function mcpAgent(root: string, tools: string[]): OrganizationRuntimeAgentConfig {
+  return {
+    id: "alpha", name: "Alpha", instructions: "work", workspacePath: root, runtimeHomePath: root, engine: { kind: "codex" },
+    mcp: [{ name: "desk", transport: "stdio", command: process.execPath, args: [path.resolve("src/runtime/fixtures/testMcpServer.mjs")], env: { DAIMON_TEST_MCP_TOOLS: tools.join(",") }, tools }]
+  };
+}
+
+/** `assert.rejects` yields nothing to inspect; capture the failure itself. */
+async function failure(run: () => Promise<unknown>): Promise<Error> {
+  try {
+    await run();
+  } catch (error) {
+    assert.ok(error instanceof Error);
+    return error;
+  }
+  throw new assert.AssertionError({ message: "expected the tool call to fail" });
+}
+
+test("a declared MCP tool's own payload reaches the model in every result shape", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-mcp-passthrough-"));
+  try {
+    const tools = await createProductionAgentTools(mcpAgent(root, ["checkpoint", "desk_status", "wire_summary"]), { current: "schedule:release" });
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+    const contentOnly = await byName.get("mcp_desk_checkpoint")!.execute("call", { phase: "release" } as never, undefined, undefined, {} as never);
+    assert.match(JSON.stringify(contentOnly.details), /release:home=/u, "a content-only server must still fill the rendered channel");
+
+    const structuredOnly = await byName.get("mcp_desk_desk_status")!.execute("call", {} as never, undefined, undefined, {} as never);
+    assert.deepEqual(structuredOnly.details, { open: true, editor: "irene", queue: ["draft-1", "draft-2"] }, "structured content passes through verbatim");
+    assert.match(JSON.stringify(structuredOnly.content), /irene/u);
+
+    const both = await byName.get("mcp_desk_wire_summary")!.execute("call", {} as never, undefined, undefined, {} as never);
+    assert.deepEqual(both.details, { headline_count: 3, headlines: ["strike", "budget", "weather"] });
+    assert.deepEqual(both.content, [{ type: "text", text: "3 headlines on the wire: strike, budget, weather" }]);
+
+    for (const result of [contentOnly, structuredOnly, both]) {
+      assert.ok(!JSON.stringify(result.details).includes("\"is_error\""), "routing metadata must never stand in for the payload");
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a failing MCP tool reaches the model as a failure, with the server's reason intact", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-mcp-error-"));
+  try {
+    const tools = await createProductionAgentTools(mcpAgent(root, ["file_article", "silent_failure"]), { current: "schedule:edition" });
+    const fileArticle = tools.find((tool) => tool.name === "mcp_desk_file_article")!;
+
+    // The 17.6M-token case: an agent calls the tool with the wrong argument
+    // shape and has to learn the right one from the answer, not by guessing.
+    const missing = await failure(() => fileArticle.execute("call", { body: "text" } as never, undefined, undefined, {} as never));
+    assert.equal(missing.name, "McpToolCallError");
+    assert.match(missing.message, /'headline' is required and must be a non-empty string/u);
+    assert.match(missing.message, /Expected \{headline: string, body: string, section: "news"\|"opinion"\}/u);
+    // `toolServer.ts` renders exactly this string inside an `isError: true`
+    // result, so it is verbatim what the model receives.
+    assert.match(`${missing.name}: ${missing.message}`, /^McpToolCallError: desk\/file_article failed: /u);
+
+    const badSection = await failure(() => fileArticle.execute("call", { headline: "h", body: "b", section: "sports" } as never, undefined, undefined, {} as never));
+    assert.match(badSection.message, /is not one of "news" or "opinion"/u, "the sentence survives");
+    assert.match(badSection.message, /unknown_section/u, "and so does the machine-readable code");
+
+    const silent = await failure(() => tools.find((tool) => tool.name === "mcp_desk_silent_failure")!.execute("call", {} as never, undefined, undefined, {} as never));
+    assert.match(silent.message, /reported an error and gave no reason/u);
+
+    // A failure is recorded as one, and a repeated identical call fails again
+    // for the same stated cause rather than replaying an opaque digest.
+    const stored = (await receipts(root)).join("");
+    assert.match(stored, /"is_error":true/u);
+    assert.match(stored, /'headline' is required/u);
+    const replayed = await failure(() => fileArticle.execute("call", { body: "text" } as never, undefined, undefined, {} as never));
+    assert.match(replayed.message, /'headline' is required and must be a non-empty string/u);
+    assert.ok(!replayed.message.includes("sha256:"), "a retried failure must not answer with a digest");
+
+    const filed = await fileArticle.execute("call", { headline: "Strike", body: "b", section: "news" } as never, undefined, undefined, {} as never);
+    assert.deepEqual(filed.details, { filed: true, headline: "Strike", section: "news" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an oversized MCP result truncates with a marker instead of failing the call", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-mcp-oversize-"));
+  try {
+    const tools = await createProductionAgentTools(mcpAgent(root, ["archive_dump"]), { current: "schedule:edition" });
+    const result = await tools[0]!.execute("call", {} as never, undefined, undefined, {} as never);
+    const serialized = JSON.stringify({ content: result.content, structuredContent: result.details });
+    assert.ok(Buffer.byteLength(serialized) <= MCP_TOOL_RESULT_MAX_BYTES, "the bound still holds");
+    assert.match(serialized, /ARCHIVE-HEAD/u, "the head of the payload survives rather than the whole result vanishing");
+    assert.match(serialized, /\[daimon: truncated — the MCP tool result was \d+ bytes, above the 61440-byte tool result bound\]/u);
+    assert.match((await receipts(root)).join(""), /"truncated":true/u);
+
+    // The receipt still fits its own bound with a truncated result inside it,
+    // and a repeated call replays that result rather than the receipt.
+    const replayed = await tools[0]!.execute("call", {} as never, undefined, undefined, {} as never);
+    assert.match(JSON.stringify(replayed.details), /ARCHIVE-HEAD/u);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
