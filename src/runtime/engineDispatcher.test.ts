@@ -119,7 +119,7 @@ test("production dispatcher waits for active engine quiescence during shutdown",
   const priorRun = process.env.NOOPOLIS_RUN_ID;
   const ready = path.join(root, "ready");
   const agy = path.join(root, "agy");
-  await writeFile(agy, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs"; if (process.argv.some((value) => value.includes("hold"))) { writeFileSync(${JSON.stringify(ready)}, "ready"); process.on("SIGTERM", () => undefined); setInterval(() => undefined, 1000); }`);
+  await writeFile(agy, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs"; if (process.argv.some((value) => value.includes("hold"))) { process.on("SIGTERM", () => undefined); setInterval(() => undefined, 1000); writeFileSync(${JSON.stringify(ready)}, "ready"); }`);
   await chmod(agy, 0o700);
   await seedAuth(root, "agy");
   try {
@@ -128,6 +128,11 @@ test("production dispatcher waits for active engine quiescence during shutdown",
     const handle = await startOrganizationRuntimeEngine(rootConfig(root, "agy"), "DAIMON_DISPATCH_CONTROL", undefined, "unix:path=/private/realm/bus");
     const pending = handle.wake({ id: "hold", kind: "manual", text: "hold" });
     void pending.catch(() => undefined);
+    // `ready` is written only after the child installs its SIGTERM handler, so
+    // reaching here proves the engine will actually resist the first signal.
+    // Written before that handler, the file could be observed during the window
+    // where SIGTERM still kills the child outright, stop() would return almost
+    // immediately, and the quiescence bound below would fail under load.
     await waitForFile(ready);
     const started = Date.now();
     await handle.stop();
