@@ -35,12 +35,20 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
   const workspace = path.join(root, "workspace");
   const runtimeHome = path.join(root, "runtime");
   const acceptanceStore = path.join(root, "acceptance-store");
+  const wakeFuseDirectory = path.join(root, "wake-fuse");
   const supportsC0 = process.platform === "linux";
   const program = path.join(root, "codex");
   const configPath = path.join(root, "runtime.json");
   await mkdir(workspace, { recursive: true, mode: 0o700 });
   await mkdir(runtimeHome, { recursive: true, mode: 0o700 });
   await mkdir(acceptanceStore, { recursive: true, mode: 0o700 });
+  // The C0 control host opens an ARMED wake fuse, which fails closed when its
+  // ledger directory is absent rather than defaulting to an unbounded ceiling.
+  // Deployments get /var/lib/spawnfile/daimon/usage as a mounted volume; this
+  // test must provision the equivalent itself instead of assuming the host has
+  // one. The fuse stays armed (DAIMON_WAKE_FUSE is never set), so the
+  // provisioning probe and its fail-closed behaviour remain under test.
+  await mkdir(wakeFuseDirectory, { recursive: true, mode: 0o700 });
   await mkdir(path.join(runtimeHome, ".daimon-inbound"), { recursive: true, mode: 0o700 });
   const inboundAuth = path.join(runtimeHome, ".daimon-inbound", "codex-auth");
   const runtimeAuth = path.join(runtimeHome, ".codex", "auth.json");
@@ -58,7 +66,7 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
     }]
   }));
   const child = spawn(process.execPath, ["--import", "tsx", "src/runtime/cli.ts", "run", "--config", configPath], {
-    cwd: process.cwd(), env: { ...process.env, PATH: `${root}${path.delimiter}${process.env.PATH ?? ""}`, [tokenEnv]: token, DAIMON_RUNTIME_READINESS_RECEIPT: readinessReceipt, ...(supportsC0 ? { DAIMON_RUNTIME_ACCEPTANCE_STORE: acceptanceStore } : {}), NOOPOLIS_RUN_ID: "runtime-cli-test" }, stdio: ["ignore", "pipe", "pipe"]
+    cwd: process.cwd(), env: { ...process.env, PATH: `${root}${path.delimiter}${process.env.PATH ?? ""}`, [tokenEnv]: token, DAIMON_RUNTIME_READINESS_RECEIPT: readinessReceipt, ...(supportsC0 ? { DAIMON_RUNTIME_ACCEPTANCE_STORE: acceptanceStore, DAIMON_WAKE_FUSE_DIRECTORY: wakeFuseDirectory, DAIMON_TURN_USAGE_LEDGER_PATH: path.join(wakeFuseDirectory, "usage.jsonl") } : {}), NOOPOLIS_RUN_ID: "runtime-cli-test" }, stdio: ["ignore", "pipe", "pipe"]
   });
   const output: Buffer[] = [];
   child.stdout?.on("data", (chunk: Buffer) => output.push(chunk));
