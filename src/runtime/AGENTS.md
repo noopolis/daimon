@@ -69,6 +69,22 @@ Spawnfile-compiled, digest-attested test artifact and enforce its agent/server/t
 allowlist. These modules build only into `dist-test-runtime`, never production
 `dist`, and remain inert unless the fixed test-mode environment gate is present.
 
+Every agent-facing tool in `productionAgentTools.ts` must return its payload in
+`details`, not only in `content`. The MCP mount lowers `details` to
+`structuredContent` (`src/mcp/toolServer.ts`) and the engines render that in
+preference to `content`, so a tool that fills only `content` reaches the model
+empty. `moltnet_read` shipped that way and returned nothing but a message count
+for its whole life; `memoryTools.ts` and `worldTools.ts` are the pattern to copy.
+
+`moltnet_read` also has to page. Moltnet's frozen machine wire caps a response
+line at 16384 bytes and any single message part at 4096, and `projectRead`
+refuses an oversized page with `error.code: "transport"` rather than truncating
+it, so a single large `limit` can never be served on a busy room.
+`moltnetMachineRead.ts` owns that adaptation — small pages, cursor following,
+adaptive backoff — and Daimon adapts to the wire rather than changing it. A
+`machine` error must always surface its own code; the generic refusal it
+replaced hid a never-working tool for as long as the tool existed.
+
 Each engine/tool child receives only the current non-secret wake id in
 `DAIMON_WAKE_ID`; it is bound for one turn and cleared afterward. Transports
 may use it as an idempotency/cause key, but Daimon does not interpret transport
