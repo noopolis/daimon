@@ -8,6 +8,16 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import { PiHarnessAdapter, type PiSessionFactory } from "./piHarness.js";
 
+/**
+ * Stub Pi session event shape, matching the pattern already used by
+ * `piAgentHandleSpeakSuppression.test.ts`: the harness's own
+ * `subscribe` takes the SDK's `AgentSessionEventListener`, so a stub that
+ * only emits `turn_end` bridges the variance gap with an explicit cast at
+ * the registration seam rather than widening the harness contract.
+ */
+type PiEvent = { type: string; message?: { content?: string } };
+type Listener = (event: PiEvent) => void;
+
 test("binds the current wake id to protected bash children and clears it after the turn", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-wake-env-"));
   const protectedName = "DAIMON_WAKE_ENV_CONTROL_CANARY";
@@ -63,15 +73,15 @@ test("an agent with a moltnet_send production tool never returns terminal text, 
   const moltnetSendTool: ToolDefinition = {
     name: "moltnet_send", label: "send", description: "send",
     parameters: { type: "object", additionalProperties: false, properties: {} },
-    async execute() { return { content: [{ type: "text", text: "{}" }] }; }
+    async execute() { return { content: [{ type: "text", text: "{}" }], details: { accepted: true } }; }
   } as ToolDefinition;
   let reply = "Blocked: Moltnet auth is not mounted, cannot send";
   const factory: PiSessionFactory = async () => ({ session: {
     async prompt() { for (const listener of [...listeners]) listener({ type: "turn_end", message: { content: reply } }); },
-    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    subscribe(listener) { listeners.add(listener as Listener); return () => listeners.delete(listener as Listener); },
     dispose() { listeners.clear(); }
   } });
-  const listeners = new Set<(event: { type: string; message?: { content?: string } }) => void>();
+  const listeners = new Set<Listener>();
   try {
     const adapter = new PiHarnessAdapter({
       authPath: path.join(root, "auth.json"),
@@ -100,10 +110,10 @@ test("an agent with no production tools keeps the terminal-text fallback", async
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-wake-env-nosend-"));
   const priorRun = process.env.NOOPOLIS_RUN_ID;
   process.env.NOOPOLIS_RUN_ID = "wake-environment-nosend-test";
-  const listeners = new Set<(event: { type: string; message?: { content?: string } }) => void>();
+  const listeners = new Set<Listener>();
   const factory: PiSessionFactory = async () => ({ session: {
     async prompt() { for (const listener of [...listeners]) listener({ type: "turn_end", message: { content: "fallback reply" } }); },
-    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    subscribe(listener) { listeners.add(listener as Listener); return () => listeners.delete(listener as Listener); },
     dispose() { listeners.clear(); }
   } });
   try {
