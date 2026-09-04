@@ -148,10 +148,10 @@ function createHost(
             addActivity(agent.config.id, "wake_completed", job.request.event.id);
             settle(job, completed(job.request, result.text, result.durationMs));
           }
-        } catch {
+        } catch (error) {
           if (!job.settled && !job.aborting) {
             agent.state = "failed";
-            settle(job, failed(job.request));
+            settle(job, failed(job.request, error));
           }
         } finally {
           if (agent.active === job) agent.active = undefined;
@@ -366,8 +366,20 @@ function completed(request: OrganizationRuntimeWakeRequest, text: string, durati
   return { version: "noopolis.daimon.wake-result.v1", status: "completed", agentId: request.agentId, wakeId: request.event.id, text: sanitizeWakeCompletionText(text), durationMs };
 }
 
-function failed(request: OrganizationRuntimeWakeRequest): OrganizationRuntimeWakeResult {
-  return { version: "noopolis.daimon.wake-result.v1", status: "failed", agentId: request.agentId, wakeId: request.event.id, code: "engine_failed" };
+/** Engine failures are undiagnosable without the cause, so carry a bounded excerpt. */
+export const ENGINE_FAILURE_DETAIL_MAX_BYTES = 2_048;
+
+function failed(request: OrganizationRuntimeWakeRequest, error?: unknown): OrganizationRuntimeWakeResult {
+  const detail = engineFailureDetail(error);
+  return { version: "noopolis.daimon.wake-result.v1", status: "failed", agentId: request.agentId, wakeId: request.event.id, code: "engine_failed", ...(detail === undefined ? {} : { detail }) };
+}
+
+export function engineFailureDetail(error: unknown): string | undefined {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+  if (raw === undefined) return undefined;
+  const trimmed = raw.replaceAll(/\s+/gu, " ").trim();
+  if (trimmed.length === 0) return undefined;
+  return Buffer.from(trimmed, "utf8").subarray(0, ENGINE_FAILURE_DETAIL_MAX_BYTES).toString("utf8");
 }
 
 function rejected(request: OrganizationRuntimeWakeRequest, code: "unauthorized" | "unknown_agent" | "queue_full"): OrganizationRuntimeWakeResult {

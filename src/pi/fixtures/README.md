@@ -30,7 +30,7 @@ It pins the field names the decoder reads:
 `result` frame documented verbatim inside the same binary (`strings` over
 `grok-1.0.13-macos-aarch64`, the "Output Formats › streaming-messages-json"
 section), with the token buckets filled from the live measurement recorded in
-`USAGE_ACCOUNTING_DESIGN.md`. That document also states, normatively:
+`specs/USAGE_ACCOUNTING_DESIGN.md` in the Spawnfile repo. That document also states, normatively:
 
 - `total_tokens = input_tokens + cache_read_input_tokens + cache_creation_input_tokens + output_tokens`
 - `usage.input_tokens` is **uncached only**; the three prompt-side buckets are disjoint

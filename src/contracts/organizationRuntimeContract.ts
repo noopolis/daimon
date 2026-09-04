@@ -5,8 +5,19 @@ export const ORGANIZATION_RUNTIME_MAX_AGENTS = 32;
 export const ORGANIZATION_RUNTIME_MAX_CONFIG_BYTES = 1_048_576;
 export const ORGANIZATION_RUNTIME_MAX_STRING_BYTES = 16_384;
 export const ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS = 4_096;
+/** Wider codepoint bound for agent `instructions` only; every other bounded string keeps the shared 4,096 cap. */
+export const ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS = 16_384;
 export const ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES = 16_384;
 export const ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS = 31_536_000_000;
+/**
+ * Upper bound on `schedule.jitter_seconds`. Jitter exists to blur a wake's
+ * wall-clock signature (see `RandomizedDelaySec` in systemd timers), not to
+ * relocate it; one hour is generous next to the finest cron granularity (one
+ * minute) while remaining small next to the daily/sub-daily cadences jitter
+ * is meant for, so a jittered wake still lands recognizably "around" its
+ * scheduled instant instead of drifting into the next slot's territory.
+ */
+export const ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS = 3_600;
 
 const PRODUCTION_TOOL_PROPERTIES = {
   mcp: { type: "array", maxItems: 8, items: { type: "object", additionalProperties: false, required: ["name", "transport", "args", "env", "tools"], properties: {
@@ -40,7 +51,7 @@ export const ORGANIZATION_RUNTIME_CONFIG_SCHEMA = {
       type: "object", additionalProperties: false, required: ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine"], properties: {
         id: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
         name: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
-        instructions: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
+        instructions: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS, pattern: "\\S" },
         workspacePath: { type: "string", maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "^/" },
         runtimeHomePath: { type: "string", maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "^/" },
         engine: { type: "object", additionalProperties: false, required: ["kind"], properties: {
@@ -57,12 +68,14 @@ export const ORGANIZATION_RUNTIME_SCHEDULE_SCHEMA = {
     { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { const: "disabled" } } },
     { type: "object", additionalProperties: false, required: ["kind", "interval_ms", "prompt"], properties: {
       kind: { const: "every" }, interval_ms: { type: "integer", minimum: 1, maximum: ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS },
-      prompt: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" }
+      prompt: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
+      jitter_seconds: { type: "integer", minimum: 0, maximum: ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS }
     } },
     { type: "object", additionalProperties: false, required: ["kind", "cron", "timezone", "prompt"], properties: {
       kind: { const: "cron" }, cron: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
       timezone: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
-      prompt: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" }
+      prompt: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
+      jitter_seconds: { type: "integer", minimum: 0, maximum: ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS }
     } }
   ]
 } as const;

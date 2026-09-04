@@ -110,8 +110,12 @@ async function probeExecutable(agentId: string, executablePath: string, engine: 
     const child = spawn(executablePath, ["--version"], { cwd: path.dirname(executablePath), env: { PATH: process.env.PATH ?? path.dirname(executablePath), LANG: "C", LC_ALL: "C" }, stdio: ["ignore", "pipe", "pipe"] });
     let bytes = 0;
     const output: Buffer[] = [];
-    const consume = (chunk: Buffer): void => { bytes += chunk.length; if (bytes > MAX_PROBE_BYTES) child.kill("SIGKILL"); else output.push(chunk); };
-    child.stdout?.on("data", consume); child.stderr?.on("data", consume);
+    // Only stdout fingerprints the capability. stderr carries environment-dependent
+    // diagnostics -- allocator warnings under emulation, for one -- which are not a
+    // capability change but would otherwise invalidate the engine mid-run.
+    const consume = (chunk: Buffer, capture: boolean): void => { bytes += chunk.length; if (bytes > MAX_PROBE_BYTES) child.kill("SIGKILL"); else if (capture) output.push(chunk); };
+    child.stdout?.on("data", (chunk: Buffer) => consume(chunk, true));
+    child.stderr?.on("data", (chunk: Buffer) => consume(chunk, false));
     const timer = setTimeout(() => child.kill("SIGKILL"), 3_000);
     child.once("error", () => { clearTimeout(timer); reject(unavailable(agentId, engine, "engine capability probe failed")); });
     child.once("close", (code) => {

@@ -59,6 +59,37 @@ export type CliEngineKind = "agy" | "codex" | "grok";
  */
 export const AGY_MAX_TOOL_TURNS = 16;
 
+/**
+ * Codex's per-wake bounds, and the one place they are decided.
+ *
+ * `maxToolTurns` mediates only daimon-MCP tool calls; Codex's own shell
+ * (`exec_command`) is never routed through that gate, so a single Codex turn
+ * previously had no ceiling at all — one production wake ran 23:32→23:42
+ * (unbounded wall clock) making 51 shell calls. Codex's `--json` stream
+ * reports token usage exactly once, on `turn.completed` — there is no
+ * incremental total to watch mid-turn (verified against a live multi-tool-call
+ * turn: `item.completed` fires once per tool call, but usage is reported only
+ * on the single terminal `turn.completed`) — so the token ceiling is the best
+ * bound obtainable from that wire shape: it converts an over-budget turn into
+ * an explicit, killed, named failure instead of a silent success, and the
+ * wall-clock timeout is what actually interrupts a runaway turn in progress.
+ */
+export const DEFAULT_CODEX_WAKE_TIMEOUT_MS = 240_000;
+export const DEFAULT_CODEX_WAKE_TOKEN_CEILING = 300_000;
+export const DAIMON_CODEX_WAKE_TIMEOUT_MS_ENV = "DAIMON_CODEX_WAKE_TIMEOUT_MS";
+export const DAIMON_CODEX_WAKE_TOKEN_CEILING_ENV = "DAIMON_CODEX_WAKE_TOKEN_CEILING";
+
+const positiveInteger = (value: string | undefined, fallback: number, name: string): number => {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
+  return parsed;
+};
+export const resolveCodexWakeTimeoutMs = (environment: NodeJS.ProcessEnv = process.env): number =>
+  positiveInteger(environment[DAIMON_CODEX_WAKE_TIMEOUT_MS_ENV], DEFAULT_CODEX_WAKE_TIMEOUT_MS, DAIMON_CODEX_WAKE_TIMEOUT_MS_ENV);
+export const resolveCodexWakeTokenCeiling = (environment: NodeJS.ProcessEnv = process.env): number =>
+  positiveInteger(environment[DAIMON_CODEX_WAKE_TOKEN_CEILING_ENV], DEFAULT_CODEX_WAKE_TOKEN_CEILING, DAIMON_CODEX_WAKE_TOKEN_CEILING_ENV);
+
 export type CliEngineOptions = {
   readonly commandArgs?: readonly string[];
   readonly command?: string;
@@ -78,6 +109,8 @@ export type CliEngineOptions = {
   readonly verifyGrokSandbox?: () => Promise<void>;
   readonly grokSandboxProfile?: string;
   readonly grokBrokerTurn?: (prompt: string, mcpEndpoint: string, signal: AbortSignal) => Promise<string>;
+  /** Codex only: kills the child and fails the wake once a turn's own reported usage reaches this. */
+  readonly codexTokenCeiling?: number;
   /**
    * Advisory per-turn metering sink for the engines whose headless stream
    * reports token usage and that do not run behind the Grok engine broker
@@ -290,8 +323,14 @@ class CliSession implements PiSessionLike {
       // exit before an asynchronous post-spawn authority recheck completes.
       const outputPromise = readChild(child, deadline === undefined ? undefined : Math.max(1, deadline - Date.now()), secretValues, {
         failureClassifier: this.options.engine === "grok" ? classifyGrokAuthenticationDiagnostic : undefined,
-        retainStdoutTail: this.options.engine === "grok"
+        retainNdjson: this.options.engine === "codex" ? "codex" : undefined,
+        retainStdoutTail: this.options.engine === "grok",
+        timeoutErrorMessage: this.options.engine === "codex" && this.options.timeoutMs !== undefined
+          ? `Codex wake exceeded its ${this.options.timeoutMs}ms per-wake wall-clock bound`
+          : undefined,
+        codexTokenCeiling: this.options.engine === "codex" ? this.options.codexTokenCeiling : undefined
       });
+      void outputPromise.catch(() => undefined);
       await this.options.verifyRuntimePaths?.();
       await this.options.verifyExecutable?.();
       const childOutput = await outputPromise;

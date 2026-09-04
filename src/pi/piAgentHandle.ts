@@ -155,6 +155,7 @@ export class PiAgentHandle implements AgentHandle {
     try {
       if (this.wakeEnvironmentContext !== undefined) {
         this.wakeEnvironmentContext.current = event.id;
+        this.wakeEnvironmentContext.spokeFor = undefined;
       }
       if (this.worldToolContext !== undefined) {
         this.worldToolContext.current = worldContext;
@@ -288,9 +289,18 @@ export class PiAgentHandle implements AgentHandle {
         worldTrajectory,
         worldTrajectoryIdentity: this.worldTrajectoryIdentity
       });
+      // An agent with a mounted `moltnet_send` tool has exactly one
+      // legitimate publication channel; its terminal text is always a
+      // private note to the runtime — whether it spoke, stayed silent, or
+      // narrated a failure back as its reply — never the bridge's
+      // terminal-text fallback (moltnet/internal/bridge/daimon/
+      // receipt_tracker.go), which is reserved for agents with no send tool
+      // at all. `outputText` itself stays intact for the turn trace and
+      // memory record above.
+      const hasSendCapability = this.wakeEnvironmentContext?.hasSendCapability === true;
       return {
         agentId: this.id,
-        text: outputText,
+        text: hasSendCapability ? "" : outputText,
         durationMs: Date.now() - startedAtMs
       };
     } catch (error) {
@@ -363,6 +373,7 @@ export class PiAgentHandle implements AgentHandle {
       selectedSession?.session.bindWake?.();
       if (this.wakeEnvironmentContext !== undefined) {
         this.wakeEnvironmentContext.current = undefined;
+        this.wakeEnvironmentContext.spokeFor = undefined;
       }
       if (this.memoryToolContext !== undefined) {
         this.memoryToolContext.current = undefined;

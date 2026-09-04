@@ -7,7 +7,7 @@ import {
   type OrganizationRuntimeShutdownCompletion,
   type OrganizationRuntimeWakeRequest
 } from "./organizationRuntime.js";
-import { createOrganizationRuntimeHost } from "./organizationRuntimeHost.js";
+import { createOrganizationRuntimeHost, engineFailureDetail } from "./organizationRuntimeHost.js";
 import { WakeFuse, type WakeFuseTripReason } from "./wakeFuse.js";
 import { createScheduleController, type ScheduleController, type ScheduleControllerOptions } from "./schedule.js";
 import { WakeAcceptanceConflictError, WakeAcceptanceStore, WakeExecutionClaimLostError, publicAcceptance, type WakeAcceptanceStoreTestOptions } from "./wakeAcceptanceStore.js";
@@ -116,14 +116,14 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
             event: { version: "noopolis.daimon.wake.v1", id: current.delivery_id, kind: current.event.kind, text: current.event.text, occurredAt: current.event.occurred_at }
           };
           let result;
-          try { result = await host.wake(request); } catch {
+          try { result = await host.wake(request); } catch (error) {
             clearInterval(heartbeat); await renewal;
-            await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "failed", "engine_failed"); return;
+            await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "failed", "engine_failed", engineFailureDetail(error)); return;
           }
           clearInterval(heartbeat); await renewal;
           // A crash here retries at least once with the same delivery/wake id.
           if (result.status === "completed") await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "completed", undefined, result.text);
-          else if (result.status === "failed") await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "failed", "engine_failed");
+          else if (result.status === "failed") await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "failed", "engine_failed", result.detail);
           else if (result.status === "stopped") await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "stopped", result.code === "host_stopped" ? "host_stopped" : "host_stopping");
           else await activeStore.transitionClaimed(current.acceptance_id, activeClaim, "failed", result.code === "queue_full" ? "queue_full" : result.code === "unknown_agent" ? "unknown_agent" : "host_stopped");
           return;
@@ -196,9 +196,15 @@ function createControl(config: OrganizationRuntimeConfig, host: CoreHost, option
   };
 
   return {
-    wake: async (request) => stopping
-      ? { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" }
-      : await host.wake(request),
+    wake: async (request) => {
+      if (stopping) return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
+      const verdict = await fuse!.admit(request.agentId, request.event.id);
+      if (verdict.state === "tripped") {
+        await tripFuse(verdict.reason);
+        return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
+      }
+      return await host.wake(request);
+    },
     health: async (agentId) => await host.health(agentId),
     activity: async (request) => await host.activity(request),
     async start(): Promise<void> {

@@ -1,10 +1,12 @@
 import {
   ORGANIZATION_RUNTIME_MAX_AGENTS,
   ORGANIZATION_RUNTIME_MAX_CONFIG_BYTES,
+  ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_STRING_BYTES,
   ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES,
   ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS,
+  ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS,
   ORGANIZATION_RUNTIME_V2_VERSION,
   ORGANIZATION_RUNTIME_VERSION,
   type OrganizationRuntimeAgentConfig,
@@ -69,7 +71,7 @@ function parseAgent(value: unknown, label: string, v2: boolean): OrganizationRun
   const agent = object(value, label);
   exactOptional(agent, v2 ? ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine", "schedule"] : ["id", "name", "instructions", "workspacePath", "runtimeHomePath", "engine"], ["mcp", "moltnet", "memory"], label);
   return {
-    id: nonEmpty(agent.id, `${label}.id`), name: nonEmpty(agent.name, `${label}.name`), instructions: nonEmpty(agent.instructions, `${label}.instructions`), workspacePath: absolute(agent.workspacePath, `${label}.workspacePath`), runtimeHomePath: absolute(agent.runtimeHomePath, `${label}.runtimeHomePath`), engine: engine(agent.engine, `${label}.engine`),
+    id: nonEmpty(agent.id, `${label}.id`), name: nonEmpty(agent.name, `${label}.name`), instructions: nonEmpty(agent.instructions, `${label}.instructions`, ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS), workspacePath: absolute(agent.workspacePath, `${label}.workspacePath`), runtimeHomePath: absolute(agent.runtimeHomePath, `${label}.runtimeHomePath`), engine: engine(agent.engine, `${label}.engine`),
     ...(v2 ? { schedule: schedule(agent.schedule, `${label}.schedule`) } : {}),
     ...(agent.mcp === undefined ? {} : { mcp: mcpServers(agent.mcp, `${label}.mcp`) }),
     ...(agent.moltnet === undefined ? {} : { moltnet: moltnet(agent.moltnet, `${label}.moltnet`) }),
@@ -119,19 +121,25 @@ function schedule(value: unknown, label: string): OrganizationRuntimeSchedule {
   const input = object(value, label); const kind = string(input.kind, `${label}.kind`);
   if (kind === "disabled") { exact(input, ["kind"], label); return { kind }; }
   if (kind === "every") {
-    exact(input, ["kind", "interval_ms", "prompt"], label);
+    exactOptional(input, ["kind", "interval_ms", "prompt"], ["jitter_seconds"], label);
     if (typeof input.interval_ms !== "number" || !Number.isInteger(input.interval_ms) || input.interval_ms < 1 || input.interval_ms > ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS) throw new TypeError(`${label}.interval_ms is outside its bound`);
-    return { kind, interval_ms: input.interval_ms, prompt: nonEmpty(input.prompt, `${label}.prompt`) };
+    return { kind, interval_ms: input.interval_ms, prompt: nonEmpty(input.prompt, `${label}.prompt`), ...jitterSeconds(input.jitter_seconds, label) };
   }
   if (kind === "cron") {
-    exact(input, ["kind", "cron", "timezone", "prompt"], label);
+    exactOptional(input, ["kind", "cron", "timezone", "prompt"], ["jitter_seconds"], label);
     const cron = nonEmpty(input.cron, `${label}.cron`).trim().replace(/\s+/gu, " ");
     if (!validCron(cron) || !cronCalendarPossible(cron)) throw new TypeError(`${label}.cron is invalid or impossible`);
     const timezone = nonEmpty(input.timezone, `${label}.timezone`);
     try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); } catch { throw new TypeError(`${label}.timezone is not an IANA timezone`); }
-    return { kind, cron, timezone, prompt: nonEmpty(input.prompt, `${label}.prompt`) };
+    return { kind, cron, timezone, prompt: nonEmpty(input.prompt, `${label}.prompt`), ...jitterSeconds(input.jitter_seconds, label) };
   }
   throw new TypeError(`${label}.kind is not supported`);
+}
+
+function jitterSeconds(value: unknown, label: string): { jitter_seconds?: number } {
+  if (value === undefined) return {};
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS) throw new TypeError(`${label}.jitter_seconds is outside its bound`);
+  return { jitter_seconds: value };
 }
 
 function validCron(value: string): boolean {
@@ -238,8 +246,8 @@ function isolatedMemory(agents: readonly OrganizationRuntimeAgentConfig[]): void
     }
   }
 }
-function string(value: unknown, label: string): string { if (typeof value !== "string") throw new TypeError(`${label} must be a string`); if (Buffer.byteLength(value, "utf8") > ORGANIZATION_RUNTIME_MAX_STRING_BYTES || Array.from(value).length > ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS) throw new TypeError(`${label} exceeds the runtime string limit`); return value; }
-function nonEmpty(value: unknown, label: string): string { const result = string(value, label); if (!result.trim()) throw new TypeError(`${label} must not be empty`); return result; }
+function string(value: unknown, label: string, maxCodepoints: number = ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS): string { if (typeof value !== "string") throw new TypeError(`${label} must be a string`); if (Buffer.byteLength(value, "utf8") > ORGANIZATION_RUNTIME_MAX_STRING_BYTES || Array.from(value).length > maxCodepoints) throw new TypeError(`${label} exceeds the runtime string limit`); return value; }
+function nonEmpty(value: unknown, label: string, maxCodepoints?: number): string { const result = string(value, label, maxCodepoints); if (!result.trim()) throw new TypeError(`${label} must not be empty`); return result; }
 function absolute(value: unknown, label: string): string { const result = nonEmpty(value, label); if (!path.posix.isAbsolute(result)) throw new TypeError(`${label} must be an absolute POSIX path`); const normalized = path.posix.normalize(result); if (normalized === "/") throw new TypeError(`${label} must not overlap filesystem root`); return normalized.replace(/\/+$/, ""); }
 function envName(value: unknown, label: string): string { const result = nonEmpty(value, label); if (!ENV_NAME.test(result)) throw new TypeError(`${label} must be a safe environment variable name`); return result; }
 function port(value: unknown, label: string): number { if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 65_535) throw new TypeError(`${label} must be an integer between 1 and 65535`); return value; }

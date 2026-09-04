@@ -3,10 +3,12 @@ import {
   ORGANIZATION_RUNTIME_CONFIG_V2_SCHEMA,
   ORGANIZATION_RUNTIME_MAX_AGENTS,
   ORGANIZATION_RUNTIME_MAX_CONFIG_BYTES,
+  ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_STRING_BYTES,
   ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES,
   ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS,
+  ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS,
   ORGANIZATION_RUNTIME_V2_VERSION,
   ORGANIZATION_RUNTIME_VERSION
 } from "../contracts/organizationRuntimeContract.js";
@@ -16,10 +18,12 @@ export {
   ORGANIZATION_RUNTIME_CONFIG_V2_SCHEMA,
   ORGANIZATION_RUNTIME_MAX_AGENTS,
   ORGANIZATION_RUNTIME_MAX_CONFIG_BYTES,
+  ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_STRING_BYTES,
   ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS,
   ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES,
   ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS,
+  ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS,
   ORGANIZATION_RUNTIME_V2_VERSION,
   ORGANIZATION_RUNTIME_VERSION
 };
@@ -31,8 +35,8 @@ export type OrganizationRuntimeMoltnet = Readonly<{ cliPath: string; configPath:
 export type OrganizationRuntimeMemory = Readonly<{ runtimeHomePath: string; source?: string; tokenBudget?: number }>;
 export type OrganizationRuntimeSchedule =
   | Readonly<{ kind: "disabled" }>
-  | Readonly<{ kind: "every"; interval_ms: number; prompt: string }>
-  | Readonly<{ kind: "cron"; cron: string; timezone: string; prompt: string }>;
+  | Readonly<{ kind: "every"; interval_ms: number; prompt: string; jitter_seconds?: number }>
+  | Readonly<{ kind: "cron"; cron: string; timezone: string; prompt: string; jitter_seconds?: number }>;
 export type OrganizationRuntimeAgentConfig = Readonly<{ id: string; name: string; instructions: string; workspacePath: string; runtimeHomePath: string; engine: OrganizationRuntimeEngineIntent; schedule?: OrganizationRuntimeSchedule; mcp?: readonly OrganizationRuntimeMcpServer[]; moltnet?: OrganizationRuntimeMoltnet; memory?: OrganizationRuntimeMemory }>;
 export type OrganizationRuntimeHostConfig = Readonly<{ bindHost: string; port: number; /** Variable name only; never secret configuration data. */ controlTokenEnv: string }>;
 export type OrganizationRuntimeConfig = Readonly<{ version: typeof ORGANIZATION_RUNTIME_VERSION | typeof ORGANIZATION_RUNTIME_V2_VERSION; host: OrganizationRuntimeHostConfig; agents: readonly OrganizationRuntimeAgentConfig[] }>;
@@ -43,7 +47,7 @@ export type OrganizationRuntimeWakeResult =
   | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "completed"; agentId: string; wakeId: string; text: string; durationMs: number }>
   | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "rejected"; agentId: string; wakeId: string; code: "invalid_request" | "unauthorized" | "unknown_agent" | "queue_full" }>
   | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "stopped"; agentId: string; wakeId: string; code: "host_stopping" | "host_stopped" | "queued_wake_stopped" | "active_wake_aborted" }>
-  | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "failed"; agentId: string; wakeId: string; code: "engine_failed" }>;
+  | Readonly<{ version: "noopolis.daimon.wake-result.v1"; status: "failed"; agentId: string; wakeId: string; code: "engine_failed"; detail?: string }>;
 export type OrganizationRuntimeAgentHealth = Readonly<{ agentId: string; engine: OrganizationRuntimeEngineIntent["kind"]; state: OrganizationRuntimeLifecycleState | "idle" | "running" | "failed" }>;
 export type OrganizationRuntimeHealth = Readonly<{ version: "noopolis.daimon.organization-runtime-health.v1"; state: OrganizationRuntimeLifecycleState; agents: readonly OrganizationRuntimeAgentHealth[] }>;
 export type OrganizationRuntimeActivityRequest = Readonly<{ agentId?: string; cursor?: string; limit: number }>;

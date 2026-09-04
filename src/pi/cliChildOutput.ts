@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 
 import { redactCredentialText } from "../core/credentialRedaction.js";
+import { decodeCodexTurnUsage } from "./codexHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 
 /** Maximum assistant reply bytes retained from stdout. */
@@ -34,7 +35,20 @@ export const readChild = (
   secretValues: readonly string[],
   options: Readonly<{
     failureClassifier?: (diagnostic: string) => Error | undefined;
+    retainNdjson?: "codex";
     retainStdoutTail?: boolean;
+    /** Overrides the generic wall-clock-timeout message so the caller can name which bound was hit. */
+    timeoutErrorMessage?: string;
+    /**
+     * Per-wake token ceiling for a Codex turn (`retainNdjson: "codex"` only).
+     * Codex's `--json` stream reports usage exactly once, on `turn.completed`
+     * — there is no incremental total to watch mid-turn — so this is
+     * enforced at the earliest and only moment the crossing is observable:
+     * the instant that frame is parsed off the stream. Crossing it kills the
+     * child immediately (rather than letting an over-budget turn resolve as
+     * a normal success) and fails the wake with a bound-named error.
+     */
+    codexTokenCeiling?: number;
   }> = {}
 ): Promise<string> => new Promise((resolve, reject) => {
   trackCliChild(child);
@@ -43,6 +57,8 @@ export const readChild = (
   let droppingStdoutLine = false;
   let stderrTail = Buffer.alloc(0);
   let stdoutBytes = 0;
+  let stdoutRemainder = Buffer.alloc(0);
+  let droppingNdjsonLine = false;
   let settled = false;
   let cleanupStarted = false;
   let classifiedFailure: Error | undefined;
@@ -72,6 +88,50 @@ export const readChild = (
   const retainStdout = (chunk: Buffer): void => {
     const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     classifyFailure(value);
+    if (options.retainNdjson !== undefined) {
+      let incoming = value;
+      if (droppingNdjsonLine) {
+        const newline = incoming.indexOf(0x0a);
+        if (newline < 0) return;
+        droppingNdjsonLine = false;
+        incoming = incoming.subarray(newline + 1);
+      }
+      stdoutRemainder = Buffer.concat([stdoutRemainder, incoming]);
+      let newline: number;
+      while ((newline = stdoutRemainder.indexOf(0x0a)) >= 0) {
+        const line = stdoutRemainder.subarray(0, newline).toString("utf8");
+        stdoutRemainder = Buffer.from(stdoutRemainder.subarray(newline + 1));
+        let frame: Record<string, unknown> | undefined;
+        try { const parsed = JSON.parse(line) as unknown; if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) frame = parsed as Record<string, unknown>; } catch { /* decoder reports malformed retained protocol lines */ }
+        if (frame === undefined) { stdout.push(Buffer.from(`${line}\n`)); continue; }
+        const item = typeof frame.item === "object" && frame.item !== null && !Array.isArray(frame.item) ? frame.item as Record<string, unknown> : undefined;
+        if (frame.type === "item.completed" && (item?.type === "command_execution" || item?.type === "mcp_tool_call")) {
+          stdout.push(Buffer.from(`${JSON.stringify({ type: frame.type, item: { type: item.type } })}\n`));
+        } else if ((frame.type === "item.completed" && item?.type === "agent_message") || frame.type === "turn.completed" || frame.type === "turn.failed") {
+          if (frame.type === "turn.completed" && options.codexTokenCeiling !== undefined) {
+            const usage = decodeCodexTurnUsage(frame, 0);
+            if (usage !== undefined && usage.total >= options.codexTokenCeiling) {
+              abort(new Error(`Codex wake exceeded its ${options.codexTokenCeiling}-token per-wake ceiling (turn usage ${usage.total} tokens)`));
+              return;
+            }
+          }
+          stdout.push(Buffer.from(`${line}\n`));
+        }
+        stdoutBytes = stdout.reduce((total, part) => total + part.length, 0);
+        if (stdoutBytes > CLI_ENGINE_MAX_OUTPUT_BYTES) { abort(new Error(`CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`)); return; }
+      }
+      if (stdoutRemainder.length > CLI_ENGINE_MAX_OUTPUT_BYTES) {
+        const prefix = stdoutRemainder.subarray(0, Math.min(stdoutRemainder.length, 4096)).toString("utf8");
+        if (/"type"\s*:\s*"item\.completed"/u.test(prefix)
+          && !/"type"\s*:\s*"agent_message"/u.test(prefix)) {
+          const toolType = prefix.match(/"type"\s*:\s*"(command_execution|mcp_tool_call)"/u)?.[1];
+          if (toolType !== undefined) stdout.push(Buffer.from(`${JSON.stringify({ type: "item.completed", item: { type: toolType } })}\n`));
+          stdoutRemainder = Buffer.alloc(0);
+          droppingNdjsonLine = true;
+        } else abort(new Error(`CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`));
+      }
+      return;
+    }
     if (options.retainStdoutTail === true) {
       let remainder = value;
       if (droppingStdoutLine) {
@@ -114,10 +174,11 @@ export const readChild = (
   };
   child.stdout?.on("data", retainStdout);
   child.stderr?.on("data", retainStderrTail);
-  const timer = timeoutMs === undefined ? undefined : setTimeout(() => abort(new Error("CLI engine timed out")), timeoutMs);
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => abort(new Error(options.timeoutErrorMessage ?? "CLI engine timed out")), timeoutMs);
   child.once("error", abort);
   child.once("close", (code, signal) => {
     if (cleanupStarted) return;
+    if (options.retainNdjson !== undefined && stdoutRemainder.length > 0) stdout.push(stdoutRemainder);
     const retainedStdout = options.retainStdoutTail === true ? stdoutTail : Buffer.concat(stdout);
     if (code === 0) {
       settle(() => resolve(redactChildOutput(retainedStdout.toString("utf8"), secretValues).trim()));

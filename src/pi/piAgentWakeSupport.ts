@@ -45,7 +45,35 @@ export interface PiSessionLike {
   disposeAsync?(): Promise<void>;
 }
 
-export type PiWakeEnvironmentContextRef = { current?: string };
+export type PiWakeEnvironmentContextRef = {
+  current?: string;
+  /**
+   * Set to the delivery id of the current wake once `moltnet_send` has been
+   * accepted during it. Bookkeeping only: it no longer gates whether the wake
+   * completion path publishes terminal text (see `hasSendCapability`), but it
+   * still records, per wake, whether this agent actually spoke. Never a
+   * boolean: a boolean could survive a stale reset and silently misattribute
+   * a later wake.
+   */
+  spokeFor?: string;
+  /**
+   * Set once per agent, at harness construction, to whether a `moltnet_send`
+   * tool is mounted for it (`piHarness.ts`, from `productionTools`) — never
+   * reset per wake, unlike `current`/`spokeFor`.
+   *
+   * A turn that fails partway (a tool error the model narrates back as
+   * terminal text, e.g. "Blocked: Moltnet auth is not mounted...") still
+   * completes structurally and used to publish that narration through the
+   * terminal-text fallback even though `moltnet_send` was never actually
+   * called — a second, unintended echo into the room. An agent with a
+   * mounted send tool has exactly one legitimate publication channel
+   * (`moltnet_send`); its terminal text is always a private note to the
+   * runtime, whether it spoke, stayed silent, or failed. Only an agent with
+   * no send tool at all keeps the documented terminal-text fallback
+   * (`moltnet/internal/bridge/daimon/AGENTS.md`).
+   */
+  hasSendCapability?: boolean;
+};
 
 export async function disposePiSession(session: PiSessionLike): Promise<void> {
   await Promise.resolve(session.dispose());

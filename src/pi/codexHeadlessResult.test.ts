@@ -142,3 +142,32 @@ test("turn.failed without a reply rejects", () => {
 test("empty streams reject", () => {
   assert.throws(() => decodeCodexHeadlessTurn(""), /empty stream/u);
 });
+
+/**
+ * Captured verbatim from a live `codex exec --json` turn inside the Daimon
+ * runtime image (codex-cli 0.142.3) and matched by 0.151.0 on the host: Codex
+ * emits no `cache_write_input_tokens` at all. Requiring it made every real
+ * turn decode to `usage: undefined`, which is why the organization's usage
+ * ledger stayed empty across six paid codex wakes.
+ */
+test("a live Codex turn.completed omits cache_write_input_tokens and is still metered", () => {
+  const decoded = decodeCodexHeadlessTurn(stream(
+    { type: "thread.started", thread_id: "01a05507-5624-7522-bb2d-c944ee87c85b" },
+    { type: "turn.started" },
+    { type: "item.completed", item: { id: "item_0", type: "mcp_tool_call", server: "daimon", tool: "probe_ping", status: "completed" } },
+    { type: "item.completed", item: { id: "item_1", type: "agent_message", text: "PROBE-OK:hello-world" } },
+    { type: "turn.completed", usage: { input_tokens: 36_631, cached_input_tokens: 32_896, output_tokens: 85, reasoning_output_tokens: 24 } }
+  ));
+  assert.deepEqual(decoded.usage, {
+    input: 36_631, output: 85, cacheRead: 32_896, cacheWrite: 0, total: 36_716, calls: 1, notionalUsd: 0, complete: true
+  });
+});
+
+test("a malformed cache_write_input_tokens still degrades the whole usage block", () => {
+  const decoded = decodeCodexHeadlessTurn(stream(
+    { type: "item.completed", item: { type: "agent_message", text: "ok" } },
+    { type: "turn.completed", usage: usage({ cache_write_input_tokens: -1 }) }
+  ));
+  assert.equal(decoded.usage, undefined);
+  assert.equal(decoded.text, "ok");
+});

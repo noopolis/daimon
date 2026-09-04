@@ -76,9 +76,30 @@ test("control accepts before a fake turn finishes, redacts status, and rejects c
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("direct v1 wakes are durably admitted by the armed fuse", async () => {
+  const root = await privateRoot();
+  const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-direct-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
+  const core = new FakeCoreHost();
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
+    acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
+    fuseEnvironment: fuseEnvironment(usage, 2)
+  });
+  try {
+    await control.start();
+    const pending = control.wake({ token, agentId: "alpha", event: { version: "noopolis.daimon.wake.v1", id: "direct-1", kind: "manual", text: "wake", occurredAt: "2026-08-17T00:00:00.000Z" } });
+    await core.waitForWakes(1);
+    const admissions = (await import("node:fs/promises")).readFile(path.join(usage, "admissions.jsonl"), "utf8");
+    assert.match(await admissions, /"delivery":"direct-1"/u);
+    core.release();
+    assert.equal((await pending).status, "completed");
+  } finally { core.release(); await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
+});
+
 test("a fuse trip terminalizes queued deliveries, refuses arrivals, and awaits running work", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   const core = new FakeCoreHost();
   const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
     acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
@@ -113,6 +134,7 @@ test("a fuse trip terminalizes queued deliveries, refuses arrivals, and awaits r
 test("a persistence that lands after the trip snapshot is terminalized", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   let reachedTransition!: () => void;
   const transitionReached = new Promise<void>((resolve) => { reachedTransition = resolve; });
   let releaseTransition!: () => void;
@@ -150,6 +172,7 @@ test("a persistence that lands after the trip snapshot is terminalized", async (
 test("a request admitted before a concurrent trip is refused before persistence", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   let admissionReached!: () => void;
   const reachedAdmission = new Promise<void>((resolve) => { admissionReached = resolve; });
   let releaseAdmission!: () => void;
@@ -185,6 +208,7 @@ test("a request admitted before a concurrent trip is refused before persistence"
 test("invalid authorities consume no admission and duplicate delivery is fuse-idempotent", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   const core = new FakeCoreHost();
   const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
     acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
@@ -210,6 +234,7 @@ test("invalid authorities consume no admission and duplicate delivery is fuse-id
 test("startup into an operator-tripped fuse terminalizes recovery without dispatch", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   try {
     const setup = await WakeAcceptanceStore.open(root, testStoreOptions);
     const parked = await setup.accept(parseWakeAcceptanceRequest(request("parked")));
@@ -230,6 +255,7 @@ test("startup into an operator-tripped fuse terminalizes recovery without dispat
 test("startup into a ceiling-tripped fuse terminalizes accepted recovery without dispatch", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   try {
     const setup = await WakeAcceptanceStore.open(root, testStoreOptions);
     const parked = await setup.accept(parseWakeAcceptanceRequest(request("ceiling-parked")));
@@ -269,6 +295,7 @@ test("startup fails before the core host when the fuse cannot open", async () =>
 test("a rejecting polled trip does not become an unhandled rejection", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+  await writeFile(path.join(usage, "usage.jsonl"), "");
   const unhandled: unknown[] = [];
   const listener = (reason: unknown): void => { unhandled.push(reason); };
   process.on("unhandledRejection", listener);
@@ -309,7 +336,7 @@ test("schedule acceptance preserves its WakeEvent kind through the durable FIFO"
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("completed replies are bounded and credential-redacted while failures carry no text", async () => {
+test("completed replies and engine failure causes are both bounded and credential-redacted", async () => {
   const root = await privateRoot();
   try {
     const store = await WakeAcceptanceStore.open(root, testStoreOptions);
@@ -328,11 +355,13 @@ test("completed replies are bounded and credential-redacted while failures carry
     const failedClaim = await store.acquireClaim(failed.record.acceptance_id, "99999999-9999-4999-8999-999999999999");
     if (failedClaim.state !== "acquired") throw new Error("claim missing");
     await store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "running");
-    await store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "failed", "engine_failed");
-    assert.equal("text" in (await store.status(failed.record.acceptance_id) ?? {}), false);
+    // The engine failure cause is persisted: without it an engine_failed receipt is
+    // undiagnosable. Text on a non-terminal or stopped state is still rejected.
+    await store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "failed", "engine_failed", "grok: permission denied");
+    assert.equal((await store.status(failed.record.acceptance_id) ?? {}).text, "grok: permission denied");
     await assert.rejects(
-      store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "failed", "engine_failed", "must not persist"),
-      /completion text requires completed state/
+      store.transitionClaimed(failed.record.acceptance_id, failedClaim.claim, "stopped", "host_stopped", "must not persist"),
+      /text requires completed or failed state/
     );
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -582,7 +611,28 @@ class FakeCoreHost implements Pick<OrganizationRuntimeHost, "start" | "wake" | "
   async health(_agentId?: string) { return { version: "noopolis.daimon.organization-runtime-health.v1" as const, state: "running" as const, agents: [{ agentId: "alpha", engine: "codex" as const, state: "idle" as const }] }; }
   async activity() { return { version: "noopolis.daimon.organization-runtime-activity.v1" as const, items: [] }; }
   async stop() { this.release(); return { version: "noopolis.daimon.organization-runtime-stop.v1" as const, state: "stopped" as const }; }
-  async waitForWakes(count: number): Promise<void> { if (this.wakes.length >= count) return; await new Promise<void>((resolve) => this.wakeWaiters.push({ count, resolve })); }
+  /**
+   * Bounded on purpose. An unbounded wait turns "the wake never arrived" into
+   * a hang that only the CI job timeout ends, which reports as a 25-minute
+   * red job with no failing assertion. The deadline matches `waitFor` below so
+   * a missing wake fails fast and says how many actually arrived.
+   */
+  async waitForWakes(count: number, timeoutMs = 15_000): Promise<void> {
+    if (this.wakes.length >= count) return;
+    await new Promise<void>((resolve, reject) => {
+      const waiter = {
+        count,
+        resolve: () => { clearTimeout(timer); resolve(); }
+      };
+      const timer = setTimeout(() => {
+        const index = this.wakeWaiters.indexOf(waiter);
+        if (index >= 0) this.wakeWaiters.splice(index, 1);
+        reject(new Error(`timed out waiting for ${count} wakes; observed ${this.wakes.length}`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.wakeWaiters.push(waiter);
+    });
+  }
   release(): void { this.releaseTurn?.(); }
 }
 

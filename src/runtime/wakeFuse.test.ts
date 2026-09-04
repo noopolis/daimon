@@ -8,8 +8,18 @@ import { WakeFuse, WAKE_FUSE_VERSION } from "./wakeFuse.js";
 
 const withDirectory = async (body: (directory: string) => Promise<void>): Promise<void> => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "daimon-wake-fuse-"));
+  // Provisioning creates the usage ledger alongside the fuse directory in
+  // production (`turnUsageLedger.ts`); `WakeFuse.open` now requires it to
+  // exist and be readable before arming (see the missing/unreadable-ledger
+  // tests below), so every test gets that same provisioned starting point
+  // unless it deliberately exercises the missing/unreadable case itself.
   try { await body(directory); } finally { await rm(directory, { recursive: true, force: true }); }
 };
+const withProvisionedDirectory = async (body: (directory: string) => Promise<void>): Promise<void> =>
+  await withDirectory(async (directory) => {
+    await writeFile(path.join(directory, "usage.jsonl"), "");
+    await body(directory);
+  });
 const environment = (directory: string, values: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
   DAIMON_WAKE_FUSE_DIRECTORY: directory,
   DAIMON_WAKE_FUSE_EPOCH: "test-epoch",
@@ -21,20 +31,20 @@ const environment = (directory: string, values: NodeJS.ProcessEnv = {}): NodeJS.
 const records = async (directory: string): Promise<Array<Record<string, unknown>>> =>
   (await readFile(path.join(directory, "admissions.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
 
-test("admission below the ceiling appends exactly one admission", async () => await withDirectory(async (directory) => {
+test("admission below the ceiling appends exactly one admission", async () => await withProvisionedDirectory(async (directory) => {
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory) });
   assert.deepEqual(await fuse.admit("alpha", "one"), { state: "admitted" });
   assert.equal((await records(directory)).filter((record) => record.kind === "admission").length, 1);
 }));
 
-test("the n+1 admission trips before append", async () => await withDirectory(async (directory) => {
+test("the n+1 admission trips before append", async () => await withProvisionedDirectory(async (directory) => {
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory) });
   await fuse.admit("alpha", "one"); await fuse.admit("alpha", "two");
   assert.deepEqual(await fuse.admit("alpha", "three"), { state: "tripped", reason: "wake_ceiling" });
   assert.equal((await records(directory)).filter((record) => record.kind === "admission").length, 2);
 }));
 
-test("concurrent organization admissions cannot overshoot the wake ceiling", async () => await withDirectory(async (directory) => {
+test("concurrent organization admissions cannot overshoot the wake ceiling", async () => await withProvisionedDirectory(async (directory) => {
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE_MAX_WAKES: "8" }) });
   const verdicts = await Promise.all(Array.from({ length: 9 }, (_, index) => fuse.admit(`agent-${index % 4}`, `delivery-${index}`)));
   assert.equal(verdicts.filter((verdict) => verdict.state === "admitted").length, 8);
@@ -62,7 +72,7 @@ test("pre-epoch token rows alone cannot trip the ceiling", async () => await wit
   assert.deepEqual(await fuse.admit("alpha", "one"), { state: "admitted" });
 }));
 
-test("same-epoch open reloads prior admissions", async () => await withDirectory(async (directory) => {
+test("same-epoch open reloads prior admissions", async () => await withProvisionedDirectory(async (directory) => {
   const first = await WakeFuse.open({ organizationKey: "org", environment: environment(directory) });
   await first.admit("alpha", "one");
   await first.admit("alpha", "two");
@@ -71,7 +81,7 @@ test("same-epoch open reloads prior admissions", async () => await withDirectory
   assert.deepEqual(await reopened.admit("alpha", "three"), { state: "tripped", reason: "wake_ceiling" });
 }));
 
-test("a wake ceiling trip is restored with its reason in the same epoch", async () => await withDirectory(async (directory) => {
+test("a wake ceiling trip is restored with its reason in the same epoch", async () => await withProvisionedDirectory(async (directory) => {
   const first = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE_MAX_WAKES: "1" }) });
   await first.admit("alpha", "one");
   assert.deepEqual(await first.admit("alpha", "two"), { state: "tripped", reason: "wake_ceiling" });
@@ -79,13 +89,13 @@ test("a wake ceiling trip is restored with its reason in the same epoch", async 
   assert.equal(reopened.tripped(), "wake_ceiling");
 }));
 
-test("a corrupt trip marker fails closed", async () => await withDirectory(async (directory) => {
+test("a corrupt trip marker fails closed", async () => await withProvisionedDirectory(async (directory) => {
   await writeFile(path.join(directory, "fuse.trip.json"), "not-json\n");
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory) });
   assert.equal(fuse.tripped(), "ledger_unavailable");
 }));
 
-test("a valid trip marker from a previous epoch does not trip a new epoch", async () => await withDirectory(async (directory) => {
+test("a valid trip marker from a previous epoch does not trip a new epoch", async () => await withProvisionedDirectory(async (directory) => {
   const first = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE_EPOCH: "old", DAIMON_WAKE_FUSE_MAX_WAKES: "1" }) });
   await first.admit("alpha", "one");
   await first.admit("alpha", "two");
@@ -106,19 +116,19 @@ test("a malformed usage line alone is skipped", async () => await withDirectory(
   assert.deepEqual(await fuse.admit("alpha", "one"), { state: "admitted" });
 }));
 
-test("admissions from another epoch do not count", async () => await withDirectory(async (directory) => {
+test("admissions from another epoch do not count", async () => await withProvisionedDirectory(async (directory) => {
   await writeFile(path.join(directory, "admissions.jsonl"), `${JSON.stringify({ v: WAKE_FUSE_VERSION, kind: "admission", epoch: "old", at: new Date().toISOString(), agent: "alpha", delivery: "old" })}\n`);
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE_MAX_WAKES: "1" }) });
   assert.deepEqual(await fuse.admit("alpha", "new"), { state: "admitted" });
 }));
 
-test("operator stop trips on the next admission", async () => await withDirectory(async (directory) => {
+test("operator stop trips on the next admission", async () => await withProvisionedDirectory(async (directory) => {
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory) });
   await writeFile(path.join(directory, "fuse.stop"), "ignored");
   assert.deepEqual(await fuse.admit("alpha", "one"), { state: "tripped", reason: "operator_stop" });
 }));
 
-test("an append failure refuses admission and fails closed", async () => await withDirectory(async (directory) => {
+test("an append failure refuses admission and fails closed", async () => await withProvisionedDirectory(async (directory) => {
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory) });
   await unlink(path.join(directory, "admissions.jsonl"));
   await mkdir(path.join(directory, "admissions.jsonl"));
@@ -146,14 +156,14 @@ test("off admits unconditionally without storage and every other setting is reje
   await assert.rejects(WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE: "on" }) }), /exactly 'off'/);
 }));
 
-test("once tripped the fuse never admits again", async () => await withDirectory(async (directory) => {
+test("once tripped the fuse never admits again", async () => await withProvisionedDirectory(async (directory) => {
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE_MAX_WAKES: "1" }) });
   await fuse.admit("alpha", "one");
   assert.equal((await fuse.admit("alpha", "two")).state, "tripped");
   assert.equal((await fuse.admit("alpha", "one")).state, "tripped");
 }));
 
-test("a failed trip-marker write is retried without reopening admission", async () => await withDirectory(async (directory) => {
+test("a failed trip-marker write is retried without reopening admission", async () => await withProvisionedDirectory(async (directory) => {
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE_MAX_WAKES: "1" }) });
   await fuse.admit("alpha", "one");
   await mkdir(path.join(directory, "fuse.trip.json"));
@@ -162,4 +172,60 @@ test("a failed trip-marker write is retried without reopening admission", async 
   assert.deepEqual(await fuse.admit("alpha", "three"), { state: "tripped", reason: "wake_ceiling" });
   const reopened = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE_MAX_WAKES: "1" }) });
   assert.equal(reopened.tripped(), "wake_ceiling");
+}));
+
+/**
+ * Defect 1: the production incident this covers is exactly a ledger that was
+ * never created — `recordTurnUsage` swallows its own append failures, and
+ * `sumTokens` treats a missing ledger as an empty one, so a broken
+ * provisioning/permissions setup let a 17.6M-token run pass a 5M ceiling
+ * untouched. An unenforceable ceiling (missing directory, or a present file
+ * that cannot be read) must fail the organization's startup with a clear
+ * message. A brand-new organization — directory provisioned, file simply
+ * never written yet — must still be able to start: that is a true zero, not
+ * an unknown one.
+ */
+test("a missing usage ledger directory refuses to arm the fuse", async () => await withDirectory(async (directory) => {
+  // The wake-fuse directory itself exists (mkdtemp), but the ledger is
+  // relocated under a subdirectory Spawnfile never provisioned.
+  const neverProvisioned = path.join(directory, "not-provisioned", "usage.jsonl");
+  await assert.rejects(
+    WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_TURN_USAGE_LEDGER_PATH: neverProvisioned }) }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /usage ledger/u);
+      assert.match(error.message, /missing/u);
+      assert.match(error.message, new RegExp(neverProvisioned.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      return true;
+    }
+  );
+}));
+
+test("a provisioned directory with no ledger file yet creates an empty ledger and arms", async () => await withDirectory(async (directory) => {
+  const ledgerPath = path.join(directory, "usage.jsonl");
+  // No usage.jsonl written: the directory (mkdtemp) stands in for Spawnfile's
+  // provisioned, chowned volume; the file is what a fresh organization has
+  // never written.
+  const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory) });
+  const created = await readFile(ledgerPath, "utf8");
+  assert.equal(created, "");
+  // Zero recorded spend is a true zero: nothing trips and the wake admits.
+  assert.deepEqual(await fuse.admit("alpha", "one"), { state: "admitted" });
+}));
+
+test("an unreadable usage ledger (a directory where the file should be) refuses to arm the fuse", async () => await withDirectory(async (directory) => {
+  await mkdir(path.join(directory, "usage.jsonl"));
+  await assert.rejects(
+    WakeFuse.open({ organizationKey: "org", environment: environment(directory) }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /missing or unreadable/u);
+      return true;
+    }
+  );
+}));
+
+test("DAIMON_WAKE_FUSE=off never touches the usage ledger, missing or not", async () => await withDirectory(async (directory) => {
+  const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE: "off" }) });
+  assert.deepEqual(await fuse.admit("alpha", "one"), { state: "admitted" });
 }));
