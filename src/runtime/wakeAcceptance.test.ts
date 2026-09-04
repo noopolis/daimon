@@ -611,7 +611,28 @@ class FakeCoreHost implements Pick<OrganizationRuntimeHost, "start" | "wake" | "
   async health(_agentId?: string) { return { version: "noopolis.daimon.organization-runtime-health.v1" as const, state: "running" as const, agents: [{ agentId: "alpha", engine: "codex" as const, state: "idle" as const }] }; }
   async activity() { return { version: "noopolis.daimon.organization-runtime-activity.v1" as const, items: [] }; }
   async stop() { this.release(); return { version: "noopolis.daimon.organization-runtime-stop.v1" as const, state: "stopped" as const }; }
-  async waitForWakes(count: number): Promise<void> { if (this.wakes.length >= count) return; await new Promise<void>((resolve) => this.wakeWaiters.push({ count, resolve })); }
+  /**
+   * Bounded on purpose. An unbounded wait turns "the wake never arrived" into
+   * a hang that only the CI job timeout ends, which reports as a 25-minute
+   * red job with no failing assertion. The deadline matches `waitFor` below so
+   * a missing wake fails fast and says how many actually arrived.
+   */
+  async waitForWakes(count: number, timeoutMs = 15_000): Promise<void> {
+    if (this.wakes.length >= count) return;
+    await new Promise<void>((resolve, reject) => {
+      const waiter = {
+        count,
+        resolve: () => { clearTimeout(timer); resolve(); }
+      };
+      const timer = setTimeout(() => {
+        const index = this.wakeWaiters.indexOf(waiter);
+        if (index >= 0) this.wakeWaiters.splice(index, 1);
+        reject(new Error(`timed out waiting for ${count} wakes; observed ${this.wakes.length}`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.wakeWaiters.push(waiter);
+    });
+  }
   release(): void { this.releaseTurn?.(); }
 }
 
