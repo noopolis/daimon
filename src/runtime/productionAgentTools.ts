@@ -12,6 +12,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 import type { OrganizationRuntimeAgentConfig, OrganizationRuntimeMcpServer } from "./organizationRuntime.js";
 import { moltnetOperationResult, readMoltnetPages } from "./moltnetMachineRead.js";
+import { McpToolCallError, MCP_TOOL_RESULT_MAX_BYTES, renderMcpToolResult, replayMcpReceipt, type McpUpstreamResult } from "./mcpToolResult.js";
 import { cliChildEnvironment } from "../pi/cliEnvironment.js";
 import type { PiWakeEnvironmentContextRef } from "../pi/piAgentWakeSupport.js";
 
@@ -54,13 +55,26 @@ async function mcpTools(agent: OrganizationRuntimeAgentConfig, server: Organizat
       async execute(_id, params) {
         if (!wakeContext.current) throw new Error("MCP call requires an active wake");
         const actionId = `${DAIMON_ACTION_ID_PREFIX}${createHash("sha256").update(JSON.stringify([wakeContext.current, agent.id, server.name, name, params])).digest("hex")}`;
-        const prior = await priorReceipt(agent, actionId); if (prior !== undefined) return { content: [{ type: "text", text: JSON.stringify(prior) }], details: prior };
+        const prior = await priorReceipt(agent, actionId);
+        if (prior !== undefined) { const replayed = replayMcpReceipt(server.name, name, prior); return { content: replayed.content as never, details: replayed.details }; }
         const active = await connect(agent, server);
         try {
           const result = await active.client.callTool({ name, arguments: params as Record<string, unknown> }, undefined, { timeout: TIMEOUT });
-          const bytes = JSON.stringify(result); if (Buffer.byteLength(bytes) > MAX_RESULT) throw new Error("MCP tool result exceeds bound");
-          await receipt(agent, { kind: "mcp", agent_id: agent.id, engine: agent.engine.kind, delivery_id: actionId, server: server.name, tool: name, digest: digest(bytes), is_error: result.isError === true });
-          return { content: "content" in result ? result.content as never : [{ type: "text", text: bytes }], details: { server: server.name, tool: name, is_error: result.isError === true } };
+          const bytes = JSON.stringify(result);
+          const envelope = { kind: "mcp", agent_id: agent.id, engine: agent.engine.kind, delivery_id: actionId, server: server.name, tool: name, digest: digest(bytes) };
+          let rendered;
+          try {
+            // The SDK types this as a union with the pre-schema compatibility shape;
+            // only the three fields `McpUpstreamResult` names are ever read.
+            rendered = renderMcpToolResult({ server: server.name, tool: name, result: result as McpUpstreamResult, maxBytes: MCP_TOOL_RESULT_MAX_BYTES });
+          } catch (error) {
+            // The server's own reason is the receipt's payload as much as the
+            // model's: a replayed failure has to fail for the same stated cause.
+            if (error instanceof McpToolCallError) await receipt(agent, { ...envelope, is_error: true, error: error.reason });
+            throw error;
+          }
+          await receipt(agent, { ...envelope, is_error: false, result: { content: rendered.content, details: rendered.details }, ...(rendered.truncated ? { truncated: true } : {}) });
+          return { content: rendered.content as never, details: rendered.details };
         } finally { await active.close(); }
       }
     } as ToolDefinition;
