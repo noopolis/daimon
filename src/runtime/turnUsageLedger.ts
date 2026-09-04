@@ -57,10 +57,11 @@ export type TurnUsageMeasurement = Readonly<{
 /**
  * Every engine whose headless stream reports its own token accounting.
  *
- * Codex is deliberately absent: it is uninstrumented, and `spawnfile usage`
- * renders a Codex agent as a dashed roster row rather than as zero usage.
+ * Codex, AGY, and Grok all publish decoded terminal-stream accounting here.
+ * Spawnfile's reader mirrors this list and is updated separately in packet
+ * A1b; until then, a reader that rejects `codex` will drop every Codex line.
  */
-export const TURN_USAGE_ENGINES = ["agy", "grok"] as const;
+export const TURN_USAGE_ENGINES = ["agy", "codex", "grok"] as const;
 
 export type TurnUsageEntry = Readonly<{
   agent: string;

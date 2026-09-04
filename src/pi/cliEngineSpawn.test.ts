@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { readChild } from "./cliSession.js";
-import { GROK_STRICT_SANDBOX_PROFILE, renderGrokSandboxArgs, spawnEngine } from "./cliEngineSpawn.js";
+import { GROK_STRICT_SANDBOX_PROFILE, renderCodexArgs, renderGrokSandboxArgs, spawnEngine } from "./cliEngineSpawn.js";
 
 test("autonomous Codex and Grok launches omit wall-clock and turn caps", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-unbounded-cli-"));
@@ -31,6 +31,18 @@ test("autonomous Codex and Grok launches omit wall-clock and turn caps", async (
       }
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Codex output, sandbox, config, and cwd boundaries reject caller overrides", () => {
+  for (const injected of [
+    "--json", "--sandbox", "--sandbox=read-only", "--dangerously-bypass-approvals-and-sandbox",
+    "--output-last-message", "-c", "--config", "--skip-git-repo-check", "--color", "-C", "--cd"
+  ]) {
+    assert.throws(() => renderCodexArgs({ commandArgs: [injected] }, "/workspace", undefined), /Daimon-owned/u);
+  }
+  const args = renderCodexArgs({ commandArgs: ["--effort", "high"] }, "/workspace", undefined);
+  assert.deepEqual(args.slice(0, 2), ["--effort", "high"]);
+  assert.equal(args.includes("--json"), true);
 });
 
 test("Grok's kernel sandbox authority cannot be weakened by injected CLI arguments", async () => {

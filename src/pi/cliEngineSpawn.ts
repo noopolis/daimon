@@ -11,12 +11,18 @@ export const renderGrokSandboxArgs = (
   profile: string
 ): string[] => [...assertSafeGrokCommandArgs(commandArgs), "--sandbox", profile];
 
+/**
+ * Codex's `--json` stream is unconditional: it is the only output shape that
+ * carries `turn.completed.usage`, and an unmetered Codex turn is one whose
+ * subscription cost is invisible. The guarded arguments make this Daimon's
+ * security and metering boundary rather than a caller-controlled format.
+ */
 export const renderCodexArgs = (
   options: Pick<CliEngineOptions, "commandArgs">,
   cwd: string,
   endpoint: string | undefined,
   sandbox: string = process.env.DAIMON_CODEX_SANDBOX ?? "danger-full-access"
-): string[] => [...(options.commandArgs ?? []), "exec", "--sandbox", sandbox, "--skip-git-repo-check", "--color", "never", "-C", cwd,
+): string[] => [...assertSafeCodexCommandArgs(options.commandArgs), "exec", "--sandbox", sandbox, "--skip-git-repo-check", "--color", "never", "--json", "-C", cwd,
   "-c", `mcp_servers.daimon.url=${endpoint}`, "-"];
 
 /**
@@ -101,6 +107,15 @@ const assertSafeAgyCommandArgs = (args: readonly string[] | undefined): readonly
   const values = args ?? [];
   if (values.some((value) => /^(?:--dangerously-skip-permissions|--sandbox|--output-format|--print|--prompt|--prompt-interactive|--mode|--continue|--conversation|-p|-i|-c)(?:=|$)/u.test(value))) {
     throw new Error("AGY security-boundary arguments are Daimon-owned");
+  }
+  return values;
+};
+
+/** Caller arguments cannot reopen Codex's sandbox, output, cwd, or config boundary. */
+const assertSafeCodexCommandArgs = (args: readonly string[] | undefined): readonly string[] => {
+  const values = args ?? [];
+  if (values.some((value) => /^(?:--json|--sandbox|--dangerously-bypass-approvals-and-sandbox|--output-last-message|--config|--skip-git-repo-check|--color|--cd|-c|-C)(?:=|$)/u.test(value))) {
+    throw new Error("Codex security-boundary arguments are Daimon-owned");
   }
   return values;
 };

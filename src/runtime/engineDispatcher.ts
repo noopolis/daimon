@@ -94,6 +94,11 @@ function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: stri
         // appends to. `recordTurnUsage` is advisory and never rejects.
         onTurnUsage: (usage) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "agy", usage }) }
       : { engine, redactedEnvironmentNames: [controlTokenEnv], identityPrompt: identityEnvelope(agent), command: executablePath, engineHomePath, verifyExecutable, verifyRuntimePaths,
+        ...(engine === "codex" ? {
+          // Codex has no broker to meter it, so publish terminal-frame usage
+          // to the shared advisory ledger after the session publishes.
+          onTurnUsage: (usage: import("../pi/codexHeadlessResult.js").CodexTurnUsage) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "codex", usage })
+        } : {}),
         ...(engine==="grok"&&grokBroker!==undefined?{}:{credentialSecretValues: () => readPortableEngineCredentialSecrets(agent.id, engine, engineHomePath)}),
         ...(engine==="grok"&&grokBroker!==undefined?{grokBrokerTurn:(prompt:string,endpoint:string,signal:AbortSignal)=>grokBroker.turn(agent.id,wakeEnvironmentContext.current??"wake",prompt,endpoint,signal)}:{}),
         ...(engine === "grok" && verifyGrokSandbox ? {

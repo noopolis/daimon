@@ -121,6 +121,18 @@ export class WakeAcceptanceStore {
     return this.serialize(async () => await this.transitionNow(acceptanceId, state, code));
   }
 
+  /** Fuse race seam: never stops a record that was claimed after enumeration. */
+  transitionAcceptedToStopped(acceptanceId: string): Promise<Stored> {
+    return this.serialize(async () => {
+      const target = await this.pathForAcceptanceId(acceptanceId);
+      const prior = await this.read(target);
+      if (prior.state !== "accepted") return prior;
+      const record: Stored = { ...prior, state: "stopped", code: "host_stopping", updated_at: new Date().toISOString() };
+      await this.replace(target, record);
+      return record;
+    });
+  }
+
   acquireClaim(acceptanceId: string, ownerId: string): Promise<WakeExecutionClaimResult> {
     return this.serialize(async () => {
       if (!uuid(ownerId)) throw new Error("wake execution owner is invalid");
