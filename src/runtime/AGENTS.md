@@ -75,6 +75,23 @@ zero-filled row is byte-identical to a real zero. Before this, a breached
 ceiling recorded nothing at all and its spend survived only inside the error
 message.
 
+`turnRequestLedger.ts` is a *second*, separate stream beside that ledger, not a
+wider row in it. The per-wake row is one sum and cannot distinguish a fixed
+prefix replayed once per model request from a context that grows per request —
+the two call for opposite optimisations, and 55 production wakes (14,890,263
+input against 159,726 output, context flat at 23–32k per request regardless of
+request count) look like the first without proving it. `../pi/cliChildOutput.ts`
+carries the thread id off Codex's own `thread.started` frame, and
+`../pi/codexRolloutUsage.ts` reads that thread's rollout under
+`$CODEX_HOME/sessions/**` for the per-request `token_usage_record` frames the
+`--json` stream never emits. Rows go to `requests.jsonl` beside `usage.jsonl`
+(`DAIMON_TURN_REQUESTS_LEDGER_PATH` relocates it) under the same invariants: a
+wake whose rollout is absent, unreadable, or undecodable writes *nothing*,
+because a fabricated zero is byte-identical to a measured one; and every failure
+is swallowed, because instrumentation must never fail a wake. The existing
+ledger's version, path, and field list are untouched, so Spawnfile's
+`v`-pinned reader is unaffected.
+
 `testRuntimeSubprocess.ts` is an unexported, explicit-test-only JSONL process
 surface for exercising the real control, schedule, and acceptance paths with a
 controlled clock and deterministic scripted cognition. Its ephemeral loopback

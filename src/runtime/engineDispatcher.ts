@@ -15,6 +15,7 @@ import type { EngineBrokerTurnClient } from "./engineBrokerControlClient.js";
 import { createProductionAgentTools } from "./productionAgentTools.js";
 import { AGY_SUBSCRIPTION_REALM, GROK_SUBSCRIPTION_REALM } from "./contractManifest.js";
 import { recordTurnUsage, resolveTurnUsageLedgerPath } from "./turnUsageLedger.js";
+import { recordCodexTurnRequests } from "./turnRequestLedger.js";
 
 /**
  * The production-only bridge from a closed runtime engine intent to Daimon's
@@ -99,6 +100,11 @@ function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: stri
           // to the shared advisory ledger — on the wake that published and on
           // the wake that failed after Codex had already reported its spend.
           onTurnUsage: (usage: import("../pi/codexHeadlessResult.js").CodexTurnUsage, outcome: import("./turnUsageLedger.js").TurnUsageOutcome) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "codex", usage, outcome }),
+          // Per-model-request accounting, written to its own stream beside the
+          // ledger. `engineHomePath` is the agent's `CODEX_HOME`
+          // (`../pi/cliEnvironment.ts`), so the rollout Codex just wrote for
+          // this thread is under it. Advisory throughout: it never fails a wake.
+          onCodexTurnRequests: (threadId: string) => recordCodexTurnRequests({ agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", codexHome: engineHomePath, threadId }).then(() => undefined),
           // `maxToolTurns` mediates only daimon-MCP tool calls; Codex's own
           // shell is never routed through it, so it gets its own wall-clock
           // and per-wake token bounds instead (`cliSession.ts`).
