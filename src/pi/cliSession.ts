@@ -14,7 +14,8 @@ import {
   classifyGrokAuthenticationDiagnostic,
   GrokSubscriptionAuthenticationRejectedError
 } from "../runtime/grokAuthenticationError.js";
-import { readChild } from "./cliChildOutput.js";
+import type { TurnUsageOutcome } from "../runtime/turnUsageLedger.js";
+import { cliChildFailureReason, readChild, tagCliChildFailure } from "./cliChildOutput.js";
 import { cliChildEnvironment } from "./cliEnvironment.js";
 import {
   GROK_STRICT_SANDBOX_PROFILE,
@@ -30,7 +31,7 @@ import {
   type CliMcpRegistration
 } from "./cliMcpRegistration.js";
 import { decodeAgyHeadlessTurn, type AgyTurnUsage } from "./agyHeadlessResult.js";
-import { decodeCodexHeadlessTurn, type CodexTurnUsage } from "./codexHeadlessResult.js";
+import { decodeCodexHeadlessTurn, type CodexHeadlessTurn, type CodexTurnUsage } from "./codexHeadlessResult.js";
 import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
@@ -119,8 +120,13 @@ export type CliEngineOptions = {
    * Advisory per-turn metering sink for the engines whose headless stream
    * reports token usage and that do not run behind the Grok engine broker
    * (which meters its own turns). It never fails a turn that published.
+   *
+   * `outcome` says whether the wake this usage belongs to went on to succeed.
+   * A failed wake spends real money, so it is metered exactly like a
+   * successful one and the reader tells them apart by this field rather than
+   * by the row's absence.
    */
-  readonly onTurnUsage?: (usage: AgyTurnUsage | CodexTurnUsage) => Promise<void>;
+  readonly onTurnUsage?: (usage: AgyTurnUsage | CodexTurnUsage, outcome: TurnUsageOutcome) => Promise<void>;
 } & ({
   readonly engine: "codex" | "grok";
 } | {
@@ -156,6 +162,16 @@ const childSecretValues = (redactedNames: readonly string[]): readonly string[] 
   redactedNames
     .map((name) => process.env[name])
     .filter((value): value is string => typeof value === "string" && value.length > 0);
+
+/**
+ * A turn Codex reported usage for but that the decoder refuses to publish is
+ * still a turn that spent tokens. Tagging the rejection is what lets the
+ * ledger row name why the wake failed instead of matching on message prose.
+ */
+const decodeCodexTurn = (output: string): CodexHeadlessTurn => {
+  try { return decodeCodexHeadlessTurn(output); }
+  catch (error) { throw tagCliChildFailure(error, "turn_rejected"); }
+};
 
 const captureCleanup = async (current: unknown, action: () => Promise<void>): Promise<unknown> => {
   try { await action(); } catch (error) { return current ?? error; }
@@ -267,6 +283,13 @@ class CliSession implements PiSessionLike {
     let mount: { endpoint: string; close: () => Promise<void> } | undefined;
     let registration: CliMcpRegistration | undefined;
     let turnUsage: AgyTurnUsage | CodexTurnUsage | undefined;
+    // What Codex reported mid-stream, kept separately from the decoded turn so
+    // a wake that never reaches its decoder still owes the ledger a row.
+    // `undefined` stays `undefined`: a wake with no `turn.completed` frame
+    // reported nothing, and a zero-filled row would be indistinguishable from
+    // a real zero.
+    let streamedUsage: CodexTurnUsage | undefined;
+    let streamedCompletions = 0;
     let child: ChildProcess | undefined;
     let output: string | undefined;
     let cleanupFailure: unknown;
@@ -332,7 +355,8 @@ class CliSession implements PiSessionLike {
         timeoutErrorMessage: this.options.engine === "codex" && this.options.timeoutMs !== undefined
           ? `Codex wake exceeded its ${this.options.timeoutMs}ms per-wake wall-clock bound`
           : undefined,
-        codexTokenCeiling: this.options.engine === "codex" ? this.options.codexTokenCeiling : undefined
+        codexTokenCeiling: this.options.engine === "codex" ? this.options.codexTokenCeiling : undefined,
+        onCodexTurnCompleted: (usage) => { streamedCompletions += 1; if (usage !== undefined) streamedUsage = usage; }
       });
       void outputPromise.catch(() => undefined);
       await this.options.verifyRuntimePaths?.();
@@ -340,7 +364,7 @@ class CliSession implements PiSessionLike {
       const childOutput = await outputPromise;
       if (this.options.engine === "grok") output = decodeGrokHeadlessResult(childOutput);
       else if (this.options.engine === "codex") {
-        const decoded = decodeCodexHeadlessTurn(childOutput);
+        const decoded = decodeCodexTurn(childOutput);
         output = decoded.text;
         turnUsage = decoded.usage;
       }
@@ -363,6 +387,16 @@ class CliSession implements PiSessionLike {
     }
     const refreshedCredentialSecrets = await this.options.credentialSecretValues?.().catch(() => []) ?? [];
     const finalSecrets = [...secretValues, ...refreshedCredentialSecrets];
+    // A wake that Codex reported usage for is metered whether or not it goes on
+    // to publish. Every throw below this point used to drop that spend on the
+    // floor, so a breached ceiling, an expired wall clock, a non-zero exit, or
+    // a turn judged unpublishable all cost money the ledger never saw.
+    const failure = promptFailure ?? cleanupFailure;
+    if (failure !== undefined) {
+      await this.publishTurnUsage(turnUsage ?? this.streamedFallback(streamedUsage, streamedCompletions), {
+        status: "failed", reason: cliChildFailureReason(failure) ?? "unknown"
+      });
+    }
     if (promptFailure !== undefined) {
       const authRejection = this.options.engine === "grok" ? asGrokAuthenticationRejected(promptFailure) : undefined;
       if (authRejection !== undefined) throw new GrokSubscriptionAuthenticationRejectedError(
@@ -390,9 +424,25 @@ class CliSession implements PiSessionLike {
     // Meter only after the turn has published, and never let metering failure
     // rewrite a turn that succeeded: the same ordering rule the Grok engine
     // broker states in `finishBrokerTurnWithUsage`.
-    if (turnUsage !== undefined) {
-      await this.options.onTurnUsage?.(turnUsage).catch(() => undefined);
-    }
+    await this.publishTurnUsage(turnUsage ?? this.streamedFallback(streamedUsage, streamedCompletions), { status: "completed" });
+  }
+
+  /**
+   * The mid-stream reading is trustworthy only under `decodeCodexHeadlessTurn`'s
+   * own rule: exactly one `turn.completed` frame. Codex may omit, repeat, or
+   * follow that frame with another, and two completions leave no defensible
+   * answer for which one the wake actually spent — so the fallback declines
+   * rather than guessing. No frame at all means nothing was reported and
+   * nothing is written.
+   */
+  private streamedFallback(usage: CodexTurnUsage | undefined, completions: number): CodexTurnUsage | undefined {
+    return completions === 1 ? usage : undefined;
+  }
+
+  /** Advisory: metering never fails, delays, or rewrites the wake it describes. */
+  private async publishTurnUsage(usage: AgyTurnUsage | CodexTurnUsage | undefined, outcome: TurnUsageOutcome): Promise<void> {
+    if (usage === undefined) return;
+    try { await this.options.onTurnUsage?.(usage, outcome).catch(() => undefined); } catch { /* advisory */ }
   }
 
   public dispose(): void {

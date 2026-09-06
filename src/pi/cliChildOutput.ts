@@ -1,7 +1,8 @@
 import type { ChildProcess } from "node:child_process";
 
 import { redactCredentialText } from "../core/credentialRedaction.js";
-import { decodeCodexTurnUsage } from "./codexHeadlessResult.js";
+import type { TurnUsageFailureReason } from "../runtime/turnUsageLedger.js";
+import { decodeCodexTurnUsage, type CodexTurnUsage } from "./codexHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 
 /** Maximum assistant reply bytes retained from stdout. */
@@ -9,6 +10,27 @@ export const CLI_ENGINE_MAX_OUTPUT_BYTES = 64 * 1024;
 /** Tail bytes retained from stderr only for a failed-child diagnostic. */
 export const CLI_ENGINE_MAX_DIAGNOSTIC_BYTES = 768;
 const CLI_ENGINE_FAILURE_SCAN_CHARS = 256;
+
+/**
+ * Which bound or condition failed a wake, carried on the error object itself.
+ *
+ * The caller needs this to label the usage row a failed wake still owes the
+ * ledger, and matching on the message text would make that label depend on
+ * prose. The tag is a non-enumerable symbol property, so it never widens the
+ * error's serialized form and never reaches a diagnostic string.
+ */
+const CLI_CHILD_FAILURE_REASON = Symbol("daimon.cliChildFailureReason");
+
+export const tagCliChildFailure = <T>(error: T, reason: TurnUsageFailureReason): T => {
+  if (!(error instanceof Error)) return error;
+  Object.defineProperty(error, CLI_CHILD_FAILURE_REASON, { value: reason, enumerable: false });
+  return error;
+};
+
+export const cliChildFailureReason = (error: unknown): TurnUsageFailureReason | undefined =>
+  error instanceof Error
+    ? (error as Error & { [CLI_CHILD_FAILURE_REASON]?: TurnUsageFailureReason })[CLI_CHILD_FAILURE_REASON]
+    : undefined;
 
 const redactChildOutput = (value: string, secretValues: readonly string[]): string => {
   return redactCredentialText(value, secretValues, CLI_ENGINE_MAX_OUTPUT_BYTES);
@@ -49,6 +71,18 @@ export const readChild = (
      * a normal success) and fails the wake with a bound-named error.
      */
     codexTokenCeiling?: number;
+    /**
+     * Called once per parsed `turn.completed` frame (`retainNdjson: "codex"`
+     * only), with that frame's decoded usage — or `undefined` when the usage
+     * block is absent or malformed, which is never substituted with zeros.
+     *
+     * This is the only point at which a wake that is about to be killed — by
+     * the ceiling, by the wall clock, or by a non-zero exit — can still hand
+     * over what Codex reported it spent. Every path downstream of here either
+     * rejects or discards the stream, which is how a breached wake's usage
+     * used to survive only inside an error message.
+     */
+    onCodexTurnCompleted?: (usage: CodexTurnUsage | undefined) => void;
   }> = {}
 ): Promise<string> => new Promise((resolve, reject) => {
   trackCliChild(child);
@@ -59,6 +93,7 @@ export const readChild = (
   let stdoutBytes = 0;
   let stdoutRemainder = Buffer.alloc(0);
   let droppingNdjsonLine = false;
+  let ndjsonCalls = 0;
   let settled = false;
   let cleanupStarted = false;
   let classifiedFailure: Error | undefined;
@@ -106,29 +141,34 @@ export const readChild = (
         if (frame === undefined) { stdout.push(Buffer.from(`${line}\n`)); continue; }
         const item = typeof frame.item === "object" && frame.item !== null && !Array.isArray(frame.item) ? frame.item as Record<string, unknown> : undefined;
         if (frame.type === "item.completed" && (item?.type === "command_execution" || item?.type === "mcp_tool_call")) {
+          ndjsonCalls += 1;
           stdout.push(Buffer.from(`${JSON.stringify({ type: frame.type, item: { type: item.type } })}\n`));
         } else if ((frame.type === "item.completed" && item?.type === "agent_message") || frame.type === "turn.completed" || frame.type === "turn.failed") {
-          if (frame.type === "turn.completed" && options.codexTokenCeiling !== undefined) {
-            const usage = decodeCodexTurnUsage(frame, 0);
-            if (usage !== undefined && usage.total >= options.codexTokenCeiling) {
-              abort(new Error(`Codex wake exceeded its ${options.codexTokenCeiling}-token per-wake ceiling (turn usage ${usage.total} tokens)`));
+          if (frame.type === "turn.completed") {
+            // Decode and publish first, kill second: the ceiling breach is the
+            // one path guaranteed to destroy this stream, so the accounting
+            // has to leave the reader before the child does.
+            const usage = decodeCodexTurnUsage(frame, ndjsonCalls);
+            options.onCodexTurnCompleted?.(usage);
+            if (options.codexTokenCeiling !== undefined && usage !== undefined && usage.total >= options.codexTokenCeiling) {
+              abort(tagCliChildFailure(new Error(`Codex wake exceeded its ${options.codexTokenCeiling}-token per-wake ceiling (turn usage ${usage.total} tokens)`), "token_ceiling"));
               return;
             }
           }
           stdout.push(Buffer.from(`${line}\n`));
         }
         stdoutBytes = stdout.reduce((total, part) => total + part.length, 0);
-        if (stdoutBytes > CLI_ENGINE_MAX_OUTPUT_BYTES) { abort(new Error(`CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`)); return; }
+        if (stdoutBytes > CLI_ENGINE_MAX_OUTPUT_BYTES) { abort(tagCliChildFailure(new Error(`CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`), "output_limit")); return; }
       }
       if (stdoutRemainder.length > CLI_ENGINE_MAX_OUTPUT_BYTES) {
         const prefix = stdoutRemainder.subarray(0, Math.min(stdoutRemainder.length, 4096)).toString("utf8");
         if (/"type"\s*:\s*"item\.completed"/u.test(prefix)
           && !/"type"\s*:\s*"agent_message"/u.test(prefix)) {
           const toolType = prefix.match(/"type"\s*:\s*"(command_execution|mcp_tool_call)"/u)?.[1];
-          if (toolType !== undefined) stdout.push(Buffer.from(`${JSON.stringify({ type: "item.completed", item: { type: toolType } })}\n`));
+          if (toolType !== undefined) { ndjsonCalls += 1; stdout.push(Buffer.from(`${JSON.stringify({ type: "item.completed", item: { type: toolType } })}\n`)); }
           stdoutRemainder = Buffer.alloc(0);
           droppingNdjsonLine = true;
-        } else abort(new Error(`CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`));
+        } else abort(tagCliChildFailure(new Error(`CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`), "output_limit"));
       }
       return;
     }
@@ -157,7 +197,7 @@ export const readChild = (
     }
     stdoutBytes += value.length;
     if (stdoutBytes > CLI_ENGINE_MAX_OUTPUT_BYTES) {
-      abort(new Error(`CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`));
+      abort(tagCliChildFailure(new Error(`CLI engine output exceeded ${CLI_ENGINE_MAX_OUTPUT_BYTES} bytes`), "output_limit"));
       return;
     }
     stdout.push(value);
@@ -174,7 +214,7 @@ export const readChild = (
   };
   child.stdout?.on("data", retainStdout);
   child.stderr?.on("data", retainStderrTail);
-  const timer = timeoutMs === undefined ? undefined : setTimeout(() => abort(new Error(options.timeoutErrorMessage ?? "CLI engine timed out")), timeoutMs);
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => abort(tagCliChildFailure(new Error(options.timeoutErrorMessage ?? "CLI engine timed out"), "wake_timeout")), timeoutMs);
   child.once("error", abort);
   child.once("close", (code, signal) => {
     if (cleanupStarted) return;
@@ -184,8 +224,8 @@ export const readChild = (
       settle(() => resolve(redactChildOutput(retainedStdout.toString("utf8"), secretValues).trim()));
       return;
     }
-    settle(() => reject(classifiedFailure ?? new Error(`CLI engine exited ${code ?? signal}${childDiagnostic(
+    settle(() => reject(tagCliChildFailure(classifiedFailure ?? new Error(`CLI engine exited ${code ?? signal}${childDiagnostic(
       retainedStdout.toString("utf8"), stderrTail.toString("utf8"), secretValues
-    )}`)));
+    )}`), "engine_exit")));
   });
 });

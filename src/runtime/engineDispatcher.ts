@@ -92,12 +92,13 @@ function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: stri
         // AGY has no broker to meter it, so the session hands its decoded
         // terminal-frame usage straight to the same ledger the Grok broker
         // appends to. `recordTurnUsage` is advisory and never rejects.
-        onTurnUsage: (usage) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "agy", usage }) }
+        onTurnUsage: (usage, outcome) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "agy", usage, outcome }) }
       : { engine, redactedEnvironmentNames: [controlTokenEnv], identityPrompt: identityEnvelope(agent), command: executablePath, engineHomePath, verifyExecutable, verifyRuntimePaths,
         ...(engine === "codex" ? {
           // Codex has no broker to meter it, so publish terminal-frame usage
-          // to the shared advisory ledger after the session publishes.
-          onTurnUsage: (usage: import("../pi/codexHeadlessResult.js").CodexTurnUsage) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "codex", usage }),
+          // to the shared advisory ledger — on the wake that published and on
+          // the wake that failed after Codex had already reported its spend.
+          onTurnUsage: (usage: import("../pi/codexHeadlessResult.js").CodexTurnUsage, outcome: import("./turnUsageLedger.js").TurnUsageOutcome) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "codex", usage, outcome }),
           // `maxToolTurns` mediates only daimon-MCP tool calls; Codex's own
           // shell is never routed through it, so it gets its own wall-clock
           // and per-wake token bounds instead (`cliSession.ts`).

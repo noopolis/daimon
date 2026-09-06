@@ -37,7 +37,8 @@ test("a record is one complete newline-terminated line carrying only numbers plu
     v: TURN_USAGE_LEDGER_VERSION, agent: "cogsworth", wake: "wake-1", engine: "grok",
     at: "2026-08-29T01:12:04.000Z",
     input: 8_746, output: 29, cache_read: 5_760, cache_write: 12,
-    total: 14_547, calls: 1, notional_usd: 0.0035, complete: true
+    total: 14_547, calls: 1, notional_usd: 0.0035, complete: true,
+    outcome: "completed"
   });
   assert.equal("org" in JSON.parse(line), false, "identity comes from which container was queried, not from the record");
 });
@@ -114,7 +115,8 @@ test("an AGY turn renders the same record shape, labelled agy", () => {
     v: TURN_USAGE_LEDGER_VERSION, agent: "cogsworth", wake: "wake-1", engine: "agy",
     at: "2026-08-29T01:12:04.000Z",
     input: 44_937, output: 444, cache_read: 0, cache_write: 0,
-    total: 45_381, calls: 1, notional_usd: 0, complete: true
+    total: 45_381, calls: 1, notional_usd: 0, complete: true,
+    outcome: "completed"
   });
   assert.deepEqual([...TURN_USAGE_ENGINES], ["agy", "codex", "grok"]);
 });
