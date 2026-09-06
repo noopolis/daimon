@@ -16,13 +16,24 @@ export const renderGrokSandboxArgs = (
  * carries `turn.completed.usage`, and an unmetered Codex turn is one whose
  * subscription cost is invisible. The guarded arguments make this Daimon's
  * security and metering boundary rather than a caller-controlled format.
+ *
+ * `model`/`reasoningEffort` come from parsed, bounded organization-runtime
+ * config, but are rendered defensively anyway: each is emitted as a single
+ * `--flag=value` argv token (never a bare flag followed by a separate value
+ * token), so a value that itself looks like a flag (e.g. `--sandbox`) can
+ * never be parsed as a second, independent argument — the same shape already
+ * used below for `mcp_servers.daimon.url=`. Omitting both fields renders the
+ * exact argv Daimon produced before model selection existed.
  */
 export const renderCodexArgs = (
-  options: Pick<CliEngineOptions, "commandArgs">,
+  options: Pick<CliEngineOptions, "commandArgs" | "model" | "reasoningEffort">,
   cwd: string,
   endpoint: string | undefined,
   sandbox: string = process.env.DAIMON_CODEX_SANDBOX ?? "danger-full-access"
-): string[] => [...assertSafeCodexCommandArgs(options.commandArgs), "exec", "--sandbox", sandbox, "--skip-git-repo-check", "--color", "never", "--json", "-C", cwd,
+): string[] => [...assertSafeCodexCommandArgs(options.commandArgs), "exec", "--sandbox", sandbox, "--skip-git-repo-check",
+  ...(options.model === undefined ? [] : [`--model=${options.model}`]),
+  ...(options.reasoningEffort === undefined ? [] : ["-c", `model_reasoning_effort=${options.reasoningEffort}`]),
+  "--color", "never", "--json", "-C", cwd,
   "-c", `mcp_servers.daimon.url=${endpoint}`, "-"];
 
 /**

@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 
 import {
+  ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS,
   ORGANIZATION_RUNTIME_CONFIG_SCHEMA,
   ORGANIZATION_RUNTIME_MAX_AGENTS,
   ORGANIZATION_RUNTIME_MAX_STRING_BYTES,
@@ -224,6 +225,62 @@ test("accepts only Daimon's three production engines", () => {
   const injected = valid();
   injected.agents[0]!.engine = { kind: "codex", argv: ["--unsafe"] } as never;
   assert.throws(() => parseOrganizationRuntimeConfig(injected), /exactly/);
+});
+
+test("accepts an optional codex model and reasoningEffort", () => {
+  const withModel = valid();
+  withModel.agents[0]!.engine = { kind: "codex", model: "gpt-5-codex" } as never;
+  assert.equal(parseOrganizationRuntimeConfig(withModel).agents[0]?.engine.model, "gpt-5-codex");
+
+  const withEffort = valid();
+  withEffort.agents[0]!.engine = { kind: "codex", model: "gpt-5-codex", reasoningEffort: "xhigh" } as never;
+  const parsedEffort = parseOrganizationRuntimeConfig(withEffort).agents[0]?.engine;
+  assert.equal(parsedEffort?.model, "gpt-5-codex");
+  assert.equal(parsedEffort?.reasoningEffort, "xhigh");
+
+  const omitted = valid();
+  assert.equal(parseOrganizationRuntimeConfig(omitted).agents[0]?.engine.model, undefined);
+  assert.equal(parseOrganizationRuntimeConfig(omitted).agents[0]?.engine.reasoningEffort, undefined);
+});
+
+test("rejects a blank or oversized codex model", () => {
+  const blank = valid();
+  blank.agents[0]!.engine = { kind: "codex", model: "   " } as never;
+  assert.throws(() => parseOrganizationRuntimeConfig(blank), /model/);
+
+  const oversized = valid();
+  oversized.agents[0]!.engine = { kind: "codex", model: "x".repeat(ORGANIZATION_RUNTIME_MAX_STRING_BYTES + 1) } as never;
+  assert.throws(() => parseOrganizationRuntimeConfig(oversized), /model/);
+});
+
+test("rejects an unrecognized codex reasoningEffort value", () => {
+  const invalid = valid();
+  invalid.agents[0]!.engine = { kind: "codex", reasoningEffort: "turbo" } as never;
+  assert.throws(() => parseOrganizationRuntimeConfig(invalid), /reasoningEffort/);
+});
+
+test("the engine JSON Schema and the parser agree on model/reasoningEffort", () => {
+  const engineSchema = ORGANIZATION_RUNTIME_CONFIG_SCHEMA.properties.agents.items.properties.engine;
+  assert.deepEqual(Object.keys(engineSchema.properties).sort(), ["kind", "model", "reasoningEffort"]);
+  assert.deepEqual(engineSchema.required, ["kind"]);
+  assert.deepEqual(engineSchema.properties.reasoningEffort.enum, ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS);
+  for (const value of ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS) {
+    const config = valid();
+    config.agents[0]!.engine = { kind: "codex", reasoningEffort: value } as never;
+    assert.equal(parseOrganizationRuntimeConfig(config).agents[0]?.engine.reasoningEffort, value);
+  }
+});
+
+test("rejects model and reasoningEffort on a non-codex engine", () => {
+  for (const kind of ["grok", "agy"] as const) {
+    const withModel = valid();
+    withModel.agents[0]!.engine = { kind, model: "gpt-5-codex" } as never;
+    assert.throws(() => parseOrganizationRuntimeConfig(withModel), /codex-only/);
+
+    const withEffort = valid();
+    withEffort.agents[0]!.engine = { kind, reasoningEffort: "high" } as never;
+    assert.throws(() => parseOrganizationRuntimeConfig(withEffort), /codex-only/);
+  }
 });
 
 const withMemory = (agent: Record<string, unknown>, memory: unknown): Record<string, unknown> => ({ ...agent, memory });

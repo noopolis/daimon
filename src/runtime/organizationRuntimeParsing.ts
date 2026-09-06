@@ -1,4 +1,5 @@
 import {
+  ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS,
   ORGANIZATION_RUNTIME_MAX_AGENTS,
   ORGANIZATION_RUNTIME_MAX_CONFIG_BYTES,
   ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS,
@@ -183,8 +184,31 @@ function cronValues(field: string, [minimum, maximum]: readonly [number, number]
 function engine(value: unknown, label: string): OrganizationRuntimeEngineIntent {
   const input = object(value, label); const kind = string(input.kind, `${label}.kind`);
   if (!ENGINE_KINDS.has(kind)) throw new TypeError(`${label}.kind is not a supported engine`);
-  exact(input, ["kind"], label);
-  return { kind: kind as OrganizationRuntimeEngineKind };
+  // `model`/`reasoningEffort` are codex-only: grok and agy own their own model
+  // selection, so either field on a non-codex engine is rejected explicitly
+  // here (a clear, named error) rather than falling through to the generic
+  // "must contain exactly" rejection every other unexpected key gets below.
+  const allowed = kind === "codex" ? ["kind", "model", "reasoningEffort"] : ["kind"];
+  const extras = Object.keys(input).filter((key) => !allowed.includes(key));
+  if (extras.length > 0) {
+    if (kind !== "codex" && (extras.includes("model") || extras.includes("reasoningEffort"))) {
+      throw new TypeError(`${label}.model and ${label}.reasoningEffort are codex-only; their subscription auth and model selection are Daimon-owned`);
+    }
+    throw new TypeError(`${label} must contain exactly ${allowed.join(", ")}`);
+  }
+  return {
+    kind: kind as OrganizationRuntimeEngineKind,
+    ...(input.model === undefined ? {} : { model: nonEmpty(input.model, `${label}.model`) }),
+    ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: reasoningEffort(input.reasoningEffort, `${label}.reasoningEffort`) })
+  };
+}
+
+function reasoningEffort(value: unknown, label: string): string {
+  const result = string(value, label);
+  if (!ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS.includes(result as (typeof ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS)[number])) {
+    throw new TypeError(`${label} must be one of ${ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS.join(", ")}`);
+  }
+  return result;
 }
 
 function snapshot(value: unknown, label: string): unknown {

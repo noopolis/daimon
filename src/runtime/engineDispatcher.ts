@@ -102,7 +102,11 @@ function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: stri
           // shell is never routed through it, so it gets its own wall-clock
           // and per-wake token bounds instead (`cliSession.ts`).
           timeoutMs: resolveCodexWakeTimeoutMs(),
-          codexTokenCeiling: resolveCodexWakeTokenCeiling()
+          codexTokenCeiling: resolveCodexWakeTokenCeiling(),
+          // Present only when the parsed config declared them; absent keeps
+          // today's unpinned Codex CLI default and today's exact argv.
+          ...(agent.engine.model === undefined ? {} : { model: agent.engine.model }),
+          ...(agent.engine.reasoningEffort === undefined ? {} : { reasoningEffort: agent.engine.reasoningEffort })
         } : {}),
         ...(engine==="grok"&&grokBroker!==undefined?{}:{credentialSecretValues: () => readPortableEngineCredentialSecrets(agent.id, engine, engineHomePath)}),
         ...(engine==="grok"&&grokBroker!==undefined?{grokBrokerTurn:(prompt:string,endpoint:string,signal:AbortSignal)=>grokBroker.turn(agent.id,wakeEnvironmentContext.current??"wake",prompt,endpoint,signal)}:{}),
