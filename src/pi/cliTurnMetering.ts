@@ -73,3 +73,21 @@ export const publishTurnUsage = async (
   if (usage === undefined) return;
   try { await sink?.(usage, outcome).catch(() => undefined); } catch { /* advisory */ }
 };
+
+/**
+ * Advisory per-request instrumentation, under the same ordering rule as
+ * {@link publishTurnUsage}: it never fails, delays, or rewrites the wake it
+ * describes.
+ *
+ * No thread id means Codex never announced one — an engine that is not Codex,
+ * a child killed before its first frame, or a future stream that renamed the
+ * event. Nothing is written in that case, because the alternative is guessing
+ * which rollout on disk belongs to this wake.
+ */
+export const publishTurnRequests = async (
+  sink: ((threadId: string) => Promise<void>) | undefined,
+  threadId: string | undefined
+): Promise<void> => {
+  if (threadId === undefined) return;
+  try { await sink?.(threadId).catch(() => undefined); } catch { /* advisory */ }
+};

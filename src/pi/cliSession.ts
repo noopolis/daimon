@@ -32,7 +32,7 @@ import {
 } from "./cliMcpRegistration.js";
 import { decodeAgyHeadlessTurn, type AgyTurnUsage } from "./agyHeadlessResult.js";
 import { type CodexTurnUsage } from "./codexHeadlessResult.js";
-import { createCliTurnMeter, decodeCodexTurn, failedTurnOutcome, publishTurnUsage } from "./cliTurnMetering.js";
+import { createCliTurnMeter, decodeCodexTurn, failedTurnOutcome, publishTurnRequests, publishTurnUsage } from "./cliTurnMetering.js";
 import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
@@ -128,6 +128,18 @@ export type CliEngineOptions = {
    * by the row's absence.
    */
   readonly onTurnUsage?: (usage: AgyTurnUsage | CodexTurnUsage, outcome: TurnUsageOutcome) => Promise<void>;
+  /**
+   * Codex only: advisory per-model-request instrumentation, called once per
+   * wake with the thread id Codex announced on `thread.started`.
+   *
+   * The usage ledger's row is one sum per wake and cannot distinguish a cold
+   * prefix replayed per request from a context that grows per request. The
+   * per-request detail exists in the rollout Codex already writes for this
+   * thread; the thread id is the only thing that identifies *which* rollout,
+   * which is why it is carried out of the stream rather than inferred from
+   * whichever file on disk is newest. Errors here never reach the wake.
+   */
+  readonly onCodexTurnRequests?: (threadId: string) => Promise<void>;
 } & ({
   readonly engine: "codex" | "grok";
 } | {
@@ -277,6 +289,15 @@ class CliSession implements PiSessionLike {
     // Kept beside the decoded turn so a wake that never reaches its decoder
     // still owes the ledger the usage Codex already reported (`cliTurnMetering.ts`).
     const meter = createCliTurnMeter();
+    // Codex's own `thread.started` frame, carried out of the stream so the
+    // wake's rollout can be found by identity rather than by recency.
+    let codexThreadId: string | undefined;
+    let instrumented = false;
+    const instrument = async (): Promise<void> => {
+      if (instrumented) return;
+      instrumented = true;
+      await publishTurnRequests(this.options.onCodexTurnRequests, codexThreadId);
+    };
     let child: ChildProcess | undefined;
     let output: string | undefined;
     let cleanupFailure: unknown;
@@ -343,7 +364,8 @@ class CliSession implements PiSessionLike {
           ? `Codex wake exceeded its ${this.options.timeoutMs}ms per-wake wall-clock bound`
           : undefined,
         codexTokenCeiling: this.options.engine === "codex" ? this.options.codexTokenCeiling : undefined,
-        onCodexTurnCompleted: meter.observeCodexTurnCompleted
+        onCodexTurnCompleted: meter.observeCodexTurnCompleted,
+        onCodexThreadStarted: (threadId) => { codexThreadId = threadId; }
       });
       void outputPromise.catch(() => undefined);
       await this.options.verifyRuntimePaths?.();
@@ -379,7 +401,12 @@ class CliSession implements PiSessionLike {
     // floor, so a breached ceiling, an expired wall clock, a non-zero exit, or
     // a turn judged unpublishable all cost money the ledger never saw.
     const failure = promptFailure ?? cleanupFailure;
-    if (failure !== undefined) await publishTurnUsage(this.options.onTurnUsage, turnUsage ?? meter.reported(), failedTurnOutcome(failure));
+    if (failure !== undefined) {
+      await publishTurnUsage(this.options.onTurnUsage, turnUsage ?? meter.reported(), failedTurnOutcome(failure));
+      // A wake that failed still made model requests and still paid for them,
+      // so its per-request shape is measured on exactly the paths its spend is.
+      await instrument();
+    }
     if (promptFailure !== undefined) {
       const authRejection = this.options.engine === "grok" ? asGrokAuthenticationRejected(promptFailure) : undefined;
       if (authRejection !== undefined) throw new GrokSubscriptionAuthenticationRejectedError(
@@ -406,6 +433,7 @@ class CliSession implements PiSessionLike {
     } satisfies CliTurnEnd);
     // Meter only after the turn has published.
     await publishTurnUsage(this.options.onTurnUsage, turnUsage ?? meter.reported(), { status: "completed" });
+    await instrument();
   }
 
   public dispose(): void {

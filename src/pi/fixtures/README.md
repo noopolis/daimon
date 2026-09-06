@@ -82,3 +82,38 @@ envelope different from Grok's:
   decoder that read a `step_update` would under-report a tool-using wake by
   roughly threefold. One tool call against an empty-schema tool costs ~31k
   extra tokens of tool-use preamble.
+
+
+# Codex rollout fixture
+
+`codex-rollout-token-usage.jsonl` is a real `codex exec`-family rollout captured
+on 2026-09-06 from `~/.codex/sessions/2026/09/05/` written by codex-cli 0.153.0.
+It is the per-model-request accounting `codexRolloutUsage.ts` reads, which the
+`--json` stream never carries: that stream reports usage exactly once, on
+`turn.completed`, as a sum over the whole turn.
+
+Sanitization before commit: `session_id`/`id`/`thread_id`/`turn_id`/
+`root_turn_id`/`response_id`/`window_id` were replaced with fixed placeholders,
+`cwd` and `workspace_roots` with `/workspace`, `timezone` with `UTC`, the
+`rate_limits` block with `null`, and the 17,730-character `base_instructions`
+text with a one-line marker. Every `usage` block is verbatim.
+`codexRolloutUsage.test.ts`'s "the captured fixture carries no capturing
+machine's environment" case keeps it that way.
+
+It pins the two frame shapes the decoder reads, and the fact that separates
+them:
+
+    token_usage_record.payload.thread_id            names the thread
+    token_usage_record.payload.usage                ONE frame per model request
+    event_msg/token_count.info.last_token_usage     the fallback shape
+
+The capture carries **four** `token_usage_record` frames and **six**
+`token_count` frames for the same four requests: `token_count` is re-emitted
+whenever the rate-limit block refreshes and repeats the previous
+`last_token_usage` verbatim. A fallback that counted frames would report ten
+requests where four were made, which is why the fallback deduplicates against
+the previous block and why `token_usage_record` wins outright when both exist.
+
+The four requests also show exactly the shape the study predicted, in one wake:
+fresh input 15,742 → 248 → 4,276 → 10,068 against a context that only grows from
+34,686 to 50,004 — most of every request after the first is cache-read replay.
