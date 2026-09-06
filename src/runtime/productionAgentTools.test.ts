@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { createProductionAgentTools } from "./productionAgentTools.js";
 import { MCP_TOOL_RESULT_MAX_BYTES } from "./mcpToolResult.js";
+import { DEFAULT_TOOL_RESULT_MAX_BYTES, TOOL_RESULT_EXEMPT_ENV } from "./toolResultSpill.js";
 import type { OrganizationRuntimeAgentConfig } from "./organizationRuntime.js";
 
 async function receipts(root: string): Promise<string[]> {
@@ -309,20 +310,50 @@ test("a failing MCP tool reaches the model as a failure, with the server's reaso
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("an oversized MCP result truncates with a marker instead of failing the call", async () => {
+test("an oversized MCP result is capped, spilled to disk, and re-fetchable", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-mcp-oversize-"));
   try {
     const tools = await createProductionAgentTools(mcpAgent(root, ["archive_dump"]), { current: "schedule:edition" });
     const result = await tools[0]!.execute("call", {} as never, undefined, undefined, {} as never);
     const serialized = JSON.stringify({ content: result.content, structuredContent: result.details });
-    assert.ok(Buffer.byteLength(serialized) <= MCP_TOOL_RESULT_MAX_BYTES, "the bound still holds");
-    assert.match(serialized, /ARCHIVE-HEAD/u, "the head of the payload survives rather than the whole result vanishing");
-    assert.match(serialized, /\[daimon: truncated — the MCP tool result was \d+ bytes, above the 61440-byte tool result bound\]/u);
+    // Every tool result is replayed on every remaining model request of the
+    // wake, so the bound that matters is the context bound, not the receipt one.
+    assert.ok(Buffer.byteLength(serialized) <= DEFAULT_TOOL_RESULT_MAX_BYTES, "the per-result bound holds");
+    assert.ok(Buffer.byteLength(serialized) <= MCP_TOOL_RESULT_MAX_BYTES, "and so, therefore, does the receipt bound");
+    assert.match(serialized, /ARCHIVE-HEAD/u, "the head of the payload survives");
+    assert.match(serialized, /bytes elided/u);
+
+    const spilled = path.join(root, "tool-output");
+    const files = await readdir(spilled);
+    assert.equal(files.length, 1);
+    const full = await readFile(path.join(spilled, files[0]!), "utf8");
+    assert.match(full, /ARCHIVE-HEAD/u);
+    assert.ok(Buffer.byteLength(full) > DEFAULT_TOOL_RESULT_MAX_BYTES, "the complete result is what reached disk");
+    assert.ok(serialized.includes(path.join(spilled, files[0]!)), "the model is told exactly where to read it");
     assert.match((await receipts(root)).join(""), /"truncated":true/u);
 
-    // The receipt still fits its own bound with a truncated result inside it,
+    // The receipt still fits its own bound with the capped result inside it,
     // and a repeated call replays that result rather than the receipt.
     const replayed = await tools[0]!.execute("call", {} as never, undefined, undefined, {} as never);
     assert.match(JSON.stringify(replayed.details), /ARCHIVE-HEAD/u);
+    assert.equal((await readdir(spilled)).length, 1, "a replayed call does not re-spill");
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an exempt MCP tool keeps exactly the pre-cap behaviour, receipt bound and all", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-mcp-exempt-"));
+  const previous = process.env[TOOL_RESULT_EXEMPT_ENV];
+  process.env[TOOL_RESULT_EXEMPT_ENV] = "mcp_desk_archive_dump";
+  try {
+    const tools = await createProductionAgentTools(mcpAgent(root, ["archive_dump"]), { current: "schedule:edition" });
+    const result = await tools[0]!.execute("call", {} as never, undefined, undefined, {} as never);
+    const serialized = JSON.stringify({ content: result.content, structuredContent: result.details });
+    assert.ok(Buffer.byteLength(serialized) > DEFAULT_TOOL_RESULT_MAX_BYTES, "the exemption really is an exemption");
+    assert.ok(Buffer.byteLength(serialized) <= MCP_TOOL_RESULT_MAX_BYTES, "the receipt bound still holds");
+    assert.match(serialized, /\[daimon: truncated — the MCP tool result was \d+ bytes, above the 61440-byte tool result bound\]/u);
+    await assert.rejects(readdir(path.join(root, "tool-output")), /ENOENT/u, "an exempt tool spills nothing");
+  } finally {
+    if (previous === undefined) delete process.env[TOOL_RESULT_EXEMPT_ENV]; else process.env[TOOL_RESULT_EXEMPT_ENV] = previous;
+    await rm(root, { recursive: true, force: true });
+  }
 });

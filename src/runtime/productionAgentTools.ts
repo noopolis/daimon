@@ -13,6 +13,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { OrganizationRuntimeAgentConfig, OrganizationRuntimeMcpServer } from "./organizationRuntime.js";
 import { moltnetOperationResult, readMoltnetPages } from "./moltnetMachineRead.js";
 import { McpToolCallError, MCP_TOOL_RESULT_MAX_BYTES, renderMcpToolResult, replayMcpReceipt, type McpUpstreamResult } from "./mcpToolResult.js";
+import { capToolResult, resolveExemptToolNames, resolveToolResultMaxBytes, TOOL_OUTPUT_DIRECTORY_NAME } from "./toolResultSpill.js";
 import { cliChildEnvironment } from "../pi/cliEnvironment.js";
 import type { PiWakeEnvironmentContextRef } from "../pi/piAgentWakeSupport.js";
 
@@ -31,13 +32,17 @@ const DAIMON_ACTION_ID_PREFIX = "daimon-";
 
 export async function createProductionAgentTools(agent: OrganizationRuntimeAgentConfig, wakeContext: PiWakeEnvironmentContextRef = {}): Promise<ToolDefinition[]> {
   await mkdir(path.join(agent.runtimeHomePath, "tool-state"), { recursive: true, mode: 0o700 });
-  const tools = [...await Promise.all((agent.mcp ?? []).map((server) => mcpTools(agent, server, wakeContext)))].flat();
+  // Resolved once, at agent start: a malformed bound is a configuration error
+  // that should refuse the agent, not a surprise thrown from the middle of a
+  // tool call the model is waiting on.
+  const cap = { maxBytes: resolveToolResultMaxBytes(), exempt: resolveExemptToolNames() } as const;
+  const tools = [...await Promise.all((agent.mcp ?? []).map((server) => mcpTools(agent, server, wakeContext, cap)))].flat();
   if (agent.moltnet !== undefined) tools.push(moltnetTool(agent, wakeContext), moltnetReadTool(agent));
   if (new Set(tools.map((tool) => tool.name)).size !== tools.length) throw new Error("compiled cognition tool names collide");
   return tools;
 }
 
-async function mcpTools(agent: OrganizationRuntimeAgentConfig, server: OrganizationRuntimeMcpServer, wakeContext: PiWakeEnvironmentContextRef): Promise<ToolDefinition[]> {
+async function mcpTools(agent: OrganizationRuntimeAgentConfig, server: OrganizationRuntimeMcpServer, wakeContext: PiWakeEnvironmentContextRef, cap: Readonly<{ maxBytes: number; exempt: ReadonlySet<string> }>): Promise<ToolDefinition[]> {
   const { client, close } = await connect(agent, server); const listed = await client.listTools(undefined, { timeout: TIMEOUT });
   if (Buffer.byteLength(JSON.stringify(listed)) > MAX_RESULT) { await close(); throw new Error(`MCP server ${server.name} tool list exceeds bound`); }
   const available = new Map(listed.tools.map((tool) => [tool.name, tool]));
@@ -48,7 +53,7 @@ async function mcpTools(agent: OrganizationRuntimeAgentConfig, server: Organizat
   return server.tools.map((name) => {
     const declared = available.get(name)!;
     return {
-      name: `mcp_${safe(server.name)}_${safe(name)}`,
+      name: mcpToolName(server.name, name),
       label: `${server.name}: ${name}`,
       description: declared.description ?? `Call declared MCP tool ${server.name}/${name}`,
       parameters: declared.inputSchema as ToolDefinition["parameters"],
@@ -67,6 +72,21 @@ async function mcpTools(agent: OrganizationRuntimeAgentConfig, server: Organizat
             // The SDK types this as a union with the pre-schema compatibility shape;
             // only the three fields `McpUpstreamResult` names are ever read.
             rendered = renderMcpToolResult({ server: server.name, tool: name, result: result as McpUpstreamResult, maxBytes: MCP_TOOL_RESULT_MAX_BYTES });
+            // Every tool result stays in the transcript for every *subsequent*
+            // model request of the wake, so one oversized answer is re-billed
+            // once per remaining request. Above the bound the full payload goes
+            // to disk and the model gets head+tail plus the path
+            // (`toolResultSpill.ts`); at or below it, this returns `rendered`
+            // itself and the passthrough contract is untouched.
+            rendered = await capToolResult({
+              toolName: mcpToolName(server.name, name),
+              rendered,
+              result: result as McpUpstreamResult,
+              maxBytes: cap.maxBytes,
+              exempt: cap.exempt,
+              spillDirectory: path.join(agent.runtimeHomePath, TOOL_OUTPUT_DIRECTORY_NAME),
+              spillId: actionId
+            });
           } catch (error) {
             // The server's own reason is the receipt's payload as much as the
             // model's: a replayed failure has to fail for the same stated cause.
@@ -217,5 +237,7 @@ async function machine(cli: string, config: string, network: string, request: un
   });
 }
 function digest(value: string): string { return `sha256:${createHash("sha256").update(value).digest("hex")}`; }
+/** The mounted name of one declared MCP tool: the one place it is spelled. */
+function mcpToolName(server: string, tool: string): string { return `mcp_${safe(server)}_${safe(tool)}`; }
 function safe(value: string): string { return value.replace(/[^A-Za-z0-9_]/gu, "_").slice(0, 48); }
 function stringEnvironment(value: NodeJS.ProcessEnv): Record<string, string> { return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => entry[1] !== undefined)); }
