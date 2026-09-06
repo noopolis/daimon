@@ -59,7 +59,10 @@ test("a completed broker turn writes exactly one metered line, and a replayed tu
     assert.deepEqual(written[0], {
       v: TURN_USAGE_LEDGER_VERSION, agent: "cogsworth", wake: "wake-1", engine: "grok",
       at: written[0]?.at, input: 8_746, output: 29, cache_read: 5_760, cache_write: 12,
-      total: 14_547, calls: 1, notional_usd: 0.0035, complete: true
+      total: 14_547, calls: 1, notional_usd: 0.0035, complete: true,
+      // The broker only ever appends for a turn it finished, so its rows are
+      // completed by construction; the field still states it explicitly.
+      outcome: "completed"
     });
 
     assert.equal(await runTurn(turns, ledger, "cogsworth", "wake-2"), "start");

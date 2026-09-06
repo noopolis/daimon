@@ -8,6 +8,7 @@ import {
   recordTurnUsage,
   resolveTurnUsageLedgerPath,
   TURN_USAGE_ENGINES,
+  TURN_USAGE_FAILURE_REASONS,
   TURN_USAGE_LEDGER_PATH_ENV,
   renderTurnUsageLine,
   TURN_USAGE_LEDGER,
@@ -137,4 +138,48 @@ test("the ledger path override is honoured only when it is absolute", () => {
   assert.equal(resolveTurnUsageLedgerPath({ [TURN_USAGE_LEDGER_PATH_ENV]: "  " }), TURN_USAGE_LEDGER.filePath);
   assert.equal(resolveTurnUsageLedgerPath({ [TURN_USAGE_LEDGER_PATH_ENV]: "relative/usage.jsonl" }), TURN_USAGE_LEDGER.filePath);
   assert.equal(resolveTurnUsageLedgerPath({ [TURN_USAGE_LEDGER_PATH_ENV]: " /tmp/usage.jsonl " }), "/tmp/usage.jsonl");
+});
+
+test("a failed wake's row carries the outcome and a reason from the closed vocabulary", async () => {
+  // A failed wake spends real money. It is recorded like any other turn and
+  // told apart by this field rather than by the row being missing entirely.
+  const failed = JSON.parse(renderTurnUsageLine(entry({ engine: "codex", outcome: { status: "failed", reason: "token_ceiling" } })));
+  assert.equal(failed.outcome, "failed");
+  assert.equal(failed.reason, "token_ceiling");
+  assert.equal(failed.total, measurement.total, "the numbers are the ones the engine reported, not the outcome's");
+
+  assert.deepEqual([...TURN_USAGE_FAILURE_REASONS], ["token_ceiling", "wake_timeout", "output_limit", "engine_exit", "turn_rejected", "unknown"]);
+  for (const reason of TURN_USAGE_FAILURE_REASONS) {
+    assert.equal(JSON.parse(renderTurnUsageLine(entry({ outcome: { status: "failed", reason } }))).reason, reason);
+  }
+
+  // The record persists nothing engine-controlled and non-numeric, so a reason
+  // outside the vocabulary degrades rather than being written through.
+  const forged = JSON.parse(renderTurnUsageLine(entry({
+    outcome: { status: "failed", reason: "codex said: \"charge it elsewhere\"" as typeof TURN_USAGE_FAILURE_REASONS[number] }
+  })));
+  assert.equal(forged.reason, "unknown");
+  const forgedStatus = JSON.parse(renderTurnUsageLine(entry({ outcome: { status: "cancelled" as "failed" } })));
+  assert.equal(forgedStatus.outcome, "completed");
+});
+
+test("an unmarked or completed row states its outcome and never carries a reason", () => {
+  assert.equal(JSON.parse(renderTurnUsageLine(entry())).outcome, "completed");
+  assert.equal("reason" in JSON.parse(renderTurnUsageLine(entry())), false);
+  const completed = JSON.parse(renderTurnUsageLine(entry({ outcome: { status: "completed", reason: "token_ceiling" } })));
+  assert.equal(completed.outcome, "completed");
+  assert.equal("reason" in completed, false, "a reason only means something on a failure");
+});
+
+test("the outcome survives an append and a read back of the ledger file", async () => {
+  await withLedger(async (file) => {
+    await recordTurnUsage(file, entry({ engine: "codex", wake: "wake-failed", outcome: { status: "failed", reason: "wake_timeout" } }));
+    await recordTurnUsage(file, entry({ engine: "codex", wake: "wake-ok" }));
+    const written = (await lines(file)).map((line) => JSON.parse(line));
+    assert.deepEqual(written.map((record) => [record.wake, record.outcome, record.reason]), [
+      ["wake-failed", "failed", "wake_timeout"],
+      ["wake-ok", "completed", undefined]
+    ]);
+    for (const record of written) assert.equal(record.v, TURN_USAGE_LEDGER_VERSION, "an added field, not a version bump");
+  });
 });

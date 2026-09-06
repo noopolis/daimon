@@ -58,6 +58,22 @@ broker — both append through the session's `onTurnUsage` sink wired in
 ceiling depends on every engine actually reaching this ledger — a
 missing/unreadable ledger is a startup failure there, on purpose, rather than
 a silent zero that would let the ceiling sum nothing.
+
+A wake that *fails* spends the same money as one that publishes, so usage is
+recorded whenever the engine actually reported it, not only when the wake
+succeeded. For Codex that means `../pi/cliChildOutput.ts` hands each parsed
+`turn.completed` frame's decoded usage to the session as it streams, and
+`../pi/cliSession.ts` meters it on the breach, timeout, non-zero-exit, and
+rejected-turn paths as well as the published one. The row's `outcome` field
+(`completed`/`failed`, plus a closed-vocabulary `reason`) is what tells them
+apart; it is an additive field inside the unchanged
+`noopolis.daimon.turn-usage.v1` record, because Spawnfile's reader drops every
+line whose `v` it does not recognise while ignoring fields it does not know.
+Absence of reported usage is still absence: no `turn.completed`, an
+undecodable usage block, or two completion frames all write nothing, because a
+zero-filled row is byte-identical to a real zero. Before this, a breached
+ceiling recorded nothing at all and its spend survived only inside the error
+message.
 `testRuntimeSubprocess.ts` is an unexported, explicit-test-only JSONL process
 surface for exercising the real control, schedule, and acceptance paths with a
 controlled clock and deterministic scripted cognition. Its ephemeral loopback
