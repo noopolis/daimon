@@ -111,6 +111,10 @@ export type CliEngineOptions = {
   readonly grokBrokerTurn?: (prompt: string, mcpEndpoint: string, signal: AbortSignal) => Promise<string>;
   /** Codex only: kills the child and fails the wake once a turn's own reported usage reaches this. */
   readonly codexTokenCeiling?: number;
+  /** Codex only: pinned model name, rendered as `--model=<value>`. Omitted, Codex resolves its own default. */
+  readonly model?: string;
+  /** Codex only: pinned `model_reasoning_effort`, rendered as `-c model_reasoning_effort=<value>`. */
+  readonly reasoningEffort?: string;
   /**
    * Advisory per-turn metering sink for the engines whose headless stream
    * reports token usage and that do not run behind the Grok engine broker
