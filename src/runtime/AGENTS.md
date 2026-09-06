@@ -111,6 +111,30 @@ away whole. The wake-scoped receipt stores the rendered result so a repeated
 identical call replays the answer instead of a digest of it, and a repeated
 failing call fails again for the same stated cause.
 
+`toolResultSpill.ts` adds the bound that `mcpToolResult.ts` never had: a
+*context* bound, as opposed to a receipt bound. Every tool result stays in the
+transcript for every subsequent model request of the wake, and production agents
+make 3–37 tool calls per wake against a context that is flat at 23–32k tokens per
+request, so one oversized result is not paid once — it is re-billed on every
+request that follows it. The 61,440-byte bound in `mcpToolResult.ts` is the
+receipt's bound and degrades to a *head only*, unrecoverable. Above
+`DAIMON_TOOL_RESULT_MAX_BYTES` (default 16 KiB, ≈4k tokens — a sixth of one
+request, where oh-my-pi's 50 KiB default would be half of it) the complete
+payload is written under `<runtimeHome>/tool-output/` and the model receives head
+**and** tail plus a notice naming the absolute path and the shell command that
+reads it. Naming the path is the point: a bare `[truncated]` makes the agent
+re-run the same expensive call. Three rules, all borrowed from
+`references/oh-my-pi`'s `tools/output-meta.ts`: a failed disk write still
+truncates and only withholds the recovery link, never re-exposing the payload; a
+result at or under the bound passes through **byte-identical**, so the
+`mcp_*` passthrough contract above is untouched for the overwhelming majority of
+results; and `DAIMON_TOOL_RESULT_NO_TRUNCATE` exempts named tools outright, for a
+deployment where one declared tool's whole answer is load bearing — Daimon cannot
+know which, so that judgement stays with whoever declared the tool. Daimon's own
+`moltnet_read`/`moltnet_send` are outside this wrapper by construction: they are
+already byte-bounded at `MAX_RESULT` and `moltnet_read` pages with a cursor, so
+the agent bounds them by asking for less rather than by being handed less.
+
 Daimon does not re-declare an upstream `outputSchema` on its own mount: a
 declared output schema obliges every result to carry conforming
 `structuredContent`, which neither a content-only response nor a truncation
