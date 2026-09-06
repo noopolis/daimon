@@ -14,6 +14,7 @@ import {
   classifyGrokAuthenticationDiagnostic,
   GrokSubscriptionAuthenticationRejectedError
 } from "../runtime/grokAuthenticationError.js";
+import type { TurnUsageOutcome } from "../runtime/turnUsageLedger.js";
 import { readChild } from "./cliChildOutput.js";
 import { cliChildEnvironment } from "./cliEnvironment.js";
 import {
@@ -30,7 +31,8 @@ import {
   type CliMcpRegistration
 } from "./cliMcpRegistration.js";
 import { decodeAgyHeadlessTurn, type AgyTurnUsage } from "./agyHeadlessResult.js";
-import { decodeCodexHeadlessTurn, type CodexTurnUsage } from "./codexHeadlessResult.js";
+import { type CodexTurnUsage } from "./codexHeadlessResult.js";
+import { createCliTurnMeter, decodeCodexTurn, failedTurnOutcome, publishTurnUsage } from "./cliTurnMetering.js";
 import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
@@ -119,8 +121,13 @@ export type CliEngineOptions = {
    * Advisory per-turn metering sink for the engines whose headless stream
    * reports token usage and that do not run behind the Grok engine broker
    * (which meters its own turns). It never fails a turn that published.
+   *
+   * `outcome` says whether the wake this usage belongs to went on to succeed.
+   * A failed wake spends real money, so it is metered exactly like a
+   * successful one and the reader tells them apart by this field rather than
+   * by the row's absence.
    */
-  readonly onTurnUsage?: (usage: AgyTurnUsage | CodexTurnUsage) => Promise<void>;
+  readonly onTurnUsage?: (usage: AgyTurnUsage | CodexTurnUsage, outcome: TurnUsageOutcome) => Promise<void>;
 } & ({
   readonly engine: "codex" | "grok";
 } | {
@@ -267,6 +274,9 @@ class CliSession implements PiSessionLike {
     let mount: { endpoint: string; close: () => Promise<void> } | undefined;
     let registration: CliMcpRegistration | undefined;
     let turnUsage: AgyTurnUsage | CodexTurnUsage | undefined;
+    // Kept beside the decoded turn so a wake that never reaches its decoder
+    // still owes the ledger the usage Codex already reported (`cliTurnMetering.ts`).
+    const meter = createCliTurnMeter();
     let child: ChildProcess | undefined;
     let output: string | undefined;
     let cleanupFailure: unknown;
@@ -332,7 +342,8 @@ class CliSession implements PiSessionLike {
         timeoutErrorMessage: this.options.engine === "codex" && this.options.timeoutMs !== undefined
           ? `Codex wake exceeded its ${this.options.timeoutMs}ms per-wake wall-clock bound`
           : undefined,
-        codexTokenCeiling: this.options.engine === "codex" ? this.options.codexTokenCeiling : undefined
+        codexTokenCeiling: this.options.engine === "codex" ? this.options.codexTokenCeiling : undefined,
+        onCodexTurnCompleted: meter.observeCodexTurnCompleted
       });
       void outputPromise.catch(() => undefined);
       await this.options.verifyRuntimePaths?.();
@@ -340,7 +351,7 @@ class CliSession implements PiSessionLike {
       const childOutput = await outputPromise;
       if (this.options.engine === "grok") output = decodeGrokHeadlessResult(childOutput);
       else if (this.options.engine === "codex") {
-        const decoded = decodeCodexHeadlessTurn(childOutput);
+        const decoded = decodeCodexTurn(childOutput);
         output = decoded.text;
         turnUsage = decoded.usage;
       }
@@ -363,6 +374,12 @@ class CliSession implements PiSessionLike {
     }
     const refreshedCredentialSecrets = await this.options.credentialSecretValues?.().catch(() => []) ?? [];
     const finalSecrets = [...secretValues, ...refreshedCredentialSecrets];
+    // A wake that Codex reported usage for is metered whether or not it goes on
+    // to publish. Every throw below this point used to drop that spend on the
+    // floor, so a breached ceiling, an expired wall clock, a non-zero exit, or
+    // a turn judged unpublishable all cost money the ledger never saw.
+    const failure = promptFailure ?? cleanupFailure;
+    if (failure !== undefined) await publishTurnUsage(this.options.onTurnUsage, turnUsage ?? meter.reported(), failedTurnOutcome(failure));
     if (promptFailure !== undefined) {
       const authRejection = this.options.engine === "grok" ? asGrokAuthenticationRejected(promptFailure) : undefined;
       if (authRejection !== undefined) throw new GrokSubscriptionAuthenticationRejectedError(
@@ -387,12 +404,8 @@ class CliSession implements PiSessionLike {
         stopReason: "stop", timestamp: Date.now()
       }, toolResults: []
     } satisfies CliTurnEnd);
-    // Meter only after the turn has published, and never let metering failure
-    // rewrite a turn that succeeded: the same ordering rule the Grok engine
-    // broker states in `finishBrokerTurnWithUsage`.
-    if (turnUsage !== undefined) {
-      await this.options.onTurnUsage?.(turnUsage).catch(() => undefined);
-    }
+    // Meter only after the turn has published.
+    await publishTurnUsage(this.options.onTurnUsage, turnUsage ?? meter.reported(), { status: "completed" });
   }
 
   public dispose(): void {

@@ -63,12 +63,53 @@ export type TurnUsageMeasurement = Readonly<{
  */
 export const TURN_USAGE_ENGINES = ["agy", "codex", "grok"] as const;
 
+/**
+ * Whether the wake that spent these tokens went on to succeed.
+ *
+ * Money is spent by a failed wake exactly as by a successful one, so a row is
+ * written whenever the engine actually reported usage — see
+ * `../pi/cliSession.ts`. Without this field every failed wake's spend was
+ * simply absent from the ledger, and an organization's cost total silently
+ * undercounted by however much its failures burned.
+ *
+ * `reason` is a closed vocabulary, never an engine- or error-supplied string:
+ * the record's rule that nothing engine-controlled and non-numeric is
+ * persisted still holds, and `renderTurnUsageLine` degrades anything outside
+ * the list to `unknown` rather than writing it through.
+ */
+export const TURN_USAGE_OUTCOMES = ["completed", "failed"] as const;
+
+/**
+ * - `token_ceiling` — the turn's own reported usage crossed the per-wake ceiling.
+ * - `wake_timeout` — the wall-clock bound fired before the child finished.
+ * - `output_limit` — the retained-output bound was exceeded.
+ * - `engine_exit` — the child exited non-zero (or died) after reporting usage.
+ * - `turn_rejected` — usage was reported but the decoded turn was not publishable.
+ * - `unknown` — any other failure (verification, cleanup, spawn).
+ */
+export const TURN_USAGE_FAILURE_REASONS = [
+  "token_ceiling",
+  "wake_timeout",
+  "output_limit",
+  "engine_exit",
+  "turn_rejected",
+  "unknown"
+] as const;
+
+export type TurnUsageFailureReason = typeof TURN_USAGE_FAILURE_REASONS[number];
+
+export type TurnUsageOutcome = Readonly<{
+  status: typeof TURN_USAGE_OUTCOMES[number];
+  reason?: TurnUsageFailureReason;
+}>;
+
 export type TurnUsageEntry = Readonly<{
   agent: string;
   wake: string;
   engine: typeof TURN_USAGE_ENGINES[number];
   usage: TurnUsageMeasurement;
   at?: string;
+  outcome?: TurnUsageOutcome;
 }>;
 
 /**
@@ -91,6 +132,25 @@ export const resolveTurnUsageLedgerPath = (environment: NodeJS.ProcessEnv = proc
 
 const bounded = (value: string): string => [...value].slice(0, TURN_USAGE_MAX_IDENTIFIER_CHARS).join("");
 
+/**
+ * `outcome`/`reason` are an additive field pair inside the *unchanged* `v1`
+ * record, deliberately not a `v2`.
+ *
+ * Spawnfile's reader (`spawnfile/src/runtime/usageLedger.ts`) rejects any `v`
+ * that is not `noopolis.daimon.turn-usage.v1` and returns `null` for the whole
+ * line, while picking only the fields it knows and ignoring the rest. Bumping
+ * the version would therefore make an unreleased Spawnfile drop *every* row —
+ * strictly worse than the defect being fixed. Reading the pair is opt-in;
+ * every historical row lacks it and, since a failed wake previously recorded
+ * nothing at all, absent can be read as `completed` without ambiguity.
+ */
+const outcomeFields = (outcome: TurnUsageOutcome | undefined): Record<string, string> => {
+  const status = outcome?.status === "failed" ? "failed" : "completed";
+  if (status === "completed") return { outcome: status };
+  const reason = outcome?.reason;
+  return { outcome: status, reason: reason !== undefined && TURN_USAGE_FAILURE_REASONS.includes(reason) ? reason : "unknown" };
+};
+
 /** One complete line, newline-terminated. `JSON.stringify` escapes any embedded newline. */
 export const renderTurnUsageLine = (entry: TurnUsageEntry): string => `${JSON.stringify({
   v: TURN_USAGE_LEDGER_VERSION,
@@ -105,7 +165,8 @@ export const renderTurnUsageLine = (entry: TurnUsageEntry): string => `${JSON.st
   total: entry.usage.total,
   calls: entry.usage.calls,
   notional_usd: entry.usage.notionalUsd,
-  complete: entry.usage.complete
+  complete: entry.usage.complete,
+  ...outcomeFields(entry.outcome)
 })}\n`;
 
 const rotate = async (file: string): Promise<void> => {

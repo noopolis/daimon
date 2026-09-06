@@ -8,6 +8,7 @@ import {
   recordTurnUsage,
   resolveTurnUsageLedgerPath,
   TURN_USAGE_ENGINES,
+  TURN_USAGE_FAILURE_REASONS,
   TURN_USAGE_LEDGER_PATH_ENV,
   renderTurnUsageLine,
   TURN_USAGE_LEDGER,
@@ -37,7 +38,8 @@ test("a record is one complete newline-terminated line carrying only numbers plu
     v: TURN_USAGE_LEDGER_VERSION, agent: "cogsworth", wake: "wake-1", engine: "grok",
     at: "2026-08-29T01:12:04.000Z",
     input: 8_746, output: 29, cache_read: 5_760, cache_write: 12,
-    total: 14_547, calls: 1, notional_usd: 0.0035, complete: true
+    total: 14_547, calls: 1, notional_usd: 0.0035, complete: true,
+    outcome: "completed"
   });
   assert.equal("org" in JSON.parse(line), false, "identity comes from which container was queried, not from the record");
 });
@@ -114,7 +116,8 @@ test("an AGY turn renders the same record shape, labelled agy", () => {
     v: TURN_USAGE_LEDGER_VERSION, agent: "cogsworth", wake: "wake-1", engine: "agy",
     at: "2026-08-29T01:12:04.000Z",
     input: 44_937, output: 444, cache_read: 0, cache_write: 0,
-    total: 45_381, calls: 1, notional_usd: 0, complete: true
+    total: 45_381, calls: 1, notional_usd: 0, complete: true,
+    outcome: "completed"
   });
   assert.deepEqual([...TURN_USAGE_ENGINES], ["agy", "codex", "grok"]);
 });
@@ -135,4 +138,48 @@ test("the ledger path override is honoured only when it is absolute", () => {
   assert.equal(resolveTurnUsageLedgerPath({ [TURN_USAGE_LEDGER_PATH_ENV]: "  " }), TURN_USAGE_LEDGER.filePath);
   assert.equal(resolveTurnUsageLedgerPath({ [TURN_USAGE_LEDGER_PATH_ENV]: "relative/usage.jsonl" }), TURN_USAGE_LEDGER.filePath);
   assert.equal(resolveTurnUsageLedgerPath({ [TURN_USAGE_LEDGER_PATH_ENV]: " /tmp/usage.jsonl " }), "/tmp/usage.jsonl");
+});
+
+test("a failed wake's row carries the outcome and a reason from the closed vocabulary", async () => {
+  // A failed wake spends real money. It is recorded like any other turn and
+  // told apart by this field rather than by the row being missing entirely.
+  const failed = JSON.parse(renderTurnUsageLine(entry({ engine: "codex", outcome: { status: "failed", reason: "token_ceiling" } })));
+  assert.equal(failed.outcome, "failed");
+  assert.equal(failed.reason, "token_ceiling");
+  assert.equal(failed.total, measurement.total, "the numbers are the ones the engine reported, not the outcome's");
+
+  assert.deepEqual([...TURN_USAGE_FAILURE_REASONS], ["token_ceiling", "wake_timeout", "output_limit", "engine_exit", "turn_rejected", "unknown"]);
+  for (const reason of TURN_USAGE_FAILURE_REASONS) {
+    assert.equal(JSON.parse(renderTurnUsageLine(entry({ outcome: { status: "failed", reason } }))).reason, reason);
+  }
+
+  // The record persists nothing engine-controlled and non-numeric, so a reason
+  // outside the vocabulary degrades rather than being written through.
+  const forged = JSON.parse(renderTurnUsageLine(entry({
+    outcome: { status: "failed", reason: "codex said: \"charge it elsewhere\"" as typeof TURN_USAGE_FAILURE_REASONS[number] }
+  })));
+  assert.equal(forged.reason, "unknown");
+  const forgedStatus = JSON.parse(renderTurnUsageLine(entry({ outcome: { status: "cancelled" as "failed" } })));
+  assert.equal(forgedStatus.outcome, "completed");
+});
+
+test("an unmarked or completed row states its outcome and never carries a reason", () => {
+  assert.equal(JSON.parse(renderTurnUsageLine(entry())).outcome, "completed");
+  assert.equal("reason" in JSON.parse(renderTurnUsageLine(entry())), false);
+  const completed = JSON.parse(renderTurnUsageLine(entry({ outcome: { status: "completed", reason: "token_ceiling" } })));
+  assert.equal(completed.outcome, "completed");
+  assert.equal("reason" in completed, false, "a reason only means something on a failure");
+});
+
+test("the outcome survives an append and a read back of the ledger file", async () => {
+  await withLedger(async (file) => {
+    await recordTurnUsage(file, entry({ engine: "codex", wake: "wake-failed", outcome: { status: "failed", reason: "wake_timeout" } }));
+    await recordTurnUsage(file, entry({ engine: "codex", wake: "wake-ok" }));
+    const written = (await lines(file)).map((line) => JSON.parse(line));
+    assert.deepEqual(written.map((record) => [record.wake, record.outcome, record.reason]), [
+      ["wake-failed", "failed", "wake_timeout"],
+      ["wake-ok", "completed", undefined]
+    ]);
+    for (const record of written) assert.equal(record.v, TURN_USAGE_LEDGER_VERSION, "an added field, not a version bump");
+  });
 });

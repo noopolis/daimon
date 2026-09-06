@@ -124,7 +124,8 @@ test("an AGY agent reaches Daimon's declared cognition tools over its own MCP en
       engine: "agy",
       at: recorded.at,
       input: 44_937, output: 444, cache_read: 0, cache_write: 0,
-      total: 45_381, calls: 1, notional_usd: 0, complete: true
+      total: 45_381, calls: 1, notional_usd: 0, complete: true,
+      outcome: "completed"
     });
   } finally {
     if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
