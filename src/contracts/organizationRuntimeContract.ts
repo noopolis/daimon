@@ -18,6 +18,17 @@ export const ORGANIZATION_RUNTIME_MAX_SCHEDULE_INTERVAL_MS = 31_536_000_000;
  * scheduled instant instead of drifting into the next slot's territory.
  */
 export const ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS = 3_600;
+/**
+ * Codex's own `model_reasoning_effort` values (`codex-rs/protocol/src/openai_models.rs`,
+ * `ReasoningEffort::as_str`), verified against the installed `codex` CLI
+ * (0.153.4): `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+ * `ultra`, `persistent`. Codex's own parser also accepts an arbitrary
+ * `Custom(String)` fallback for forward compatibility with models the
+ * installed CLI does not yet know about; Daimon's schema deliberately does
+ * not extend that far; an unrecognized value is rejected as a likely
+ * misconfiguration rather than silently forwarded to the model.
+ */
+export const ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"] as const;
 
 const PRODUCTION_TOOL_PROPERTIES = {
   mcp: { type: "array", maxItems: 8, items: { type: "object", additionalProperties: false, required: ["name", "transport", "args", "env", "tools"], properties: {
@@ -55,7 +66,9 @@ export const ORGANIZATION_RUNTIME_CONFIG_SCHEMA = {
         workspacePath: { type: "string", maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "^/" },
         runtimeHomePath: { type: "string", maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "^/" },
         engine: { type: "object", additionalProperties: false, required: ["kind"], properties: {
-          kind: { enum: ["codex", "grok", "agy"] }
+          kind: { enum: ["codex", "grok", "agy"] },
+          model: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
+          reasoningEffort: { enum: ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS }
         } },
         ...PRODUCTION_TOOL_PROPERTIES
       }

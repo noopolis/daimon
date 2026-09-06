@@ -1,4 +1,5 @@
 import {
+  ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS,
   ORGANIZATION_RUNTIME_CONFIG_SCHEMA,
   ORGANIZATION_RUNTIME_CONFIG_V2_SCHEMA,
   ORGANIZATION_RUNTIME_MAX_AGENTS,
@@ -14,6 +15,7 @@ import {
 } from "../contracts/organizationRuntimeContract.js";
 
 export {
+  ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS,
   ORGANIZATION_RUNTIME_CONFIG_SCHEMA,
   ORGANIZATION_RUNTIME_CONFIG_V2_SCHEMA,
   ORGANIZATION_RUNTIME_MAX_AGENTS,
@@ -29,7 +31,15 @@ export {
 };
 
 export type OrganizationRuntimeEngineKind = "codex" | "grok" | "agy";
-export type OrganizationRuntimeEngineIntent = Readonly<{ kind: OrganizationRuntimeEngineKind }>;
+/**
+ * `model`/`reasoningEffort` are codex-only: grok and agy own their own model
+ * selection (their subscription auth and model selection are Daimon-owned),
+ * and `organizationRuntimeParsing.ts` rejects either field on a non-codex
+ * engine at parse time rather than silently ignoring it. The type stays flat
+ * — not a `kind`-discriminated union — because every parsed value already
+ * satisfies the invariant; callers that need it narrow on `kind === "codex"`.
+ */
+export type OrganizationRuntimeEngineIntent = Readonly<{ kind: OrganizationRuntimeEngineKind; model?: string; reasoningEffort?: string }>;
 export type OrganizationRuntimeMcpServer = Readonly<{ name: string; transport: "stdio" | "sse" | "streamable_http"; command?: string; args: readonly string[]; env: Readonly<Record<string, string>>; authSecretEnv?: string; url?: string; tools: readonly string[] }>;
 export type OrganizationRuntimeMoltnet = Readonly<{ cliPath: string; configPath: string; networks: readonly Readonly<{ id: string; rooms: readonly string[]; dms: boolean }>[] }>;
 export type OrganizationRuntimeMemory = Readonly<{ runtimeHomePath: string; source?: string; tokenBudget?: number }>;
