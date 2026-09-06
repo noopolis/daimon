@@ -23,7 +23,10 @@ const CLI_CHILD_FAILURE_REASON = Symbol("daimon.cliChildFailureReason");
 
 export const tagCliChildFailure = <T>(error: T, reason: TurnUsageFailureReason): T => {
   if (!(error instanceof Error)) return error;
-  Object.defineProperty(error, CLI_CHILD_FAILURE_REASON, { value: reason, enumerable: false });
+  // Labelling a failure must never become a second failure: a frozen or sealed
+  // error simply goes untagged and its row reads `unknown`.
+  try { Object.defineProperty(error, CLI_CHILD_FAILURE_REASON, { configurable: true, enumerable: false, value: reason, writable: true }); }
+  catch { /* the reason is advisory; the failure it describes is not */ }
   return error;
 };
 

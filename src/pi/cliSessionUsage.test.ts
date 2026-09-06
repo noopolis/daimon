@@ -5,7 +5,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { recordTurnUsage, TURN_USAGE_LEDGER_VERSION, type TurnUsageOutcome } from "../runtime/turnUsageLedger.js";
+import { tagCliChildFailure } from "./cliChildOutput.js";
 import { createCliSessionFactory } from "./cliSession.js";
+import { failedTurnOutcome } from "./cliTurnMetering.js";
 import type { AgyTurnUsage } from "./agyHeadlessResult.js";
 import type { CodexTurnUsage } from "./codexHeadlessResult.js";
 
@@ -196,4 +198,24 @@ test("tool calls seen on the stream are counted into a failed wake's row", async
     assert.equal(run.metered[0].usage.calls, 2, "the failed row carries the same call count a published row would");
     assert.deepEqual(run.metered[0].outcome, { status: "failed", reason: "engine_exit" });
   } finally { await run.cleanup(); }
+});
+
+test("a failure that names no bound still yields a row, under the unknown reason", () => {
+  // A failure raised outside the child reader carries no bound tag. The reason
+  // degrades; nothing about recording the spend depends on the label.
+  assert.deepEqual(failedTurnOutcome(new Error("post-spawn runtime verification failed")), { status: "failed", reason: "unknown" });
+  assert.deepEqual(failedTurnOutcome("not an error"), { status: "failed", reason: "unknown" });
+  assert.deepEqual(failedTurnOutcome(tagCliChildFailure(new Error("bounded"), "wake_timeout")), { status: "failed", reason: "wake_timeout" });
+
+  // Labelling a failure must never become a second failure.
+  const frozen = Object.freeze(new Error("frozen"));
+  assert.doesNotThrow(() => tagCliChildFailure(frozen, "engine_exit"));
+  assert.deepEqual(failedTurnOutcome(frozen), { status: "failed", reason: "unknown" });
+
+  // A retag is a relabel, not a crash.
+  const retagged = tagCliChildFailure(new Error("retag"), "output_limit");
+  assert.deepEqual(failedTurnOutcome(tagCliChildFailure(retagged, "turn_rejected")), { status: "failed", reason: "turn_rejected" });
+
+  // The tag never widens the error's own serialized surface.
+  assert.deepEqual(Object.keys(tagCliChildFailure(new Error("opaque"), "token_ceiling")), []);
 });
