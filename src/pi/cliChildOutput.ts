@@ -86,6 +86,18 @@ export const readChild = (
      * used to survive only inside an error message.
      */
     onCodexTurnCompleted?: (usage: CodexTurnUsage | undefined) => void;
+    /**
+     * Called with the thread id from Codex's `thread.started` frame
+     * (`retainNdjson: "codex"` only), the first line of every `codex exec
+     * --json` stream — verified live against codex-cli 0.153.4:
+     * `{"type":"thread.started","thread_id":"01a076d3-…"}`.
+     *
+     * That id is the only key that ties this wake to the rollout Codex writes
+     * under `$CODEX_HOME/sessions/**`, where the per-model-request accounting
+     * lives. The frame stays out of the retained stream: the decoder's
+     * vocabulary and the retained-output budget are unchanged by reading it.
+     */
+    onCodexThreadStarted?: (threadId: string) => void;
   }> = {}
 ): Promise<string> => new Promise((resolve, reject) => {
   trackCliChild(child);
@@ -142,6 +154,10 @@ export const readChild = (
         let frame: Record<string, unknown> | undefined;
         try { const parsed = JSON.parse(line) as unknown; if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) frame = parsed as Record<string, unknown>; } catch { /* decoder reports malformed retained protocol lines */ }
         if (frame === undefined) { stdout.push(Buffer.from(`${line}\n`)); continue; }
+        if (frame.type === "thread.started" && typeof frame.thread_id === "string") {
+          options.onCodexThreadStarted?.(frame.thread_id);
+          continue;
+        }
         const item = typeof frame.item === "object" && frame.item !== null && !Array.isArray(frame.item) ? frame.item as Record<string, unknown> : undefined;
         if (frame.type === "item.completed" && (item?.type === "command_execution" || item?.type === "mcp_tool_call")) {
           ndjsonCalls += 1;
