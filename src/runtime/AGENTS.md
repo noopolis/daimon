@@ -74,6 +74,7 @@ undecodable usage block, or two completion frames all write nothing, because a
 zero-filled row is byte-identical to a real zero. Before this, a breached
 ceiling recorded nothing at all and its spend survived only inside the error
 message.
+
 `testRuntimeSubprocess.ts` is an unexported, explicit-test-only JSONL process
 surface for exercising the real control, schedule, and acceptance paths with a
 controlled clock and deterministic scripted cognition. Its ephemeral loopback
