@@ -45,6 +45,31 @@ test("Codex output, sandbox, config, and cwd boundaries reject caller overrides"
   assert.equal(args.includes("--json"), true);
 });
 
+test("codex argv is byte-identical to before model selection existed when model/reasoningEffort are absent", () => {
+  const before = ["exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "--color", "never", "--json", "-C", "/workspace",
+    "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-"];
+  const after = renderCodexArgs({ commandArgs: [] }, "/workspace", "http://127.0.0.1:1/mcp");
+  assert.deepEqual(after, before);
+});
+
+test("codex argv renders -m for a pinned model and leaves everything else untouched", () => {
+  const args = renderCodexArgs({ commandArgs: [], model: "gpt-5-codex" }, "/workspace", "http://127.0.0.1:1/mcp");
+  assert.deepEqual(args, ["exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "--model=gpt-5-codex", "--color", "never", "--json", "-C", "/workspace",
+    "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-"]);
+});
+
+test("codex argv renders both model and reasoningEffort together in stable order", () => {
+  const args = renderCodexArgs({ commandArgs: [], model: "gpt-5-codex", reasoningEffort: "xhigh" }, "/workspace", "http://127.0.0.1:1/mcp");
+  assert.deepEqual(args, ["exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "--model=gpt-5-codex", "-c", "model_reasoning_effort=xhigh", "--color", "never", "--json", "-C", "/workspace",
+    "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-"]);
+});
+
+test("codex argv renders reasoningEffort alone without a model flag", () => {
+  const args = renderCodexArgs({ commandArgs: [], reasoningEffort: "low" }, "/workspace", "http://127.0.0.1:1/mcp");
+  assert.equal(args.includes("--model=gpt-5-codex"), false);
+  assert.deepEqual(args.slice(args.indexOf("-c"), args.indexOf("-c") + 2), ["-c", "model_reasoning_effort=low"]);
+});
+
 test("Grok's kernel sandbox authority cannot be weakened by injected CLI arguments", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-grok-boundary-"));
   try {
