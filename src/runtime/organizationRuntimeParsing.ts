@@ -1,5 +1,6 @@
 import {
   ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS,
+  ORGANIZATION_RUNTIME_CODEX_WORKSPACE_NO_NETWORK_POLICY,
   ORGANIZATION_RUNTIME_MAX_AGENTS,
   ORGANIZATION_RUNTIME_MAX_CONFIG_BYTES,
   ORGANIZATION_RUNTIME_MAX_INSTRUCTIONS_CODEPOINTS,
@@ -188,19 +189,29 @@ function engine(value: unknown, label: string): OrganizationRuntimeEngineIntent 
   // selection, so either field on a non-codex engine is rejected explicitly
   // here (a clear, named error) rather than falling through to the generic
   // "must contain exactly" rejection every other unexpected key gets below.
-  const allowed = kind === "codex" ? ["kind", "model", "reasoningEffort"] : ["kind"];
+  const allowed = kind === "codex" ? ["kind", "model", "reasoningEffort", "codexSandbox"] : ["kind"];
   const extras = Object.keys(input).filter((key) => !allowed.includes(key));
   if (extras.length > 0) {
-    if (kind !== "codex" && (extras.includes("model") || extras.includes("reasoningEffort"))) {
-      throw new TypeError(`${label}.model and ${label}.reasoningEffort are codex-only; their subscription auth and model selection are Daimon-owned`);
+    if (kind !== "codex" && (extras.includes("model") || extras.includes("reasoningEffort") || extras.includes("codexSandbox"))) {
+      throw new TypeError(`${label}.model, ${label}.reasoningEffort, and ${label}.codexSandbox are codex-only; their subscription auth, model selection, and sandbox policy are Daimon-owned`);
     }
     throw new TypeError(`${label} must contain exactly ${allowed.join(", ")}`);
   }
   return {
     kind: kind as OrganizationRuntimeEngineKind,
     ...(input.model === undefined ? {} : { model: nonEmpty(input.model, `${label}.model`) }),
-    ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: reasoningEffort(input.reasoningEffort, `${label}.reasoningEffort`) })
+    ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: reasoningEffort(input.reasoningEffort, `${label}.reasoningEffort`) }),
+    ...(input.codexSandbox === undefined ? {} : { codexSandbox: codexSandbox(input.codexSandbox, `${label}.codexSandbox`) })
   };
+}
+
+function codexSandbox(value: unknown, label: string): OrganizationRuntimeEngineIntent["codexSandbox"] {
+  const input = object(value, label);
+  exact(input, ["mode", "networkAccess", "webSearch"], label);
+  if (input.mode !== ORGANIZATION_RUNTIME_CODEX_WORKSPACE_NO_NETWORK_POLICY.mode || input.networkAccess !== false || input.webSearch !== ORGANIZATION_RUNTIME_CODEX_WORKSPACE_NO_NETWORK_POLICY.webSearch) {
+    throw new TypeError(`${label} must be workspace-write with network disabled and web search disabled`);
+  }
+  return ORGANIZATION_RUNTIME_CODEX_WORKSPACE_NO_NETWORK_POLICY;
 }
 
 function reasoningEffort(value: unknown, label: string): string {

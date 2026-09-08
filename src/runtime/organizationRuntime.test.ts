@@ -261,13 +261,29 @@ test("rejects an unrecognized codex reasoningEffort value", () => {
 
 test("the engine JSON Schema and the parser agree on model/reasoningEffort", () => {
   const engineSchema = ORGANIZATION_RUNTIME_CONFIG_SCHEMA.properties.agents.items.properties.engine;
-  assert.deepEqual(Object.keys(engineSchema.properties).sort(), ["kind", "model", "reasoningEffort"]);
+  assert.deepEqual(Object.keys(engineSchema.properties).sort(), ["codexSandbox", "kind", "model", "reasoningEffort"]);
   assert.deepEqual(engineSchema.required, ["kind"]);
   assert.deepEqual(engineSchema.properties.reasoningEffort.enum, ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS);
   for (const value of ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS) {
     const config = valid();
     config.agents[0]!.engine = { kind: "codex", reasoningEffort: value } as never;
     assert.equal(parseOrganizationRuntimeConfig(config).agents[0]?.engine.reasoningEffort, value);
+  }
+});
+
+test("accepts only the narrow optional Codex workspace policy", () => {
+  const config = valid();
+  config.agents[0]!.engine = { kind: "codex", codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } } as never;
+  assert.deepEqual(parseOrganizationRuntimeConfig(config).agents[0]?.engine.codexSandbox, { mode: "workspace-write", networkAccess: false, webSearch: "disabled" });
+  for (const policy of [
+    { mode: "danger-full-access", networkAccess: false, webSearch: "disabled" },
+    { mode: "workspace-write", networkAccess: true, webSearch: "disabled" },
+    { mode: "workspace-write", networkAccess: false, webSearch: "enabled" },
+    { mode: "workspace-write", networkAccess: false, webSearch: "disabled", extra: true }
+  ]) {
+    const invalid = valid();
+    invalid.agents[0]!.engine = { kind: "codex", codexSandbox: policy } as never;
+    assert.throws(() => parseOrganizationRuntimeConfig(invalid), /codexSandbox/);
   }
 });
 
@@ -280,6 +296,10 @@ test("rejects model and reasoningEffort on a non-codex engine", () => {
     const withEffort = valid();
     withEffort.agents[0]!.engine = { kind, reasoningEffort: "high" } as never;
     assert.throws(() => parseOrganizationRuntimeConfig(withEffort), /codex-only/);
+
+    const withPolicy = valid();
+    withPolicy.agents[0]!.engine = { kind, codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } } as never;
+    assert.throws(() => parseOrganizationRuntimeConfig(withPolicy), /codex-only/);
   }
 });
 

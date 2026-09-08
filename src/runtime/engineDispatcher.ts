@@ -113,7 +113,8 @@ function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: stri
           // Present only when the parsed config declared them; absent keeps
           // today's unpinned Codex CLI default and today's exact argv.
           ...(agent.engine.model === undefined ? {} : { model: agent.engine.model }),
-          ...(agent.engine.reasoningEffort === undefined ? {} : { reasoningEffort: agent.engine.reasoningEffort })
+          ...(agent.engine.reasoningEffort === undefined ? {} : { reasoningEffort: agent.engine.reasoningEffort }),
+          ...(agent.engine.codexSandbox === undefined ? {} : { codexSandbox: agent.engine.codexSandbox })
         } : {}),
         ...(engine==="grok"&&grokBroker!==undefined?{}:{credentialSecretValues: () => readPortableEngineCredentialSecrets(agent.id, engine, engineHomePath)}),
         ...(engine==="grok"&&grokBroker!==undefined?{grokBrokerTurn:(prompt:string,endpoint:string,signal:AbortSignal)=>grokBroker.turn(agent.id,wakeEnvironmentContext.current??"wake",prompt,endpoint,signal)}:{}),
@@ -157,6 +158,7 @@ function cliHarness(
     sessionFactory,
     protectedEnvironmentNames,
     productionTools,
+    ...(agent.engine.kind === "codex" && agent.engine.codexSandbox !== undefined ? { toolNames: [] } : {}),
     wakeEnvironmentContext,
     ...(agent.memory === undefined ? {} : { memory: {
       runtimeHomePath: agent.memory.runtimeHomePath,

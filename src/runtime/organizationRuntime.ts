@@ -1,5 +1,6 @@
 import {
   ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS,
+  ORGANIZATION_RUNTIME_CODEX_WORKSPACE_NO_NETWORK_POLICY,
   ORGANIZATION_RUNTIME_CONFIG_SCHEMA,
   ORGANIZATION_RUNTIME_CONFIG_V2_SCHEMA,
   ORGANIZATION_RUNTIME_MAX_AGENTS,
@@ -16,6 +17,7 @@ import {
 
 export {
   ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS,
+  ORGANIZATION_RUNTIME_CODEX_WORKSPACE_NO_NETWORK_POLICY,
   ORGANIZATION_RUNTIME_CONFIG_SCHEMA,
   ORGANIZATION_RUNTIME_CONFIG_V2_SCHEMA,
   ORGANIZATION_RUNTIME_MAX_AGENTS,
@@ -39,7 +41,8 @@ export type OrganizationRuntimeEngineKind = "codex" | "grok" | "agy";
  * — not a `kind`-discriminated union — because every parsed value already
  * satisfies the invariant; callers that need it narrow on `kind === "codex"`.
  */
-export type OrganizationRuntimeEngineIntent = Readonly<{ kind: OrganizationRuntimeEngineKind; model?: string; reasoningEffort?: string }>;
+export type OrganizationRuntimeCodexSandboxPolicy = Readonly<{ mode: "workspace-write"; networkAccess: false; webSearch: "disabled" }>;
+export type OrganizationRuntimeEngineIntent = Readonly<{ kind: OrganizationRuntimeEngineKind; model?: string; reasoningEffort?: string; codexSandbox?: OrganizationRuntimeCodexSandboxPolicy }>;
 export type OrganizationRuntimeMcpServer = Readonly<{ name: string; transport: "stdio" | "sse" | "streamable_http"; command?: string; args: readonly string[]; env: Readonly<Record<string, string>>; authSecretEnv?: string; url?: string; tools: readonly string[] }>;
 export type OrganizationRuntimeMoltnet = Readonly<{ cliPath: string; configPath: string; networks: readonly Readonly<{ id: string; rooms: readonly string[]; dms: boolean }>[] }>;
 export type OrganizationRuntimeMemory = Readonly<{ runtimeHomePath: string; source?: string; tokenBudget?: number }>;

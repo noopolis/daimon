@@ -117,6 +117,7 @@ export type CliEngineOptions = {
   readonly model?: string;
   /** Codex only: pinned `model_reasoning_effort`, rendered as `-c model_reasoning_effort=<value>`. */
   readonly reasoningEffort?: string;
+  readonly codexSandbox?: { readonly mode: "workspace-write"; readonly networkAccess: false; readonly webSearch: "disabled" };
   /**
    * Advisory per-turn metering sink for the engines whose headless stream
    * reports token usage and that do not run behind the Grok engine broker

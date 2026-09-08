@@ -26,15 +26,31 @@ export const renderGrokSandboxArgs = (
  * exact argv Daimon produced before model selection existed.
  */
 export const renderCodexArgs = (
-  options: Pick<CliEngineOptions, "commandArgs" | "model" | "reasoningEffort">,
+  options: Pick<CliEngineOptions, "commandArgs" | "model" | "reasoningEffort" | "codexSandbox">,
   cwd: string,
   endpoint: string | undefined,
-  sandbox: string = process.env.DAIMON_CODEX_SANDBOX ?? "danger-full-access"
-): string[] => [...assertSafeCodexCommandArgs(options.commandArgs), "exec", "--sandbox", sandbox, "--skip-git-repo-check",
+  sandbox: string = options.codexSandbox?.mode ?? process.env.DAIMON_CODEX_SANDBOX ?? "danger-full-access"
+): string[] => {
+  const strictPolicy = options.codexSandbox;
+  if (strictPolicy !== undefined && (strictPolicy.mode !== "workspace-write" || strictPolicy.networkAccess !== false || strictPolicy.webSearch !== "disabled" || Object.keys(strictPolicy).length !== 3)) {
+    throw new Error("Codex sandbox policy is Daimon-owned and must be workspace-write with network and web search disabled");
+  }
+  const effectiveSandbox = strictPolicy?.mode ?? sandbox;
+  const policyArgs = strictPolicy === undefined ? [] : [
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--strict-config",
+    "-c", "web_search=\"disabled\"",
+    "-c", "sandbox_workspace_write.network_access=false",
+    "-c", "approval_policy=\"never\"",
+    "-c", `mcp_servers={daimon={url=\"${endpoint}\",enabled=true,default_tools_approval_mode=\"approve\"}}`
+  ];
+  return [...assertSafeCodexCommandArgs(options.commandArgs, strictPolicy !== undefined), "exec", "--sandbox", effectiveSandbox, ...policyArgs, "--skip-git-repo-check",
   ...(options.model === undefined ? [] : [`--model=${options.model}`]),
   ...(options.reasoningEffort === undefined ? [] : ["-c", `model_reasoning_effort=${options.reasoningEffort}`]),
   "--color", "never", "--json", "-C", cwd,
   "-c", `mcp_servers.daimon.url=${endpoint}`, "-"];
+};
 
 /**
  * AGY's headless invocation.
@@ -123,9 +139,11 @@ const assertSafeAgyCommandArgs = (args: readonly string[] | undefined): readonly
 };
 
 /** Caller arguments cannot reopen Codex's sandbox, output, cwd, or config boundary. */
-const assertSafeCodexCommandArgs = (args: readonly string[] | undefined): readonly string[] => {
+const assertSafeCodexCommandArgs = (args: readonly string[] | undefined, strictPolicy = false): readonly string[] => {
   const values = args ?? [];
-  if (values.some((value) => /^(?:--json|--sandbox|--dangerously-bypass-approvals-and-sandbox|--output-last-message|--config|--skip-git-repo-check|--color|--cd|-c|-C)(?:=|$)/u.test(value))) {
+  const pattern = /^(?:--json|--sandbox|--dangerously-bypass-approvals-and-sandbox|--output-last-message|--config|--ignore-user-config|--ignore-rules|--skip-git-repo-check|--color|--cd|-c|-C)(?:=|$)/u;
+  const strictPattern = /^(?:--strict-config|--profile|-p|--enable|--disable|--add-dir|--search)(?:=|$)/u;
+  if (values.some((value) => pattern.test(value) || (strictPolicy && strictPattern.test(value)))) {
     throw new Error("Codex security-boundary arguments are Daimon-owned");
   }
   return values;

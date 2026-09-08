@@ -60,6 +60,8 @@ type PiHarnessBaseOptions = {
   thinkingLevel?: PiThinkingLevel;
   world?: PiWorldBinding;
   productionTools?: readonly ToolDefinition[];
+  /** Engine-owned default; an empty list disables Pi builtins for confined CLI engines. */
+  toolNames?: readonly string[];
   wakeEnvironmentContext?: PiWakeEnvironmentContextRef;
 };
 
@@ -161,11 +163,12 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
         ...(this.options.protectedEnvironmentNames ?? []),
         ...(this.options.world === undefined ? [] : [this.options.world.tokenEnv])
       ])];
-      const protectedBash = protectedNames.length === 0 || input.tools?.includes("bash") === false
+      const requestedTools = this.options.toolNames ?? input.tools;
+      const protectedBash = protectedNames.length === 0 || requestedTools?.includes("bash") === false
         ? []
         : [createProtectedBashTool(input.workspacePath, input.runtimeHomePath, protectedNames, wakeEnvironmentContext)];
       const toolNames = [
-        ...(input.tools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"]),
+        ...(requestedTools ?? ["read", "write", "edit", "bash", "grep", "find", "ls"]),
         ...piMemoryToolNames(memoryTools),
         ...(worldTools === undefined ? [] : piWorldToolNames(worldTools))
         ,...(this.options.productionTools ?? []).map((tool) => tool.name)
