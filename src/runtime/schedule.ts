@@ -15,7 +15,7 @@ const CRON_FIELD_BOUNDS = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]] as const;
 
 export type ScheduledOccurrence = Readonly<{ agentId: string; deliveryId: string; occurredAt: string; prompt: string }>;
 type ActiveSchedule = Exclude<OrganizationRuntimeSchedule, { kind: "disabled" }>;
-type Entry = Readonly<{ next_due_ms: number; latest_pending?: ScheduledOccurrence }>;
+type Entry = Readonly<{ next_due_ms: number; fire_at_ms?: number; latest_pending?: ScheduledOccurrence }>;
 type State = Readonly<{ version: typeof STATE_VERSION; schedules: Record<string, Entry> }>;
 type Timer = ReturnType<typeof setTimeout>;
 
@@ -58,16 +58,17 @@ export function createScheduleController(options: ScheduleControllerOptions): Sc
     if (directory === undefined) throw new Error("schedule state directory is unavailable");
     await persist(statePath, state, directory, options.onPersistStageForTest);
   };
+  const nextEntry = (agent: OrganizationRuntimeAgentConfig & { schedule: ActiveSchedule }, anchor: number | undefined, observedNow: number, latest_pending?: ScheduledOccurrence): Entry => {
+    const next_due_ms = nextOccurrence(agent.id, agent.schedule, anchor, observedNow);
+    return withFireTarget({ next_due_ms, ...(latest_pending === undefined ? {} : { latest_pending }) }, agent.schedule, random);
+  };
   const arm = (key: string): void => {
     const prior = timers.get(key);
     if (prior !== undefined) clearTimer(prior);
     if (stopped) return;
-    const due = state.schedules[key]?.next_due_ms;
-    if (due === undefined) return;
-    // The persisted due time stays the exact cron/interval instant; jitter only
-    // perturbs how long this arming waits before firing, drawn fresh every time
-    // a firing is (re-)armed, so it never accumulates onto the stored anchor.
-    const target = due + jitterOffsetMs(byKey.get(key)?.schedule, random);
+    const entry = state.schedules[key];
+    if (entry === undefined) return;
+    const target = entry.fire_at_ms ?? entry.next_due_ms;
     const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, target - now()));
     const timer = setTimer(() => { void enqueue(async () => await onTimer(key)); }, delay);
     timer.unref?.();
@@ -81,7 +82,7 @@ export function createScheduleController(options: ScheduleControllerOptions): Sc
     if (accepted === false || stopped) return;
     const current = state.schedules[key];
     if (current?.latest_pending?.deliveryId !== pending.deliveryId) return;
-    state = { ...state, schedules: { ...state.schedules, [key]: { next_due_ms: current.next_due_ms } } };
+    state = { ...state, schedules: { ...state.schedules, [key]: withoutPending(current) } };
     await save();
   };
   const onTimer = async (key: string): Promise<void> => {
@@ -89,9 +90,10 @@ export function createScheduleController(options: ScheduleControllerOptions): Sc
     const agent = byKey.get(key); const entry = state.schedules[key];
     if (agent === undefined || entry === undefined) return;
     const observedNow = now();
-    if (entry.next_due_ms > observedNow) { arm(key); return; }
+    const fireAt = entry.fire_at_ms ?? entry.next_due_ms;
+    if (fireAt > observedNow) { arm(key); return; }
     const elapsed = latestEligibleOccurrence(agent.schedule, entry.next_due_ms, observedNow);
-    state = { ...state, schedules: { ...state.schedules, [key]: { next_due_ms: nextOccurrence(agent.id, agent.schedule, elapsed, observedNow), latest_pending: occurrenceFor(agent.id, agent.schedule, elapsed) } } };
+    state = { ...state, schedules: { ...state.schedules, [key]: nextEntry(agent, elapsed, observedNow, occurrenceFor(agent.id, agent.schedule, elapsed)) } };
     await save(); arm(key); await drainKey(key);
   };
 
@@ -105,11 +107,13 @@ export function createScheduleController(options: ScheduleControllerOptions): Sc
         const observedNow = now();
         for (const [key, agent] of byKey) {
           const prior = next[key];
-          if (prior === undefined) next[key] = { next_due_ms: nextOccurrence(agent.id, agent.schedule, undefined, observedNow) };
-          else if (prior.next_due_ms <= observedNow) {
+          if (prior === undefined) next[key] = nextEntry(agent, undefined, observedNow);
+          else if ((prior.fire_at_ms ?? prior.next_due_ms) <= observedNow) {
             const elapsed = latestEligibleOccurrence(agent.schedule, prior.next_due_ms, observedNow);
             const pending = occurrenceFor(agent.id, agent.schedule, elapsed);
-            next[key] = { next_due_ms: nextOccurrence(agent.id, agent.schedule, elapsed, observedNow), latest_pending: newer(prior.latest_pending, pending) };
+            next[key] = nextEntry(agent, elapsed, observedNow, newer(prior.latest_pending, pending));
+          } else if (prior.fire_at_ms === undefined) {
+            next[key] = withFireTarget(prior, agent.schedule, random);
           }
         }
         state = { version: STATE_VERSION, schedules: next };
@@ -159,6 +163,15 @@ export function jitterOffsetMs(schedule: ActiveSchedule | undefined, random: () 
   if (jitterSeconds <= 0) return 0;
   const bound = jitterSeconds * 1_000;
   return Math.min(bound, Math.max(0, Math.floor(random() * (bound + 1))));
+}
+
+function withFireTarget(entry: Entry, schedule: ActiveSchedule, random: () => number): Entry {
+  const offset = jitterOffsetMs(schedule, random);
+  return offset === 0 ? entry : { ...entry, fire_at_ms: entry.next_due_ms + offset };
+}
+
+function withoutPending(entry: Entry): Entry {
+  return { next_due_ms: entry.next_due_ms, ...(entry.fire_at_ms === undefined ? {} : { fire_at_ms: entry.fire_at_ms }) };
 }
 
 function latestEligibleOccurrence(schedule: ActiveSchedule, due: number, at: number): number {
@@ -259,12 +272,17 @@ async function restore(
     if (!allowed.has(key)) continue;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("schedule state is invalid");
     const entry = raw as Record<string, unknown>; const keys = Object.keys(entry).sort().join();
-    if (keys !== "next_due_ms" && keys !== "latest_pending,next_due_ms") throw new Error("schedule state is invalid");
+    if (!["fire_at_ms,next_due_ms", "fire_at_ms,latest_pending,next_due_ms", "latest_pending,next_due_ms", "next_due_ms"].includes(keys)) throw new Error("schedule state is invalid");
     if (!Number.isSafeInteger(entry.next_due_ms) || (entry.next_due_ms as number) < 0) throw new Error("schedule state is invalid");
     const nextDue = entry.next_due_ms as number;
+    const fireAt = entry.fire_at_ms;
+    if (fireAt !== undefined) {
+      const maximumFireAt = nextDue + jitterOffsetMs(allowed.get(key)!.schedule, () => 0.999_999_999);
+      if (!Number.isSafeInteger(fireAt) || (fireAt as number) < nextDue || (fireAt as number) > maximumFireAt) throw new Error("schedule state is invalid");
+    }
     const pending = entry.latest_pending === undefined ? undefined : parseOccurrence(entry.latest_pending);
     if (pending !== undefined) assertRestoredOccurrence(key, allowed.get(key)!, pending, nextDue);
-    schedules[key] = { next_due_ms: nextDue, ...(pending === undefined ? {} : { latest_pending: pending }) };
+    schedules[key] = { next_due_ms: nextDue, ...(fireAt === undefined ? {} : { fire_at_ms: fireAt as number }), ...(pending === undefined ? {} : { latest_pending: pending }) };
   }
   return { version: STATE_VERSION, schedules };
 }

@@ -9,7 +9,7 @@ import { WakeAcceptanceStore } from "./wakeAcceptanceStore.js";
 import { parseWakeAcceptanceRequest } from "./wakeAcceptanceTypes.js";
 
 const every = { kind: "every" as const, interval_ms: 60_000, prompt: "work" };
-const agent = (schedule: typeof every | { kind: "cron"; cron: string; timezone: string; prompt: string } | { kind: "disabled" }) =>
+const agent = (schedule: typeof every | { kind: "every"; interval_ms: number; prompt: string; jitter_seconds?: number } | { kind: "cron"; cron: string; timezone: string; prompt: string; jitter_seconds?: number } | { kind: "disabled" }) =>
   ({ id: "alpha", name: "Alpha", instructions: "work", workspacePath: "/workspace/alpha", runtimeHomePath: "/home/alpha", engine: { kind: "codex" as const }, schedule });
 
 test("every schedules keep a stable anchor and coalesce downtime to the latest cadence", () => {
@@ -220,17 +220,17 @@ test("jitter offsets drawn independently per firing differ across firings and ne
   try {
     const controller = createScheduleController({ acceptanceStorePath: root, agents: [agent(cron)], accept: async () => undefined, now: () => now, random, setTimer, clearTimer });
     await controller.start();
-    assert.equal(delays[0], 60_000); // due 60_000 + floor(0*30001) offset 0
+    assert.equal(delays[0], 60_000); // due 60_000 + offset 0
     now = 60_000; latest?.();
     await eventually(async () => delays.length === 2);
-    assert.equal(delays[1], 60_000 + 15_000); // due 120_000, offset floor(0.5*30001)=15000, delay = 120000+15000-60000
-    now = 120_000; latest?.();
+    assert.equal(delays[1], 60_000 + 15_000); // due 120_000, fire target 135000
+    now = 135_000; latest?.();
     await eventually(async () => delays.length === 3);
-    assert.equal(delays[2], 60_000 + 30_000); // due 180_000, offset 30000 (bound), delay = 180000+30000-120000
-    now = 180_000; latest?.();
+    assert.equal(delays[2], 45_000 + 30_000); // due 180_000, fire target 210000
+    now = 210_000; latest?.();
     await eventually(async () => delays.length === 4);
-    assert.equal(delays[3], 60_000 + 7_500); // due 240_000, offset floor(0.25*30001)=7500
-    now = 240_000; latest?.();
+    assert.equal(delays[3], 30_000 + 7_500); // due 240_000, fire target 247500
+    now = 247_500; latest?.();
     await eventually(async () => {
       const value = JSON.parse(await readState(root));
       return value.schedules[Object.keys(value.schedules)[0]!].next_due_ms === 300_000;
@@ -258,7 +258,7 @@ test("absent jitter_seconds produces byte-identical delay to the un-jittered sch
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("restart mid-jittered-schedule neither double-fires nor drifts the persisted due time", async () => {
+test("restart inside a jitter window neither fires early nor drifts the persisted due time", async () => {
   const root = await privateRoot();
   const jittered = { ...every, jitter_seconds: 30 };
   let now = 0;
@@ -267,18 +267,22 @@ test("restart mid-jittered-schedule neither double-fires nor drifts the persiste
     await first.start();
     const before = JSON.parse(await readState(root));
     const dueBefore = before.schedules[Object.keys(before.schedules)[0]!].next_due_ms;
+    const fireBefore = before.schedules[Object.keys(before.schedules)[0]!].fire_at_ms;
     assert.equal(dueBefore, 60_000); // true cadence instant, unaffected by jitter
-    now = 30_000; // still short of the 60s due instant
+    assert.equal(fireBefore, 75_000);
+    now = 61_000; // past the due instant, still inside the jitter delay
     await first.stop();
 
-    const restarted = createScheduleController({ acceptanceStorePath: root, agents: [agent(jittered)], accept: async () => { throw new Error("must not fire before due"); }, now: () => now, random: () => 0.9, ...fakeTimers().options });
+    const restarted = createScheduleController({ acceptanceStorePath: root, agents: [agent(jittered)], accept: async () => { throw new Error("must not fire before the jittered target"); }, now: () => now, random: () => 0.9, ...fakeTimers().options });
     await restarted.start();
     const after = JSON.parse(await readState(root));
     const dueAfter = after.schedules[Object.keys(after.schedules)[0]!].next_due_ms;
-    assert.equal(dueAfter, dueBefore, "restart before the due instant must not drift the persisted due time");
+    const fireAfter = after.schedules[Object.keys(after.schedules)[0]!].fire_at_ms;
+    assert.equal(dueAfter, dueBefore, "restart inside the jitter window must not drift the persisted due time");
+    assert.equal(fireAfter, fireBefore, "restart inside the jitter window must preserve the already drawn fire target");
     await restarted.stop();
 
-    now = 60_000;
+    now = 75_000;
     const accepted: unknown[] = [];
     const timers = fakeTimers();
     const finalRun = createScheduleController({ acceptanceStorePath: root, agents: [agent(jittered)], accept: async (occurrence) => { accepted.push(occurrence); }, now: () => now, random: () => 0.5, ...timers.options });
