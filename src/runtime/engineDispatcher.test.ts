@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { grokSandboxProtectedPaths, startOrganizationRuntimeEngine } from "./engineDispatcher.js";
+import { codexSandboxProtectedPaths, codexSandboxReadablePaths, grokSandboxProtectedPaths, startOrganizationRuntimeEngine } from "./engineDispatcher.js";
 import { AGY_SUBSCRIPTION_REALM, GROK_SUBSCRIPTION_REALM } from "./contractManifest.js";
 import type { EngineBrokerTurnClient } from "./engineBrokerControlClient.js";
 import { ORGANIZATION_RUNTIME_VERSION, type OrganizationRuntimeAgentConfig } from "./organizationRuntime.js";
@@ -37,6 +37,38 @@ test("Grok sandbox protects the shared realm and every peer agent root", () => {
     agy.runtimeHomePath,
     agy.workspacePath
   ]);
+});
+
+test("Codex strict sandbox protects current credentials, ingress, shared roots, and peer roots", () => {
+  const current: OrganizationRuntimeAgentConfig = {
+    ...rootConfig("/private/org", "codex"),
+    engine: { kind: "codex", codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }
+  };
+  const peer: OrganizationRuntimeAgentConfig = {
+    ...rootConfig("/private/org", "grok"),
+    id: "peer-agent"
+  };
+  const agy: OrganizationRuntimeAgentConfig = {
+    ...rootConfig("/private/org", "agy"),
+    id: "secure-agent"
+  };
+  const acceptanceStore = "/private/org/shared/wake-acceptance";
+  assert.deepEqual(codexSandboxProtectedPaths(current.id, current, path.join(current.runtimeHomePath, ".codex"), [current, peer, agy], [acceptanceStore]), [
+    path.join(current.runtimeHomePath, ".codex", "auth.json"),
+    path.join(current.runtimeHomePath, ".daimon-inbound"),
+    "/proc",
+    "/run",
+    GROK_SUBSCRIPTION_REALM.bootstrapMountPath,
+    GROK_SUBSCRIPTION_REALM.durableMountPath,
+    AGY_SUBSCRIPTION_REALM.unlockMountPath,
+    AGY_SUBSCRIPTION_REALM.durableMountPath,
+    acceptanceStore,
+    peer.runtimeHomePath,
+    peer.workspacePath,
+    agy.runtimeHomePath,
+    agy.workspacePath
+  ]);
+  assert.deepEqual(codexSandboxReadablePaths(current), [path.join(current.runtimeHomePath, "tool-output")]);
 });
 
 test("production dispatcher starts each closed engine intent through Daimon", async () => {
@@ -76,6 +108,54 @@ test("production dispatcher starts each closed engine intent through Daimon", as
     if (priorLedger === undefined) delete process.env.DAIMON_TURN_USAGE_LEDGER_PATH;
     else process.env.DAIMON_TURN_USAGE_LEDGER_PATH = priorLedger;
     delete process.env.DAIMON_DISPATCH_CONTROL;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("production Codex strict dispatcher threads derived protected reads into the child argv", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-dispatcher-codex-sandbox-"));
+  const priorPath = process.env.PATH;
+  const priorRun = process.env.NOOPOLIS_RUN_ID;
+  const argvPath = path.join(root, "argv.json");
+  const sharedStore = path.join(root, "shared", "wake-acceptance");
+  const codex = {
+    ...rootConfig(root, "codex"),
+    engine: { kind: "codex", codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }
+  } satisfies OrganizationRuntimeAgentConfig;
+  const peer = { ...rootConfig(root, "grok"), id: "peer-agent" } satisfies OrganizationRuntimeAgentConfig;
+  const stub = path.join(root, "codex");
+  await writeFile(stub, [
+    "#!/usr/bin/env node",
+    `if (process.argv.includes("exec")) await import("node:fs/promises").then(({writeFile})=>writeFile(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2))));`,
+    `process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done" } }) + "\\n");`,
+    `process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } }) + "\\n");`
+  ].join("\n"));
+  await chmod(stub, 0o700);
+  await seedAuth(root, "codex");
+  try {
+    process.env.PATH = `${root}${path.delimiter}${priorPath ?? ""}`;
+    process.env.NOOPOLIS_RUN_ID = "dispatcher-codex-sandbox-test";
+    const handle = await startOrganizationRuntimeEngine(codex, "DAIMON_UNUSED_CONTROL", undefined, undefined, undefined, [codex, peer], [sharedStore]);
+    assert.equal((await handle.wake({ id: "codex-sandbox-wake", kind: "manual", text: "probe" })).text, "done");
+    await handle.stop();
+    const args = JSON.parse(await readFile(argvPath, "utf8")) as string[];
+    const profile = args.find((arg) => arg.startsWith("permissions=")) ?? "";
+    assert.equal(args.includes("--sandbox"), false);
+    assert.ok(args.includes("default_permissions=\"daimon-strict\""));
+    assert.ok(profile.includes(`${path.join(codex.runtimeHomePath, ".codex", "auth.json")}"="deny"`));
+    assert.equal(profile.includes(`${path.join(codex.runtimeHomePath, ".codex")}"="deny"`), false);
+    assert.ok(profile.includes(`${path.join(codex.runtimeHomePath, ".daimon-inbound")}"="deny"`));
+    assert.ok(profile.includes(`${path.join(codex.runtimeHomePath, "tool-output")}"="read"`));
+    assert.ok(profile.includes(`${peer.runtimeHomePath}"="deny"`));
+    assert.ok(profile.includes(`${peer.workspacePath}"="deny"`));
+    assert.ok(profile.includes(`${sharedStore}"="deny"`));
+    assert.ok(profile.includes('"/proc"="deny"'));
+    assert.ok(profile.includes('"/run"="deny"'));
+  } finally {
+    if (priorPath === undefined) delete process.env.PATH;
+    else process.env.PATH = priorPath;
+    if (priorRun === undefined) delete process.env.NOOPOLIS_RUN_ID;
+    else process.env.NOOPOLIS_RUN_ID = priorRun;
     await rm(root, { recursive: true, force: true });
   }
 });

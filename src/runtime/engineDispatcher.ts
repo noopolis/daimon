@@ -10,7 +10,7 @@ import { PiHarnessAdapter } from "../pi/piHarness.js";
 
 import type { OrganizationRuntimeAgentConfig } from "./organizationRuntime.js";
 import type { OrganizationRuntimePathAuthority } from "./physicalReadiness.js";
-import { engineHomeName, prepareEngineExecutable, prepareEngineReadiness, readPortableEngineCredentialSecrets } from "./engineReadiness.js";
+import { engineAuthFile, engineHomeName, prepareEngineExecutable, prepareEngineReadiness, readPortableEngineCredentialSecrets } from "./engineReadiness.js";
 import type { EngineBrokerTurnClient } from "./engineBrokerControlClient.js";
 import { createProductionAgentTools } from "./productionAgentTools.js";
 import { AGY_SUBSCRIPTION_REALM, GROK_SUBSCRIPTION_REALM } from "./contractManifest.js";
@@ -45,7 +45,13 @@ export async function startOrganizationRuntimeEngine(
         runtimeHomePath: canonicalAgent.runtimeHomePath
       })
     : undefined;
-  const adapter = adapterFor(canonicalAgent, controlTokenEnv, readiness.verify, readiness.executablePath, readiness.engineHomePath, paths?.verify, agyBusAddress, await createProductionAgentTools(canonicalAgent, wakeContext), wakeContext, grokSandbox,grokBroker);
+  const codexSandboxPaths = canonicalAgent.engine.kind === "codex" && canonicalAgent.engine.codexSandbox !== undefined
+    ? {
+        protectedPaths: codexSandboxProtectedPaths(canonicalAgent.id, canonicalAgent, readiness.engineHomePath, organizationAgents ?? [canonicalAgent], sharedProtectedPaths),
+        readablePaths: codexSandboxReadablePaths(canonicalAgent)
+      }
+    : undefined;
+  const adapter = adapterFor(canonicalAgent, controlTokenEnv, readiness.verify, readiness.executablePath, readiness.engineHomePath, paths?.verify, agyBusAddress, await createProductionAgentTools(canonicalAgent, wakeContext), wakeContext, grokSandbox,grokBroker,codexSandboxPaths);
   const handle = await adapter.startAgent({
     id: canonicalAgent.id,
     name: canonicalAgent.name,
@@ -85,7 +91,29 @@ export function grokSandboxProtectedPaths(
   ];
 }
 
-function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: string, verifyExecutable: () => Promise<void>, executablePath: string, engineHomePath: string, verifyRuntimePaths?: () => Promise<void>, agyBusAddress?: string, productionTools: readonly import("@earendil-works/pi-coding-agent").ToolDefinition[] = [], wakeEnvironmentContext: import("../pi/piAgentWakeSupport.js").PiWakeEnvironmentContextRef = {}, verifyGrokSandbox?: () => Promise<void>,grokBroker?:EngineBrokerTurnClient): PiHarnessAdapter {
+export function codexSandboxProtectedPaths(
+  currentAgentId: string,
+  currentAgent: OrganizationRuntimeAgentConfig,
+  currentEngineHomePath: string,
+  organizationAgents: readonly OrganizationRuntimeAgentConfig[],
+  sharedProtectedPaths: readonly string[] = []
+): readonly string[] {
+  return [...new Set([
+    engineAuthFile("codex", currentEngineHomePath),
+    path.join(currentAgent.runtimeHomePath, ".daimon-inbound"),
+    "/proc",
+    "/run",
+    ...grokSandboxProtectedPaths(currentAgentId, organizationAgents, sharedProtectedPaths)
+  ])];
+}
+
+export function codexSandboxReadablePaths(
+  currentAgent: OrganizationRuntimeAgentConfig
+): readonly string[] {
+  return [path.join(currentAgent.runtimeHomePath, "tool-output")];
+}
+
+function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: string, verifyExecutable: () => Promise<void>, executablePath: string, engineHomePath: string, verifyRuntimePaths?: () => Promise<void>, agyBusAddress?: string, productionTools: readonly import("@earendil-works/pi-coding-agent").ToolDefinition[] = [], wakeEnvironmentContext: import("../pi/piAgentWakeSupport.js").PiWakeEnvironmentContextRef = {}, verifyGrokSandbox?: () => Promise<void>,grokBroker?:EngineBrokerTurnClient,codexSandboxPaths?: { readonly protectedPaths: readonly string[]; readonly readablePaths: readonly string[] }): PiHarnessAdapter {
   const engine = agent.engine.kind;
   const sessionFactory = createCliSessionFactory(
     engine === "agy"
@@ -114,7 +142,11 @@ function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: stri
           // today's unpinned Codex CLI default and today's exact argv.
           ...(agent.engine.model === undefined ? {} : { model: agent.engine.model }),
           ...(agent.engine.reasoningEffort === undefined ? {} : { reasoningEffort: agent.engine.reasoningEffort }),
-          ...(agent.engine.codexSandbox === undefined ? {} : { codexSandbox: agent.engine.codexSandbox })
+          ...(agent.engine.codexSandbox === undefined ? {} : { codexSandbox: agent.engine.codexSandbox }),
+          ...(codexSandboxPaths === undefined ? {} : {
+            codexSandboxProtectedPaths: codexSandboxPaths.protectedPaths,
+            codexSandboxReadablePaths: codexSandboxPaths.readablePaths
+          })
         } : {}),
         ...(engine==="grok"&&grokBroker!==undefined?{}:{credentialSecretValues: () => readPortableEngineCredentialSecrets(agent.id, engine, engineHomePath)}),
         ...(engine==="grok"&&grokBroker!==undefined?{grokBrokerTurn:(prompt:string,endpoint:string,signal:AbortSignal)=>grokBroker.turn(agent.id,wakeEnvironmentContext.current??"wake",prompt,endpoint,signal)}:{}),
