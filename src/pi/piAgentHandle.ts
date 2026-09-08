@@ -1,6 +1,6 @@
 import type { AgentHandle, AgentStatus, WakeEvent, WakeResult } from "../core/types.js";
 import { createTrustedPiMemoryToolContext, type PiMemoryToolContextRef } from "./memoryTools.js";
-import { formatWakePrompt } from "./prompts.js";
+import { formatWakePrompt, preserveModelFacingWakeIdentity } from "./prompts.js";
 import {
   stampTurnInputSubmitted,
   stampTurnOutputCompleted,
@@ -197,7 +197,7 @@ export class PiAgentHandle implements AgentHandle {
           prepared,
           status: "completed"
         };
-        promptText = prepared.promptText;
+        promptText = preserveModelFacingWakeIdentity(prepared.promptText, event, request.eventId);
 
         if (this.memoryToolContext !== undefined) {
           this.memoryToolContext.observeTool = (toolEvent) => tools.push(toolEvent);

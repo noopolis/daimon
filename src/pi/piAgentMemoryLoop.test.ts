@@ -214,3 +214,82 @@ test("a wake whose event.id is not namespaced is still recorded, via the daimon:
 
   await handle.stop();
 });
+
+test("memory-prepared prompts preserve an unrecognized original wake id for model-facing tools", async () => {
+  const root = await tempDir();
+  const runtimeHomePath = path.join(root, "runtime");
+  const memory: MemoryRuntime = createMemoryRuntime({
+    agentId: "identity-agent",
+    runtimeHomePath,
+    source: "test",
+    tokenBudget: 2000
+  });
+  const memoryRequests: string[] = [];
+  const prepare = memory.prepareTurn.bind(memory);
+  memory.prepareTurn = async (request) => {
+    memoryRequests.push(request.eventId);
+    return prepare(request);
+  };
+
+  const session = makeStubSession(() => "ack");
+  const handle = new PiAgentHandle(
+    "identity-agent",
+    session,
+    async () => session,
+    runtimeHomePath,
+    traceModel,
+    memory
+  );
+
+  await handle.wake(wake("manual:2026-09-08:conference:test", "manual body"));
+
+  assert.deepEqual(memoryRequests, ["daimon:manual:2026-09-08:conference:test"]);
+  const prompt = session.prompts[0] ?? "";
+  assert.match(prompt, /## Wake\nid: manual:2026-09-08:conference:test\n/u);
+  assert.doesNotMatch(prompt, /## Wake\nid: daimon:manual:2026-09-08:conference:test\n/u);
+  assert.match(prompt, /## Memory context/u);
+
+  const events = await new JsonlMemoryStore(runtimeHomePath).read({ principalAgentId: "identity-agent" });
+  assert.ok(
+    events.some((event) => event.content.kind === "text" && event.content.text.includes("daimon:manual:2026-09-08:conference:test")),
+    "expected memory records to keep the mneme-compatible namespaced event id"
+  );
+
+  await handle.stop();
+});
+
+test("memory-prepared prompts leave already-namespaced Moltnet wake ids unchanged", async () => {
+  const root = await tempDir();
+  const runtimeHomePath = path.join(root, "runtime");
+  const memory: MemoryRuntime = createMemoryRuntime({
+    agentId: "moltnet-identity-agent",
+    runtimeHomePath,
+    source: "test",
+    tokenBudget: 2000
+  });
+  const memoryRequests: string[] = [];
+  const prepare = memory.prepareTurn.bind(memory);
+  memory.prepareTurn = async (request) => {
+    memoryRequests.push(request.eventId);
+    return prepare(request);
+  };
+
+  const session = makeStubSession(() => "ack");
+  const handle = new PiAgentHandle(
+    "moltnet-identity-agent",
+    session,
+    async () => session,
+    runtimeHomePath,
+    traceModel,
+    memory
+  );
+
+  await handle.wake(wake("moltnet:daimon-message-1", "moltnet body"));
+
+  assert.deepEqual(memoryRequests, ["moltnet:daimon-message-1"]);
+  const prompt = session.prompts[0] ?? "";
+  assert.match(prompt, /## Wake\nid: moltnet:daimon-message-1\n/u);
+  assert.doesNotMatch(prompt, /## Wake\nid: daimon:moltnet:daimon-message-1\n/u);
+
+  await handle.stop();
+});
