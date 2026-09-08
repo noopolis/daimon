@@ -88,6 +88,8 @@ const makeHarness = async (input: {
   root: string;
   sessionScripts: string[][];
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  toolNames?: readonly string[];
+  productionTools?: readonly { name: string; label: string; description: string; parameters: { type: string; properties: Record<string, never> }; execute: () => Promise<{ content: never[]; details: Record<string, never> }> }[];
 }) => {
   const sessionFactory = makeFakePiSessionFactory(input.sessionScripts);
   const authPath = path.join(input.root, "auth.json");
@@ -107,11 +109,26 @@ const makeHarness = async (input: {
     },
     sessionFactory: sessionFactory.factory,
     memory: { tokenBudget: 1200 },
-    thinkingLevel: input.thinkingLevel
+    thinkingLevel: input.thinkingLevel,
+    toolNames: input.toolNames,
+    productionTools: input.productionTools
   });
 
   return { adapter, runtimeHomePath, workspacePath, sessionFactory };
 };
+
+test("strict CLI tool mount omits Pi builtins while retaining declared production tools", async () => {
+  const root = await tempDir();
+  const productionTools = ["moltnet_send", "mcp_desk_ping"].map((name) => ({ name, label: name, description: name, parameters: { type: "object", properties: {} }, execute: async () => ({ content: [], details: {} }) }));
+  const harness = await makeHarness({ root, sessionScripts: [["done"]], toolNames: [], productionTools });
+  const handle = await harness.adapter.startAgent({ id: "strict", name: "Strict", instructions: "work", runtimeHomePath: harness.runtimeHomePath, workspacePath: harness.workspacePath, tools: ["bash", "read", "write", "edit", "grep", "find", "ls"] });
+  const input = harness.sessionFactory.inputs[0] as { tools?: string[]; customTools?: Array<{ name: string }> };
+  assert.deepEqual(input.tools, ["memory_search", "memory_locate", "memory_register", "memory_summarize", "memory_forget", "moltnet_send", "mcp_desk_ping"]);
+  assert.deepEqual((input.customTools ?? []).map((tool) => tool.name).filter((name) => ["bash", "read", "write", "edit", "grep", "find", "ls"].includes(name)), []);
+  assert.ok(input.customTools?.some((tool) => tool.name === "moltnet_send"));
+  assert.ok(input.customTools?.some((tool) => tool.name === "mcp_desk_ping"));
+  await handle.stop();
+});
 
 const nextTick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 

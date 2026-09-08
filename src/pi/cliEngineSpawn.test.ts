@@ -36,7 +36,7 @@ test("autonomous Codex and Grok launches omit wall-clock and turn caps", async (
 test("Codex output, sandbox, config, and cwd boundaries reject caller overrides", () => {
   for (const injected of [
     "--json", "--sandbox", "--sandbox=read-only", "--dangerously-bypass-approvals-and-sandbox",
-    "--output-last-message", "-c", "--config", "--skip-git-repo-check", "--color", "-C", "--cd"
+    "--output-last-message", "-c", "--config", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--color", "-C", "--cd"
   ]) {
     assert.throws(() => renderCodexArgs({ commandArgs: [injected] }, "/workspace", undefined), /Daimon-owned/u);
   }
@@ -50,6 +50,54 @@ test("codex argv is byte-identical to before model selection existed when model/
     "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-"];
   const after = renderCodexArgs({ commandArgs: [] }, "/workspace", "http://127.0.0.1:1/mcp");
   assert.deepEqual(after, before);
+});
+
+test("codex strict policy is rendered as per-turn Daimon-owned CLI config", () => {
+  const args = renderCodexArgs({ commandArgs: [], codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "/workspace", "http://127.0.0.1:1/mcp");
+  assert.deepEqual(args.slice(args.indexOf("--sandbox"), args.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+  assert.ok(args.includes("--ignore-user-config"));
+  assert.ok(args.includes("--ignore-rules"));
+  assert.ok(args.includes("web_search=\"disabled\""));
+  assert.ok(args.includes("sandbox_workspace_write.network_access=false"));
+  assert.ok(args.includes("approval_policy=\"never\""));
+  assert.ok(args.some((arg) => arg.includes("mcp_servers={daimon={url=\"http://127.0.0.1:1/mcp\",enabled=true,default_tools_approval_mode=\"approve\"}}")));
+  for (const injected of ["--profile", "--profile=weak", "-p", "--enable", "--disable", "--add-dir", "--search"]) {
+    assert.throws(() => renderCodexArgs({ commandArgs: [injected], codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "/workspace", "http://127.0.0.1:1/mcp"), /Daimon-owned/u);
+  }
+});
+
+test("Codex renderer rejects a weak policy even when bypassing the parser", () => {
+  assert.throws(() => renderCodexArgs({ commandArgs: [], codexSandbox: { mode: "danger-full-access", networkAccess: true, webSearch: "enabled" } as never }, "/workspace", "http://127.0.0.1:1/mcp"), /sandbox policy/u);
+});
+
+test("codex strict policy defeats a weakening process environment", () => {
+  const previous = process.env.DAIMON_CODEX_SANDBOX;
+  try {
+    process.env.DAIMON_CODEX_SANDBOX = "danger-full-access";
+    const args = renderCodexArgs({ commandArgs: [], codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "/workspace", "http://127.0.0.1:1/mcp");
+    assert.deepEqual(args.slice(args.indexOf("--sandbox"), args.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+  } finally {
+    if (previous === undefined) delete process.env.DAIMON_CODEX_SANDBOX;
+    else process.env.DAIMON_CODEX_SANDBOX = previous;
+  }
+});
+
+test("strict Codex policy cannot be overridden by the renderer sandbox argument", () => {
+  const args = renderCodexArgs({ commandArgs: [], codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "/workspace", "http://127.0.0.1:1/mcp", "danger-full-access");
+  assert.deepEqual(args.slice(args.indexOf("--sandbox"), args.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+});
+
+test("captured Codex spawn argv carries the strict policy on a real turn launch", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-codex-policy-argv-"));
+  const command = path.join(root, "engine");
+  await writeFile(command, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n");
+  await chmod(command, 0o700);
+  try {
+    const child = spawnEngine({ engine: "codex", command, codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "probe", { cwd: root }, "http://127.0.0.1:1/mcp");
+    const args = JSON.parse(await readChild(child, 10_000, [])) as string[];
+    assert.deepEqual(args.slice(args.indexOf("--sandbox"), args.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+    assert.ok(args.includes("-c") && args.includes("sandbox_workspace_write.network_access=false"));
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("codex argv renders -m for a pinned model and leaves everything else untouched", () => {

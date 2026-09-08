@@ -29,6 +29,7 @@ export const ORGANIZATION_RUNTIME_MAX_SCHEDULE_JITTER_SECONDS = 3_600;
  * misconfiguration rather than silently forwarded to the model.
  */
 export const ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"] as const;
+export const ORGANIZATION_RUNTIME_CODEX_WORKSPACE_NO_NETWORK_POLICY = { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } as const;
 
 const PRODUCTION_TOOL_PROPERTIES = {
   mcp: { type: "array", maxItems: 8, items: { type: "object", additionalProperties: false, required: ["name", "transport", "args", "env", "tools"], properties: {
@@ -68,7 +69,10 @@ export const ORGANIZATION_RUNTIME_CONFIG_SCHEMA = {
         engine: { type: "object", additionalProperties: false, required: ["kind"], properties: {
           kind: { enum: ["codex", "grok", "agy"] },
           model: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, pattern: "\\S" },
-          reasoningEffort: { enum: ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS }
+          reasoningEffort: { enum: ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS },
+          codexSandbox: { type: "object", additionalProperties: false, required: ["mode", "networkAccess", "webSearch"], properties: {
+            mode: { const: "workspace-write" }, networkAccess: { const: false }, webSearch: { const: "disabled" }
+          } }
         } },
         ...PRODUCTION_TOOL_PROPERTIES
       }
