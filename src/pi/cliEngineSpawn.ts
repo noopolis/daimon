@@ -26,7 +26,7 @@ export const renderGrokSandboxArgs = (
  * exact argv Daimon produced before model selection existed.
  */
 export const renderCodexArgs = (
-  options: Pick<CliEngineOptions, "commandArgs" | "model" | "reasoningEffort" | "codexSandbox">,
+  options: Pick<CliEngineOptions, "commandArgs" | "model" | "reasoningEffort" | "codexSandbox" | "codexSandboxProtectedPaths" | "codexSandboxReadablePaths">,
   cwd: string,
   endpoint: string | undefined,
   sandbox: string = options.codexSandbox?.mode ?? process.env.DAIMON_CODEX_SANDBOX ?? "danger-full-access"
@@ -36,20 +36,39 @@ export const renderCodexArgs = (
     throw new Error("Codex sandbox policy is Daimon-owned and must be workspace-write with network and web search disabled");
   }
   const effectiveSandbox = strictPolicy?.mode ?? sandbox;
+  const profileName = "daimon-strict";
   const policyArgs = strictPolicy === undefined ? [] : [
     "--ignore-user-config",
     "--ignore-rules",
     "--strict-config",
     "-c", "web_search=\"disabled\"",
-    "-c", "sandbox_workspace_write.network_access=false",
+    "-c", `default_permissions=${JSON.stringify(profileName)}`,
+    "-c", renderCodexPermissionProfile(profileName, options.codexSandboxProtectedPaths ?? [], options.codexSandboxReadablePaths ?? []),
     "-c", "approval_policy=\"never\"",
     "-c", `mcp_servers={daimon={url=\"${endpoint}\",enabled=true,default_tools_approval_mode=\"approve\"}}`
   ];
-  return [...assertSafeCodexCommandArgs(options.commandArgs, strictPolicy !== undefined), "exec", "--sandbox", effectiveSandbox, ...policyArgs, "--skip-git-repo-check",
+  return [...assertSafeCodexCommandArgs(options.commandArgs, strictPolicy !== undefined), "exec", ...(strictPolicy === undefined ? ["--sandbox", effectiveSandbox] : []), ...policyArgs, "--skip-git-repo-check",
   ...(options.model === undefined ? [] : [`--model=${options.model}`]),
   ...(options.reasoningEffort === undefined ? [] : ["-c", `model_reasoning_effort=${options.reasoningEffort}`]),
   "--color", "never", "--json", "-C", cwd,
   "-c", `mcp_servers.daimon.url=${endpoint}`, "-"];
+};
+
+export const renderCodexPermissionProfile = (
+  profileName: string,
+  protectedPaths: readonly string[],
+  readablePaths: readonly string[] = []
+): string => {
+  const filesystem: Record<string, "read" | "write" | "deny" | Record<string, "write">> = {
+    ":workspace_roots": { ".": "write" }
+  };
+  for (const readablePath of readablePaths) filesystem[readablePath] = "read";
+  for (const protectedPath of protectedPaths) filesystem[protectedPath] = "deny";
+  return `permissions=${tomlInline({ [profileName]: {
+    extends: ":workspace",
+    filesystem,
+    network: { enabled: false }
+  } })}`;
 };
 
 /**
@@ -142,7 +161,7 @@ const assertSafeAgyCommandArgs = (args: readonly string[] | undefined): readonly
 const assertSafeCodexCommandArgs = (args: readonly string[] | undefined, strictPolicy = false): readonly string[] => {
   const values = args ?? [];
   const pattern = /^(?:--json|--sandbox|--dangerously-bypass-approvals-and-sandbox|--output-last-message|--config|--ignore-user-config|--ignore-rules|--skip-git-repo-check|--color|--cd|-c|-C)(?:=|$)/u;
-  const strictPattern = /^(?:--strict-config|--profile|-p|--enable|--disable|--add-dir|--search)(?:=|$)/u;
+  const strictPattern = /^(?:--strict-config|--profile|-p|-P|--permissions-profile|--enable|--disable|--add-dir|--search)(?:=|$)|^(?:default_permissions|permissions)(?:=|\.)/u;
   if (values.some((value) => pattern.test(value) || (strictPolicy && strictPattern.test(value)))) {
     throw new Error("Codex security-boundary arguments are Daimon-owned");
   }
@@ -156,3 +175,12 @@ const assertSafeGrokCommandArgs = (args: readonly string[] | undefined): readonl
   }
   return values;
 };
+
+function tomlInline(value: unknown): string {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return `{${Object.entries(value as Record<string, unknown>).map(([key, entry]) => `${JSON.stringify(key)}=${tomlInline(entry)}`).join(",")}}`;
+  }
+  throw new Error("unsupported Codex permission profile value");
+}

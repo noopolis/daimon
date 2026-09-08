@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { readChild } from "./cliSession.js";
-import { GROK_STRICT_SANDBOX_PROFILE, renderCodexArgs, renderGrokSandboxArgs, spawnEngine } from "./cliEngineSpawn.js";
+import { GROK_STRICT_SANDBOX_PROFILE, renderCodexArgs, renderCodexPermissionProfile, renderGrokSandboxArgs, spawnEngine } from "./cliEngineSpawn.js";
 
 test("autonomous Codex and Grok launches omit wall-clock and turn caps", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-unbounded-cli-"));
@@ -53,15 +53,21 @@ test("codex argv is byte-identical to before model selection existed when model/
 });
 
 test("codex strict policy is rendered as per-turn Daimon-owned CLI config", () => {
-  const args = renderCodexArgs({ commandArgs: [], codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "/workspace", "http://127.0.0.1:1/mcp");
-  assert.deepEqual(args.slice(args.indexOf("--sandbox"), args.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+  const args = renderCodexArgs({
+    commandArgs: [],
+    codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" },
+    codexSandboxProtectedPaths: ["/runtime/agent/.codex/auth.json", "/runtime/agent/.daimon-inbound", "/proc", "/run", "/runtime/peer"],
+    codexSandboxReadablePaths: ["/runtime/agent/tool-output"]
+  }, "/workspace", "http://127.0.0.1:1/mcp");
+  assert.equal(args.includes("--sandbox"), false);
   assert.ok(args.includes("--ignore-user-config"));
   assert.ok(args.includes("--ignore-rules"));
   assert.ok(args.includes("web_search=\"disabled\""));
-  assert.ok(args.includes("sandbox_workspace_write.network_access=false"));
+  assert.ok(args.includes("default_permissions=\"daimon-strict\""));
+  assert.ok(args.some((arg) => arg === 'permissions={"daimon-strict"={"extends"=":workspace","filesystem"={":workspace_roots"={"."="write"},"/runtime/agent/tool-output"="read","/runtime/agent/.codex/auth.json"="deny","/runtime/agent/.daimon-inbound"="deny","/proc"="deny","/run"="deny","/runtime/peer"="deny"},"network"={"enabled"=false}}}'));
   assert.ok(args.includes("approval_policy=\"never\""));
   assert.ok(args.some((arg) => arg.includes("mcp_servers={daimon={url=\"http://127.0.0.1:1/mcp\",enabled=true,default_tools_approval_mode=\"approve\"}}")));
-  for (const injected of ["--profile", "--profile=weak", "-p", "--enable", "--disable", "--add-dir", "--search"]) {
+  for (const injected of ["--profile", "--profile=weak", "--permissions-profile", "--permissions-profile=weak", "-p", "-P", "--enable", "--disable", "--add-dir", "--search", "default_permissions=\":danger-full-access\"", "permissions.weak.extends=\":danger-full-access\""]) {
     assert.throws(() => renderCodexArgs({ commandArgs: [injected], codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "/workspace", "http://127.0.0.1:1/mcp"), /Daimon-owned/u);
   }
 });
@@ -75,7 +81,8 @@ test("codex strict policy defeats a weakening process environment", () => {
   try {
     process.env.DAIMON_CODEX_SANDBOX = "danger-full-access";
     const args = renderCodexArgs({ commandArgs: [], codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "/workspace", "http://127.0.0.1:1/mcp");
-    assert.deepEqual(args.slice(args.indexOf("--sandbox"), args.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+    assert.equal(args.includes("--sandbox"), false);
+    assert.ok(args.includes("default_permissions=\"daimon-strict\""));
   } finally {
     if (previous === undefined) delete process.env.DAIMON_CODEX_SANDBOX;
     else process.env.DAIMON_CODEX_SANDBOX = previous;
@@ -84,7 +91,8 @@ test("codex strict policy defeats a weakening process environment", () => {
 
 test("strict Codex policy cannot be overridden by the renderer sandbox argument", () => {
   const args = renderCodexArgs({ commandArgs: [], codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "/workspace", "http://127.0.0.1:1/mcp", "danger-full-access");
-  assert.deepEqual(args.slice(args.indexOf("--sandbox"), args.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+  assert.equal(args.includes("--sandbox"), false);
+  assert.ok(args.includes("default_permissions=\"daimon-strict\""));
 });
 
 test("captured Codex spawn argv carries the strict policy on a real turn launch", async () => {
@@ -93,11 +101,25 @@ test("captured Codex spawn argv carries the strict policy on a real turn launch"
   await writeFile(command, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n");
   await chmod(command, 0o700);
   try {
-    const child = spawnEngine({ engine: "codex", command, codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } }, "probe", { cwd: root }, "http://127.0.0.1:1/mcp");
+    const child = spawnEngine({
+      engine: "codex",
+      command,
+      codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" },
+      codexSandboxProtectedPaths: [path.join(root, ".codex", "auth.json")],
+      codexSandboxReadablePaths: [path.join(root, "tool-output")]
+    }, "probe", { cwd: root }, "http://127.0.0.1:1/mcp");
     const args = JSON.parse(await readChild(child, 10_000, [])) as string[];
-    assert.deepEqual(args.slice(args.indexOf("--sandbox"), args.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
-    assert.ok(args.includes("-c") && args.includes("sandbox_workspace_write.network_access=false"));
+    assert.equal(args.includes("--sandbox"), false);
+    assert.ok(args.includes("-c") && args.includes("default_permissions=\"daimon-strict\""));
+    assert.ok(args.some((arg) => arg.includes(`${path.join(root, ".codex", "auth.json")}"="deny"`)));
+    assert.ok(args.some((arg) => arg.includes(`${path.join(root, "tool-output")}"="read"`)));
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Codex permission profile lets protected denies override readable paths", () => {
+  const rendered = renderCodexPermissionProfile("daimon-strict", ["/runtime/agent/.codex"], ["/runtime/agent/tool-output", "/runtime/agent/.codex"]);
+  assert.match(rendered, /"\/runtime\/agent\/tool-output"="read"/u);
+  assert.match(rendered, /"\/runtime\/agent\/\.codex"="deny"/u);
 });
 
 test("codex argv renders -m for a pinned model and leaves everything else untouched", () => {

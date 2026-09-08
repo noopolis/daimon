@@ -26,6 +26,13 @@ stage/promote cycle while each agent retains private non-auth home state.
 the provider's fail-open built-in profile with an exact custom profile denying
 the realm, bootstrap, and peer roots, and requires a kernel-enforcement event
 before every Grok setup, turn, and cleanup process.
+Strict Codex uses its native permission profile only for model-run local
+commands: the profile denies current `.codex/auth.json`, current
+`.daimon-inbound`, `/proc`, `/run`, shared protected stores, and peer roots
+while preserving Codex's own helper files, the workspace's prepared resource
+symlink reads, and the current agent's `tool-output/` spill reads. Codex
+provider traffic and trusted MCP/provider processes stay outside that native
+command sandbox and must keep their own auth.
 `organizationRuntimeReadiness.ts` composes portable credential preparation,
 AGY realm readiness, and physical path authority before any agent starts. AGY
 fails closed on enrolment: `verifyAgySubscriptionEnrollment` runs there at host
