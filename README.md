@@ -288,6 +288,15 @@ upstream-documented dummy `ollama` value.
 
 ## Pi E2E
 
+`npm run live:grok-broker` checks an existing Grok subscription login through
+the real CLI and Daimon provider proxy, then repeats after restarting the proxy.
+It spends two short model turns, requires their exact terminal reply and real
+usage, and gives each CLI a temporary home containing only a scoped capability.
+The operator credential is read in the parent process and is never copied or
+refreshed. This is a local authentication/transport check; it does not exercise
+the Linux native launcher, worker attestation, MCP tools, or OAuth renewal.
+Success ends with `GROK_BROKER_AUTH_RESTART_OK`.
+
 The Pi E2E uses the local Codex CLI subscription auth file to seed an ignored Pi
 `auth.json` under `.runtime/`.
 
