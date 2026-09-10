@@ -13,6 +13,12 @@ coordinate wakes.
 Every source file stays below 400 lines. Keep tests beside the contract they
 cover.
 
+`grokBrokerProxyRequest.ts` preserves the worker CLI's bounded
+`x-grok-client-version` and supplies its `grok-shell` client identity when
+rebuilding provider headers. Dropping the version makes the subscription
+provider reject an otherwise valid login with HTTP 426; never replace it with
+a fabricated version or pass arbitrary worker headers through.
+
 `agySubscriptionRealm.ts` owns the one host-level private D-Bus/Secret Service
 realm, durable keyring lease, bounded unlock stdin, and cleanup.
 `agySubscriptionBootstrap.ts` owns only the interactive first-enrollment AGY

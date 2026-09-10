@@ -1,6 +1,8 @@
 import type { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
 
 const MAX_BODY = 2 * 1024 * 1024;
+const MAX_CLIENT_VERSION = 64;
+const CLIENT_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/u;
 export type GrokBrokerProxyInput = Readonly<{ method: string; pathname: string; headers: Readonly<Record<string, string | undefined>>; body: Uint8Array; agentId?: string; turnId?: string }>;
 export type GrokBrokerUpstreamRequest = Readonly<{ url: "https://cli-chat-proxy.grok.com/v1/chat/completions"; headers: Readonly<Record<string, string>>; body: Uint8Array }>;
 
@@ -11,6 +13,8 @@ export function authorizeGrokBrokerProxyRequest(input: GrokBrokerProxyInput, cap
   const scope = capabilities.authorizeToken(match[1]!);
   if (scope === undefined || (input.agentId !== undefined && scope.agentId !== input.agentId) || (input.turnId !== undefined && scope.turnId !== input.turnId)) throw new Error("broker proxy request rejected");
   if (!bearer || /[\r\n]/u.test(bearer)) throw new Error("broker credential authority unavailable");
+  const clientVersion = input.headers["x-grok-client-version"];
+  if (clientVersion === undefined || clientVersion.length > MAX_CLIENT_VERSION || !CLIENT_VERSION.test(clientVersion)) throw new Error("broker proxy request rejected");
   try { const parsed = JSON.parse(Buffer.from(input.body).toString("utf8")) as Record<string, unknown>; if (parsed.stream !== true || !Array.isArray(parsed.messages)) throw new Error(); } catch { throw new Error("broker proxy request rejected"); }
-  return { url: "https://cli-chat-proxy.grok.com/v1/chat/completions", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", "x-xai-token-auth": "xai-grok-cli", "x-grok-model-override": "grok-build" }, body: input.body };
+  return { url: "https://cli-chat-proxy.grok.com/v1/chat/completions", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", "x-xai-token-auth": "xai-grok-cli", "x-grok-model-override": "grok-build", "x-grok-client-version": clientVersion, "x-grok-client-identifier": "grok-shell" }, body: input.body };
 }
