@@ -192,3 +192,12 @@ Each engine/tool child receives only the current non-secret wake id in
 `DAIMON_WAKE_ID`; it is bound for one turn and cleared afterward. Transports
 may use it as an idempotency/cause key, but Daimon does not interpret transport
 identities or targets.
+
+`attentionDispatcher.ts` owns execution selection from durable deliveries. The
+per-agent claim in `wakeAcceptanceStore.ts` atomically binds all selected ids
+before any record transition or engine invocation. Never restore batching by
+counting arrivals or marking read messages complete. `attention` is opt-in;
+unmarked/deferred deliveries wait for new input without a self-wake loop.
+Live turn authority is `activity.executions`, independent of receipt completion;
+its execution id must equal the engine wake id. Budget pauses retain acceptance,
+and operator stop remains a hard latch.

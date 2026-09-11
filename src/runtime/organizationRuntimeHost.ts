@@ -1,3 +1,4 @@
+import type { AttentionRegistry } from "./attention.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { AgentHandle, AgentStatus, WakeEvent } from "../core/types.js";
@@ -54,11 +55,18 @@ type HostedAgent = {
 /** Creates the public host with Daimon's closed production engine dispatcher. */
 export function createOrganizationRuntimeHost(config: unknown, options: ProductionHostOptions = {}): OrganizationRuntimeHost {
   const parsed = parseOrganizationRuntimeConfig(config);
+  if (parsed.agents.some((agent) => agent.attention !== undefined)) throw new Error("attention requires createOrganizationRuntimeControlHost and POST /v2/wakes for durable inbox ownership");
+  return createOrganizationRuntimeHostWithAttention(parsed, options, new Map());
+}
+
+/** @internal Control-owned attention registry, never a caller-supplied config hook. */
+export function createOrganizationRuntimeHostWithAttention(config: unknown, options: ProductionHostOptions, attention: AttentionRegistry): OrganizationRuntimeHost {
+  const parsed = parseOrganizationRuntimeConfig(config);
   let agyBusAddress: string | undefined;
   let grokBroker: OrganizationRuntimeHostReadiness["grokBroker"];
   return createHost(
     parsed,
-    (agent, paths) => startOrganizationRuntimeEngine(agent, parsed.host.controlTokenEnv, paths, agyBusAddress, grokBroker, parsed.agents, options.sharedProtectedPaths),
+    (agent, paths) => startOrganizationRuntimeEngine(agent, parsed.host.controlTokenEnv, paths, agyBusAddress, grokBroker, parsed.agents, options.sharedProtectedPaths, attention),
     async () => {
       const ready = await prepareProductionReadiness(parsed);
       agyBusAddress = ready.agyRealm?.busAddress;

@@ -1,8 +1,8 @@
+import { sameNamespace, currentProcessIdentity, processIsAlive, WakeTransitionLockBlockedError, type TransitionLock } from "./wakeAcceptanceProcessIdentity.js";
 import { constants } from "node:fs";
 import { link, lstat, open, readFile, readdir, realpath, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-
 import {
   MAX_WAKE_ACCEPTANCE_RECORD_BYTES,
   parseWakeAcceptanceRequest,
@@ -17,23 +17,19 @@ import { parseStoredWakeAcceptance, publicAcceptance, publicStatus, type StoredW
 import { assertOfflineReconciliationLeaseAvailable } from "./wakeAcceptanceReconciliation.js";
 import { acquireHostRegistration, releaseHostRegistration, type StoreHostRegistration } from "./storeCoordination.js";
 import { MAX_WAKE_ACCEPTANCE_RECORDS, terminalFilesToCompact } from "./wakeAcceptanceRetention.js";
-
 type Stored = StoredWakeAcceptanceRecord;
-export type WakeExecutionClaim = Readonly<{ acceptance_id: string; owner_id: string; generation: string; expires_at: string }>;
+export type WakeExecutionClaim = Readonly<{ acceptance_id: string; owner_id: string; generation: string; expires_at: string; acceptance_ids?: readonly string[]; execution_id?: string }>;
 export type WakeExecutionClaimResult = Readonly<{ state: "acquired"; claim: WakeExecutionClaim }> | Readonly<{ state: "held"; retry_at: string }> | Readonly<{ state: "terminal" }>;
-type TransitionLock = Readonly<{ owner_id: string; generation: string; pid: number; process_start: string; boot_id: string; pid_namespace_dev: number; pid_namespace_ino: number }>;
 type DirectoryIdentity = Readonly<{ dev: number; ino: number; uid: number; mode: number }>;
 export type WakeAcceptanceStoreTestOptions = Readonly<{ claimTtlMs?: number; afterFinalLockAssertion?: () => Promise<void>; nowForTest?: () => number; ownerLiveness?: (lock: TransitionLock) => Promise<boolean>; processIdentity?: () => Promise<Omit<TransitionLock, "owner_id" | "generation">> }>;
 /** Deliberately absent from the public option type; adjacent tests synchronize only this race. */
 type InternalTestHooks = Readonly<{ afterInitialLeaseCheckForTest?: () => Promise<void> }>;
 const DEFAULT_CLAIM_TTL_MS = 240_000;
-
 /** Durable, private idempotency authority; callers must pre-create its 0700 root. */
 export class WakeAcceptanceStore {
   private mutations: Promise<void> = Promise.resolve();
   private readonly acceptanceFiles = new Map<string, string>();
   private constructor(private readonly root: string, private readonly directory: Awaited<ReturnType<typeof open>>, private readonly identity: DirectoryIdentity, private readonly registration: StoreHostRegistration, private readonly claimTtlMs: number, private readonly now: () => number, private readonly owner: Omit<TransitionLock, "owner_id" | "generation">, private readonly ownerLiveness: (lock: TransitionLock) => Promise<boolean>, private readonly afterFinalLockAssertion?: () => Promise<void>) {}
-
   static async open(root: string, options: WakeAcceptanceStoreTestOptions = {}): Promise<WakeAcceptanceStore> {
     const claimTtlMs = options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
     if (!Number.isInteger(claimTtlMs) || claimTtlMs < 1 || claimTtlMs > 600_000) throw new Error("wake acceptance claim lease is outside its bound");
@@ -56,11 +52,9 @@ export class WakeAcceptanceStore {
       throw error;
     }
   }
-
   accept(request: OrganizationRuntimeWakeAcceptanceRequest): Promise<{ readonly record: Stored; readonly created: boolean }> {
     return this.serialize(async () => await this.acceptNow(request));
   }
-
   private async acceptNow(request: OrganizationRuntimeWakeAcceptanceRequest): Promise<{ readonly record: Stored; readonly created: boolean }> {
     await this.verify();
     const request_digest = wakeAcceptanceDigest(request);
@@ -71,7 +65,7 @@ export class WakeAcceptanceStore {
       return { record: existing, created: false };
     }
     await this.compactTerminalRecords();
-    if ((await this.files()).length >= MAX_WAKE_ACCEPTANCE_RECORDS) throw new Error("wake acceptance store has no capacity without deleting active work");
+    if ((await this.files()).length >= MAX_WAKE_ACCEPTANCE_RECORDS) throw new WakeInboxFullError();
     const now = new Date().toISOString();
     const record: Stored = { acceptance_id: randomUUID(), agent_id: request.agent_id, delivery_id: request.delivery_id, request_digest, event: request.event, state: "accepted", accepted_at: now, updated_at: now };
     const temporary = path.join(this.root, `.pending-${randomUUID()}`);
@@ -90,37 +84,38 @@ export class WakeAcceptanceStore {
       await unlink(temporary).catch(() => undefined);
     }
   }
-
   async status(acceptanceId: string): Promise<OrganizationRuntimeWakeReceiptStatus | undefined> {
     const record = await this.findByAcceptanceId(acceptanceId);
     return record === undefined ? undefined : publicStatus(record);
   }
-
   async activity(): Promise<readonly (OrganizationRuntimeWakeReceiptStatus & Readonly<{ active: boolean; queue_position?: number }>)[]> {
     const records = await Promise.all((await this.files()).map(async (file) => await this.read(path.join(this.root, file))));
     records.sort((left, right) => left.accepted_at.localeCompare(right.accepted_at) || left.acceptance_id.localeCompare(right.acceptance_id));
     const queued = new Map<string, number>();
+    const activeExecutions = new Set<string>();
     return records.map((record) => {
       const position = record.state === "accepted" ? (queued.get(record.agent_id) ?? 0) + 1 : undefined;
       if (position !== undefined) queued.set(record.agent_id, position);
-      return { ...publicStatus(record), active: record.state === "running", ...(position === undefined ? {} : { queue_position: position }) };
+      const active = record.state === "running" && !activeExecutions.has(record.agent_id);
+      if (active) activeExecutions.add(record.agent_id);
+      return { ...publicStatus(record), active, ...(position === undefined ? {} : { queue_position: position }) };
     });
   }
-
   async recoverable(agentIds: ReadonlySet<string>): Promise<readonly Stored[]> {
     const result: Stored[] = [];
     for (const file of await this.files()) {
       const record = await this.read(path.join(this.root, file));
       if (!agentIds.has(record.agent_id)) throw new Error("wake acceptance store contains an unknown agent authority");
-      if (record.state === "accepted" || record.state === "running") result.push(record);
+      if (record.state === "accepted" || record.state === "running") {
+        const claim = await this.readClaimOptional(this.claimFor(record));
+        result.push(!record.deferred && record.execution_id === undefined && claim?.acceptance_ids?.includes(record.acceptance_id) && claim.execution_id !== undefined ? { ...record, execution_id: claim.execution_id } : record);
+      }
     }
     return result.sort((left, right) => left.accepted_at.localeCompare(right.accepted_at) || left.acceptance_id.localeCompare(right.acceptance_id));
   }
-
   transition(acceptanceId: string, state: WakeReceiptState, code?: WakeReceiptCode): Promise<Stored> {
     return this.serialize(async () => await this.transitionNow(acceptanceId, state, code));
   }
-
   /** Fuse race seam: never stops a record that was claimed after enumeration. */
   transitionAcceptedToStopped(acceptanceId: string): Promise<Stored> {
     return this.serialize(async () => {
@@ -132,13 +127,16 @@ export class WakeAcceptanceStore {
       return record;
     });
   }
-
-  acquireClaim(acceptanceId: string, ownerId: string): Promise<WakeExecutionClaimResult> {
+  acquireClaim(acceptanceId: string, ownerId: string, acceptanceIds?: readonly string[], executionId?: string): Promise<WakeExecutionClaimResult> {
     return this.serialize(async () => {
       if (!uuid(ownerId)) throw new Error("wake execution owner is invalid");
       const record = await this.findByAcceptanceId(acceptanceId);
       if (record === undefined) throw new Error("wake acceptance receipt is unavailable");
       if (isTerminal(record.state)) return { state: "terminal" };
+      if (acceptanceIds !== undefined) {
+        if (!acceptanceIds.includes(acceptanceId) || acceptanceIds.length > 32 || new Set(acceptanceIds).size !== acceptanceIds.length || !executionId || !uuid(executionId)) throw new Error("invalid execution membership");
+        for (const member of acceptanceIds) { const candidate = await this.findByAcceptanceId(member); if (!candidate || candidate.agent_id !== record.agent_id || isTerminal(candidate.state)) throw new Error("invalid execution member"); }
+      }
       const target = this.claimFor(record);
       const current = await this.readClaimOptional(target);
       if (current !== undefined && !expired(current, this.now())) return { state: "held", retry_at: current.expires_at };
@@ -148,7 +146,7 @@ export class WakeAcceptanceStore {
         const checked = await this.readClaimOptional(target);
         if (checked !== undefined && !expired(checked, this.now())) return { state: "held", retry_at: checked.expires_at };
         if (checked !== undefined) { await unlink(target); await this.directory.sync(); }
-      const claim: WakeExecutionClaim = { acceptance_id: record.acceptance_id, owner_id: ownerId, generation: randomUUID(), expires_at: new Date(this.now() + this.claimTtlMs).toISOString() };
+      const claim: WakeExecutionClaim = { acceptance_id: record.acceptance_id, owner_id: ownerId, generation: randomUUID(), expires_at: new Date(this.now() + this.claimTtlMs).toISOString(), ...(acceptanceIds === undefined ? {} : { acceptance_ids: acceptanceIds, execution_id: executionId }) };
       const temporary = path.join(this.root, `.claim-${randomUUID()}`);
       try {
         await this.writeNew(temporary, claim);
@@ -159,9 +157,7 @@ export class WakeAcceptanceStore {
       } finally { await this.releaseTransitionLock(record, lock); }
     });
   }
-
   claimHeartbeatIntervalMs(): number { return Math.max(1, Math.floor(this.claimTtlMs / 3)); }
-
   renewClaim(acceptanceId: string, claim: WakeExecutionClaim): Promise<WakeExecutionClaim> {
     return this.serialize(async () => {
       const record = await this.findByAcceptanceId(acceptanceId);
@@ -170,16 +166,15 @@ export class WakeAcceptanceStore {
       if (lock === undefined) throw new WakeExecutionClaimLostError();
       try {
         const current = await this.readClaim(this.claimFor(record));
-        if (current.acceptance_id !== acceptanceId || current.acceptance_id !== claim.acceptance_id || current.owner_id !== claim.owner_id || current.generation !== claim.generation || current.expires_at !== claim.expires_at || expired(current, this.now())) throw new WakeExecutionClaimLostError();
+        if (!(current.acceptance_id === acceptanceId || current.acceptance_ids?.includes(acceptanceId)) || current.acceptance_id !== claim.acceptance_id || current.owner_id !== claim.owner_id || current.generation !== claim.generation || current.expires_at !== claim.expires_at || expired(current, this.now())) throw new WakeExecutionClaimLostError();
         const renewed: WakeExecutionClaim = { ...current, expires_at: new Date(this.now() + this.claimTtlMs).toISOString() };
         await this.replaceValue(this.claimFor(record), renewed);
         return renewed;
       } finally { await this.releaseTransitionLock(record, lock); }
     });
   }
-
   /** `text` carries the completion output on success and the engine failure cause on failure. */
-  transitionClaimed(acceptanceId: string, claim: WakeExecutionClaim, state: WakeReceiptState, code?: WakeReceiptCode, completedText?: string): Promise<Stored> {
+  transitionClaimed(acceptanceId: string, claim: WakeExecutionClaim, state: WakeReceiptState, code?: WakeReceiptCode, completedText?: string, attention?: { execution_id?: string; deferred?: boolean; clear_execution?: boolean }): Promise<Stored> {
     return this.serialize(async () => {
       if (completedText !== undefined && state !== "completed" && state !== "failed") throw new Error("wake text requires completed or failed state");
       const initial = await this.findByAcceptanceId(acceptanceId);
@@ -198,9 +193,9 @@ export class WakeAcceptanceStore {
         await this.afterFinalLockAssertion?.();
         await this.assertTransitionLock(record, lock);
         const target = this.fileFor(record.agent_id, record.delivery_id);
-        const next: Stored = { ...record, state, updated_at: new Date().toISOString(), claim_generation: claim.generation, ...(code === undefined ? {} : { code }), ...(completedText === undefined ? {} : { text: sanitizeWakeCompletionText(completedText) }) };
+        const next: Stored = { ...record, state, updated_at: new Date().toISOString(), claim_generation: claim.generation, ...(code === undefined ? {} : { code }), ...(completedText === undefined ? {} : { text: sanitizeWakeCompletionText(completedText) }), ...(attention === undefined ? {} : { execution_id: attention.clear_execution ? undefined : attention.execution_id ?? record.execution_id, deferred: attention.deferred ?? record.deferred }) };
         await this.replace(target, next);
-        if (isTerminal(state)) {
+        if (claim.acceptance_ids === undefined && (isTerminal(state) || state === "accepted")) {
           const currentClaim = await this.readClaimOptional(this.claimFor(record));
           if (currentClaim?.owner_id === claim.owner_id && currentClaim.generation === claim.generation) { await unlink(this.claimFor(record)); await this.directory.sync(); }
         }
@@ -208,7 +203,19 @@ export class WakeAcceptanceStore {
       } finally { await this.releaseTransitionLock(initial, lock); }
     });
   }
-
+  releaseClaim(claim: WakeExecutionClaim): Promise<void> {
+    return this.serialize(async () => {
+      const record = await this.findByAcceptanceId(claim.acceptance_id);
+      if (!record) throw new WakeExecutionClaimLostError();
+      const lock = await this.acquireTransitionLock(record, claim.owner_id);
+      if (!lock) throw new WakeExecutionClaimLostError();
+      try {
+        const current = await this.readClaimOptional(this.claimFor(record));
+        if (current?.generation !== claim.generation || current.owner_id !== claim.owner_id) throw new WakeExecutionClaimLostError();
+        await unlink(this.claimFor(record)); await this.directory.sync();
+      } finally { await this.releaseTransitionLock(record, lock); }
+    });
+  }
   releaseClaims(ownerId: string): Promise<void> {
     return this.serialize(async () => {
       for (const file of await this.claimFiles()) {
@@ -218,7 +225,6 @@ export class WakeAcceptanceStore {
       await this.directory.sync();
     });
   }
-
   private async transitionNow(acceptanceId: string, state: WakeReceiptState, code?: WakeReceiptCode): Promise<Stored> {
     const target = await this.pathForAcceptanceId(acceptanceId);
     const prior = await this.read(target);
@@ -227,15 +233,12 @@ export class WakeAcceptanceStore {
     await this.replace(target, record);
     return record;
   }
-
   async close(): Promise<void> { await this.mutations; await releaseHostRegistration(this.root, this.directory, this.registration); await this.directory.close(); }
-
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.mutations.catch(() => undefined).then(operation);
     this.mutations = result.then(() => undefined, () => undefined);
     return result;
   }
-
   private async findByAcceptanceId(acceptanceId: string): Promise<Stored | undefined> {
     if (!uuid(acceptanceId)) return undefined;
     const known = this.acceptanceFiles.get(acceptanceId);
@@ -300,12 +303,15 @@ export class WakeAcceptanceStore {
   private async readClaimOptional(file: string): Promise<WakeExecutionClaim | undefined> { try { return await this.readClaim(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
   private async readClaim(file: string): Promise<WakeExecutionClaim> {
     const entry = await lstat(file);
-    if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== process.getuid?.() || (entry.mode & 0o777) !== 0o600 || entry.size > 1_024) throw new Error("wake execution claim is unsafe");
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== process.getuid?.() || (entry.mode & 0o777) !== 0o600 || entry.size > 4096) throw new Error("wake execution claim is unsafe");
     const value: unknown = JSON.parse((await readFile(file)).toString("utf8"));
     if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("wake execution claim is invalid");
     const record = value as Record<string, unknown>;
-    if (Object.keys(record).length !== 4 || !Object.hasOwn(record, "acceptance_id") || !Object.hasOwn(record, "owner_id") || !Object.hasOwn(record, "generation") || !Object.hasOwn(record, "expires_at")) throw new Error("wake execution claim is invalid");
-    const claim = { acceptance_id: string(record.acceptance_id), owner_id: string(record.owner_id), generation: string(record.generation), expires_at: timestamp(record.expires_at) };
+    if (Object.keys(record).some((key) => !["acceptance_id", "owner_id", "generation", "expires_at", "acceptance_ids", "execution_id"].includes(key)) || !Object.hasOwn(record, "acceptance_id") || !Object.hasOwn(record, "owner_id") || !Object.hasOwn(record, "generation") || !Object.hasOwn(record, "expires_at")) throw new Error("wake execution claim is invalid");
+    const members = record.acceptance_ids;
+    if ((members === undefined) !== (record.execution_id === undefined)) throw new Error("wake execution membership is invalid");
+    if (members !== undefined && (!Array.isArray(members) || members.length < 1 || members.length > 32 || members.some((member) => typeof member !== "string" || !uuid(member)) || !members.includes(record.acceptance_id) || new Set(members).size !== members.length || typeof record.execution_id !== "string" || !uuid(record.execution_id))) throw new Error("wake execution membership is invalid");
+    const claim = { ...(members === undefined ? {} : { acceptance_ids: members as string[], execution_id: string(record.execution_id) }), acceptance_id: string(record.acceptance_id), owner_id: string(record.owner_id), generation: string(record.generation), expires_at: timestamp(record.expires_at) };
     if (!uuid(claim.acceptance_id) || !uuid(claim.owner_id) || !uuid(claim.generation)) throw new Error("wake execution claim is invalid");
     return claim;
   }
@@ -325,7 +331,7 @@ export class WakeAcceptanceStore {
     const record = await this.findByAcceptanceId(acceptanceId);
     if (record === undefined) throw new Error("wake acceptance receipt is unavailable");
     const current = await this.readClaim(this.claimFor(record));
-    if (current.acceptance_id !== acceptanceId || current.acceptance_id !== claim.acceptance_id || current.owner_id !== claim.owner_id || current.generation !== claim.generation || current.expires_at !== claim.expires_at || expired(current, this.now())) throw new WakeExecutionClaimLostError();
+    if (!(current.acceptance_id === acceptanceId || current.acceptance_ids?.includes(acceptanceId)) || current.acceptance_id !== claim.acceptance_id || current.owner_id !== claim.owner_id || current.generation !== claim.generation || current.expires_at !== claim.expires_at || expired(current, this.now())) throw new WakeExecutionClaimLostError();
     return record;
   }
   private async compactTerminalRecords(): Promise<void> {
@@ -355,11 +361,11 @@ export class WakeAcceptanceStore {
     if (!same(identity(entry), this.identity) || !same(identity(opened), this.identity) || (await realpath(this.root)) !== this.root) throw new Error("wake acceptance store changed after validation");
   }
 }
-
+export class WakeInboxFullError extends Error { constructor() { super("wake acceptance store has no capacity without deleting active work"); } }
 export class WakeAcceptanceConflictError extends Error { constructor() { super("delivery id is already bound to a different request"); } }
 export class WakeExecutionClaimLostError extends Error { constructor() { super("wake execution claim was lost"); } }
 /** A container boundary requires deployment-authorized offline reconciliation. */
-export class WakeTransitionLockBlockedError extends Error { readonly code = "offline_reconciliation_required" as const; constructor() { super("wake transition lock requires offline reconciliation"); } }
+export { WakeTransitionLockBlockedError } from "./wakeAcceptanceProcessIdentity.js";
 export { publicAcceptance } from "./wakeAcceptanceRecord.js";
 function string(value: unknown): string { if (typeof value !== "string") throw new Error("wake acceptance record is invalid"); return value; }
 function integer(value: unknown): number { if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Error("wake transition lock is invalid"); return value; }
@@ -372,36 +378,6 @@ function identity(value: Awaited<ReturnType<typeof lstat>>): DirectoryIdentity {
   return { dev: numeric.dev, ino: numeric.ino, uid: numeric.uid, mode: numeric.mode & 0o7777 };
 }
 function same(left: DirectoryIdentity, right: DirectoryIdentity): boolean { return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid && left.mode === right.mode; }
-function sameNamespace(left: Pick<TransitionLock, "pid_namespace_dev" | "pid_namespace_ino">, right: Pick<TransitionLock, "pid_namespace_dev" | "pid_namespace_ino">): boolean { return left.pid_namespace_dev === right.pid_namespace_dev && left.pid_namespace_ino === right.pid_namespace_ino; }
 function noFollow(): number { return (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0; }
 function directoryFlag(): number { return (constants as typeof constants & { O_DIRECTORY?: number }).O_DIRECTORY ?? 0; }
 async function assertNoLinks(target: string): Promise<void> { let current = path.parse(target).root; for (const part of path.relative(current, target).split(path.sep).filter(Boolean)) { current = path.join(current, part); if ((await lstat(current)).isSymbolicLink() && current !== "/var") throw new Error("wake acceptance store path contains a symlink"); } }
-async function currentProcessIdentity(): Promise<Omit<TransitionLock, "owner_id" | "generation">> {
-  if (process.platform !== "linux") throw new Error("wake transition locks require Linux process identity");
-  const boot_id = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
-  if (!boot_id) throw new Error("wake transition owner identity is invalid");
-  return { pid: process.pid, process_start: await linuxProcessStart(process.pid), boot_id, ...await linuxPidNamespace() };
-}
-async function processIsAlive(lock: TransitionLock): Promise<boolean> {
-  if (process.platform !== "linux") throw new Error("wake transition lock liveness is unsupported");
-  if (!sameNamespace(lock, await linuxPidNamespace())) throw new WakeTransitionLockBlockedError();
-  const boot = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
-  if (!boot) throw new Error("wake transition owner liveness cannot be proven");
-  if (boot !== lock.boot_id) return false;
-  try { return await linuxProcessStart(lock.pid) === lock.process_start; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw new Error("wake transition owner liveness cannot be proven"); }
-}
-async function linuxProcessStart(pid: number): Promise<string> {
-  const stat = await readFile(`/proc/${pid}/stat`, "utf8");
-  const close = stat.lastIndexOf(")");
-  const fields = stat.slice(close + 2).trim().split(/\s+/u);
-  const start = fields[19];
-  if (close < 0 || start === undefined || !/^\d+$/u.test(start)) throw new Error("wake transition owner identity is invalid");
-  return start;
-}
-async function linuxPidNamespace(): Promise<Pick<TransitionLock, "pid_namespace_dev" | "pid_namespace_ino">> {
-  const identity = await stat("/proc/self/ns/pid");
-  const pid_namespace_dev = Number(identity.dev);
-  const pid_namespace_ino = Number(identity.ino);
-  if (!Number.isSafeInteger(pid_namespace_dev) || !Number.isSafeInteger(pid_namespace_ino) || pid_namespace_dev < 1 || pid_namespace_ino < 1) throw new Error("wake transition owner identity is invalid");
-  return { pid_namespace_dev, pid_namespace_ino };
-}

@@ -11,7 +11,9 @@ export const DEFAULT_WAKE_FUSE_MAX_WAKES = 100;
 export const DEFAULT_WAKE_FUSE_MAX_TOKENS = 5_000_000;
 
 export type WakeFuseTripReason = "wake_ceiling" | "token_ceiling" | "operator_stop" | "ledger_unavailable";
-export type WakeFuseVerdict = Readonly<{ state: "admitted" }> | Readonly<{ state: "tripped"; reason: WakeFuseTripReason }>;
+export type WakeBudgetLimits = Readonly<{ maxExecutions?: number; maxTokens?: number }>;
+export type WakeBudgetSnapshot = Readonly<{ armed: boolean; epoch: string; state: "available" | "paused" | "stopped"; reason?: string; executions_used: number; executions_remaining: number; tokens_used: number; tokens_remaining: number; agent_executions_used: number; agent_executions_remaining?: number; agent_tokens_used: number; agent_tokens_remaining?: number }>;
+export type WakeFuseVerdict = Readonly<{ state: "admitted" }> | Readonly<{ state: "tripped"; reason: WakeFuseTripReason }> | Readonly<{ state: "paused"; reason: "agent_execution_ceiling" | "agent_token_ceiling" }>;
 export type WakeFuseOptions = Readonly<{
   organizationKey: string;
   environment?: NodeJS.ProcessEnv;
@@ -85,17 +87,26 @@ export class WakeFuse {
     return fuse;
   }
 
-  admit(agentId: string, deliveryId: string): Promise<WakeFuseVerdict> {
+  admit(agentId: string, deliveryId: string, limits: WakeBudgetLimits = {}): Promise<WakeFuseVerdict> {
     if (!this.armed) return Promise.resolve({ state: "admitted" });
     // One organization is one container/control-host process. This promise
     // chain is organization-wide in-process serialization, not cross-process locking.
-    const result = this.serial.catch(() => undefined).then(async () => await this.admitNow(agentId, deliveryId));
+    const result = this.serial.catch(() => undefined).then(async () => await this.admitNow(agentId, deliveryId, limits));
     this.serial = result.then(() => undefined, () => undefined);
     return result;
   }
 
+  async snapshot(agentId: string, limits: WakeBudgetLimits = {}): Promise<WakeBudgetSnapshot> {
+    const used = this.admissions.size;
+    const agentUsed = [...this.admissions].filter((entry) => entry.startsWith(`${bounded(agentId)}\u0000`)).length;
+    const tokens = this.armed ? await sumTokens(this.usageLedgerPath, this.epochStartedAt) : 0;
+    const agentTokens = this.armed ? await sumTokens(this.usageLedgerPath, this.epochStartedAt, agentId) : 0;
+    const reason = this.reason ?? (this.armed ? used >= this.maxWakes ? "wake_ceiling" : tokens >= this.maxTokens ? "token_ceiling" : limits.maxExecutions !== undefined && agentUsed >= limits.maxExecutions ? "agent_execution_ceiling" : limits.maxTokens !== undefined && agentTokens >= limits.maxTokens ? "agent_token_ceiling" : undefined : undefined);
+    return { armed: this.armed, epoch: this.epoch, state: reason === undefined ? "available" : reason === "operator_stop" || reason === "ledger_unavailable" ? "stopped" : "paused", ...(reason === undefined ? {} : { reason }), executions_used: used, executions_remaining: Math.max(0, this.maxWakes - used), tokens_used: tokens, tokens_remaining: Math.max(0, this.maxTokens - tokens), agent_executions_used: agentUsed, agent_tokens_used: agentTokens, ...(limits.maxExecutions === undefined ? {} : { agent_executions_remaining: Math.max(0, limits.maxExecutions - agentUsed) }), ...(limits.maxTokens === undefined ? {} : { agent_tokens_remaining: Math.max(0, limits.maxTokens - agentTokens) }) };
+  }
+
   async pollOperatorStop(): Promise<WakeFuseTripReason | undefined> {
-    if (!this.armed || this.reason !== undefined) return this.reason;
+    if (!this.armed || this.reason === "operator_stop" || this.reason === "ledger_unavailable") return this.reason;
     try {
       if (await exists(path.join(this.directory, "fuse.stop"))) await this.trip("operator_stop");
     } catch { await this.trip("ledger_unavailable"); }
@@ -105,12 +116,15 @@ export class WakeFuse {
   tripped(): WakeFuseTripReason | undefined { return this.reason; }
   async close(): Promise<void> { await this.serial; }
 
-  private async admitNow(agentId: string, deliveryId: string): Promise<WakeFuseVerdict> {
+  private async admitNow(agentId: string, deliveryId: string, limits: WakeBudgetLimits): Promise<WakeFuseVerdict> {
     if (this.reason !== undefined) return await this.trip(this.reason);
     try {
       if (await exists(path.join(this.directory, "fuse.stop"))) return await this.trip("operator_stop");
       const admissionKey = key(bounded(agentId), bounded(deliveryId));
       if (this.admissions.has(admissionKey)) return { state: "admitted" };
+      const budget = await this.snapshot(agentId, limits);
+      if (budget.agent_executions_remaining === 0) return { state: "paused", reason: "agent_execution_ceiling" };
+      if (budget.agent_tokens_remaining === 0) return { state: "paused", reason: "agent_token_ceiling" };
       if (this.admissions.size >= this.maxWakes) return await this.trip("wake_ceiling");
       // Lagging indicator: usage is written after turn completion, so in-flight
       // spend can overshoot by one concurrent round. The wake ceiling bounds it;
@@ -124,7 +138,7 @@ export class WakeFuse {
   }
 
   private async trip(reason: WakeFuseTripReason): Promise<WakeFuseVerdict> {
-    if (this.reason === undefined) {
+    if (this.reason === undefined || (reason === "operator_stop" || reason === "ledger_unavailable") && this.reason !== "operator_stop" && this.reason !== "ledger_unavailable") {
       this.reason = reason;
       this.tripMarkerMissing = true;
     }
@@ -163,9 +177,12 @@ async function append(directory: string, record: Admission | EpochStart): Promis
   try { if ((await stat(file)).size >= TURN_USAGE_ROTATE_BYTES) await rename(file, `${file}.1`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const bytes = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
   const handle = await open(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, TURN_USAGE_LEDGER.fileMode);
-  try { const result = await handle.write(bytes, 0, bytes.length); if (result.bytesWritten !== bytes.length) throw new Error("wake fuse admission append was torn"); }
+  try { const result = await handle.write(bytes, 0, bytes.length); if (result.bytesWritten !== bytes.length) throw new Error("wake fuse admission append was torn"); await handle.sync(); }
   finally { await handle.close(); }
+  await syncDirectory(directory);
 }
+
+async function syncDirectory(directory: string): Promise<void> { const handle = await open(directory, constants.O_RDONLY); try { await handle.sync(); } finally { await handle.close(); } }
 
 async function readFuseRecords(directory: string): Promise<Array<Admission | EpochStart>> {
   const records: Array<Admission | EpochStart> = [];
@@ -182,13 +199,13 @@ async function readFuseRecords(directory: string): Promise<Array<Admission | Epo
   return records;
 }
 
-async function sumTokens(ledgerPath: string, since: string): Promise<number> {
+async function sumTokens(ledgerPath: string, since: string, agentId?: string): Promise<number> {
   let total = 0;
   for (const file of [`${ledgerPath}.1`, ledgerPath]) {
     for (const line of await lines(file)) {
       try {
-        const value = JSON.parse(line) as { at?: unknown; total?: unknown };
-        if (typeof value.at === "string" && !Number.isNaN(Date.parse(value.at)) && value.at >= since && typeof value.total === "number" && Number.isFinite(value.total) && value.total >= 0) total += value.total;
+        const value = JSON.parse(line) as { at?: unknown; total?: unknown; agent?: unknown };
+        if ((agentId === undefined || value.agent === agentId) && typeof value.at === "string" && !Number.isNaN(Date.parse(value.at)) && value.at >= since && typeof value.total === "number" && Number.isFinite(value.total) && value.total >= 0) total += value.total;
       } catch { /* usage accounting is advisory input; malformed lines are skipped */ }
     }
   }
@@ -200,9 +217,10 @@ async function writeTripMarker(directory: string, marker: TripMarker): Promise<v
   const bytes = Buffer.from(`${JSON.stringify(marker)}\n`, "utf8");
   try {
     const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, TURN_USAGE_LEDGER.fileMode);
-    try { const result = await handle.write(bytes, 0, bytes.length); if (result.bytesWritten !== bytes.length) throw new Error("wake fuse trip marker write was torn"); }
+    try { const result = await handle.write(bytes, 0, bytes.length); if (result.bytesWritten !== bytes.length) throw new Error("wake fuse trip marker write was torn"); await handle.sync(); }
     finally { await handle.close(); }
     await rename(temporary, target);
+    await syncDirectory(directory);
   } finally { await unlink(temporary).catch(() => undefined); }
 }
 async function readTripMarker(directory: string, epoch: string): Promise<WakeFuseTripReason | undefined> {

@@ -117,9 +117,50 @@ identity before the turn starts, and `GET /v2/wake-receipts/<acceptance_id>`
 returns only its strict redacted lifecycle status. The store is a private
 runtime authority, not a credential directory; it must be mounted only into
 the Daimon host. Equal retries return the original acceptance, while a changed
-payload for that delivery id is rejected. There is no v2 list/activity endpoint
-and no model output in acceptance or receipt responses. If the variable is not
+payload for that delivery id is rejected. `GET /v2/activity` exposes bounded
+receipt history and active execution identities. Completed receipts can include
+redacted terminal output; acceptance responses never contain model output. If the variable is not
 provided, the v1 endpoints remain available and v2 is not exposed.
+
+Per-agent `attention` opts into interruption-aware inbox processing:
+
+```json
+"attention": { "maxBatchMessages": 8, "maxBatchBytes": 12000, "maxExecutions": 30, "maxTokens": 3000000 }
+```
+
+An idle agent starts promptly. Messages arriving while it works accumulate into
+one bounded next turn; manual and scheduled events remain distinct. The agent
+uses `daimon_inbox` to read selected deliveries and `daimon_inbox_disposition`
+with a `delivery_id` and `complete` or `defer` disposition. Reading a message or
+ending a turn never completes it. Unmarked and deferred messages wait durably
+for new input, including after restart. A single oversized delivery stays
+intact in the inbox tool and is referenced instead of copied into the prompt.
+Omitting `attention` retains single-delivery, automatic completion behavior.
+Attention requires the durable control host and `POST /v2/wakes`; synchronous
+`POST /v1/wake` rejects attention-enabled agents with `durable_inbox_required`
+before starting cognition.
+
+Delivery acceptance does not spend an execution allowance. The existing global
+wake fuse counts execution-start reservations, including historical admissions;
+optional per-agent execution/token ceilings apply within the same explicit
+epoch. Retries reserve another execution while retaining the stable wake id
+used by idempotent tools. Reported token usage is a lagging bound, not an
+in-flight spending guarantee. Budget pauses preserve and continue accepting
+pending deliveries. The inbox has a separate hard storage bound of 2,176
+receipts; it never evicts pending work to accept another delivery.
+
+Authenticated `GET /v2/availability` reports running work, pending/deferred
+counts, limits, remaining allowances and the pause reason. Global operator-stop
+and ledger-failure latches stay hard: HTTP 409 carries a versioned `blocked`
+descriptor with a bounded retry delay. A budget pause never becomes a terminal
+receipt. Existing fuse trip markers remain latched until explicit operator
+recovery; changing attention settings does not erase historical spending.
+
+A batch's atomic per-agent claim records its complete membership and stable
+`execution_id` before cognition. Individual receipts retain their delivery ids
+and explicit state. `GET /v2/activity.executions` identifies the live turn even
+when all its message receipts have already completed; integrations should bind
+turn authority to that execution id. The wake environment uses the same id.
 
 Each accepted delivery also has a private, bounded execution claim with an
 owner and generation fence. A second host sharing the authority may observe a

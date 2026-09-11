@@ -1,0 +1,174 @@
+import { randomUUID } from "node:crypto";
+import type { AttentionRegistry } from "./attention.js";
+import type { OrganizationRuntimeAgentConfig, OrganizationRuntimeHost, OrganizationRuntimeWakeResult } from "./organizationRuntime.js";
+import { engineFailureDetail } from "./organizationRuntimeHost.js";
+import { WakeAcceptanceStore, WakeExecutionClaimLostError, type WakeExecutionClaim } from "./wakeAcceptanceStore.js";
+import type { StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
+import { WakeFuse } from "./wakeFuse.js";
+
+type Claimed = { record: StoredWakeAcceptanceRecord; claim: WakeExecutionClaim; done: boolean };
+type Options = Readonly<{ store: WakeAcceptanceStore; host: OrganizationRuntimeHost; fuse: WakeFuse; agents: readonly OrganizationRuntimeAgentConfig[]; registry: AttentionRegistry; token: string | undefined; onIdle(agentId: string): void }>;
+
+/** Durable deliveries wait here; only a selected execution reserves a budget slot. */
+export class AttentionDispatcher {
+  private readonly owner = randomUUID();
+  private readonly work = new Map<string, Promise<void>>();
+  private readonly observed = new Map<string, number>();
+  private readonly generations = new Map<string, number>();
+  private readonly waiters = new Set<() => void>();
+  private readonly active = new Map<string, { execution_id: string; delivery_ids: string[] }>();
+  private readonly errors = new Map<string, string>();
+  private stopping = false;
+  private fatal: "ledger_unavailable" | undefined;
+  constructor(private readonly options: Options) {}
+
+  notify(agentId: string, fresh = false): void {
+    if (fresh) this.generations.set(agentId, (this.generations.get(agentId) ?? 0) + 1);
+    if (this.stopping || this.work.has(agentId)) return;
+    const task = this.drain(agentId).catch((error) => { this.observed.set(agentId, this.generations.get(agentId) ?? 0); this.errors.set(agentId, engineFailureDetail(error) ?? "inbox_storage_unavailable"); }).finally(() => {
+      this.work.delete(agentId);
+      if (!this.stopping && (this.generations.get(agentId) ?? 0) > (this.observed.get(agentId) ?? 0)) this.notify(agentId);
+      this.options.onIdle(agentId);
+    });
+    this.work.set(agentId, task);
+  }
+
+  fatalReason(): "ledger_unavailable" | undefined { return this.fatal; }
+  busy(agentId: string): boolean { return this.work.has(agentId); }
+  activeExecutions() { return [...this.active].map(([agent_id, value]) => ({ agent_id, ...value, state: "running" as const })); }
+  failure(agentId: string): string | undefined { return this.errors.get(agentId); }
+  async stop(): Promise<void> {
+    this.stopping = true;
+    for (const finish of this.waiters) finish();
+    await Promise.allSettled(this.work.values());
+    await this.options.store.releaseClaims(this.owner);
+  }
+  halt(): void { this.stopping = true; for (const finish of this.waiters) finish(); }
+
+  private async drain(agentId: string): Promise<void> {
+    const agent = this.options.agents.find((value) => value.id === agentId)!;
+    let observedGeneration = 0;
+    while (!this.stopping) {
+      const generation = this.generations.get(agentId) ?? 0;
+      const records = (await this.options.store.recoverable(new Set(this.options.agents.map((value) => value.id)))).filter((record) => record.agent_id === agentId);
+      const selected = selectBatch(records, agent, generation > observedGeneration);
+      observedGeneration = generation; this.observed.set(agentId, generation);
+      this.errors.delete(agentId);
+      if (!selected.length) return;
+      const budget = await this.options.fuse.snapshot(agentId, agent.attention);
+      if (budget.state !== "available") return;
+      const executionId = selected[0]!.execution_id ?? randomUUID();
+      const acquired = await this.options.store.acquireClaim(selected[0]!.acceptance_id, this.owner, selected.map((record) => record.acceptance_id), executionId);
+      if (acquired.state === "held") { await this.waitUntil(acquired.retry_at); continue; }
+      if (acquired.state === "terminal") continue;
+      const claimed: Claimed[] = selected.map((record) => ({ record, claim: acquired.claim, done: false }));
+      for (const item of claimed) item.record = await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "running", undefined, undefined, agent.attention === undefined ? undefined : { execution_id: executionId, deferred: false });
+      const verdict = await this.options.fuse.admit(agentId, randomUUID(), agent.attention);
+      if (verdict.state !== "admitted" || this.stopping) {
+        for (const item of claimed) await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
+        await this.options.store.releaseClaim(claimed[0]!.claim); return;
+      }
+      await this.execute(agent, claimed, executionId);
+    }
+  }
+
+  private async execute(agent: OrganizationRuntimeAgentConfig, claimed: Claimed[], executionId: string): Promise<void> {
+    const { store, registry, host, token, fuse } = this.options;
+    // Serialize tool disposition and lease renewal against the same current claim.
+    let mutation: Promise<unknown> = Promise.resolve();
+    const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
+      const result = mutation.then(operation); mutation = result.then(() => undefined, () => undefined);
+      void result.catch((error) => { if (error instanceof WakeExecutionClaimLostError) this.failClosed(agent.id, error); });
+      return result;
+    };
+    const heartbeat = setInterval(() => {
+      void serialize(async () => {
+        const renewed = await store.renewClaim(claimed[0]!.claim.acceptance_id, claimed[0]!.claim);
+        for (const item of claimed) item.claim = renewed;
+        for (const item of claimed.filter((value) => !value.done)) await store.transitionClaimed(item.record.acceptance_id, item.claim, "running");
+      }).catch((error) => this.failClosed(agent.id, error));
+    }, store.claimHeartbeatIntervalMs());
+    this.active.set(agent.id, { execution_id: agent.attention === undefined ? claimed[0]!.record.delivery_id : executionId, delivery_ids: claimed.map((item) => item.record.delivery_id) });
+    const messages = claimed.map(({ record }) => ({ acceptance_id: record.acceptance_id, delivery_id: record.delivery_id, ...record.event }));
+    if (agent.attention !== undefined) registry.set(agent.id, {
+      executionId, messages, budget: () => fuse.snapshot(agent.id, agent.attention),
+      disposition: (deliveryId, disposition) => serialize(async () => {
+        const item = claimed.find((value) => value.record.delivery_id === deliveryId);
+        if (!item) throw new Error("Delivery is outside this agent's selected inbox turn");
+        if (item.done && item.record.state === "completed") {
+          if (disposition !== "complete") throw new Error("A completed delivery cannot be deferred");
+          return;
+        }
+        if (item.done && disposition === "defer") return;
+        item.record = await store.transitionClaimed(item.record.acceptance_id, item.claim, disposition === "complete" ? "completed" : "accepted", undefined, disposition === "complete" ? "" : undefined, disposition === "defer" ? { deferred: true, clear_execution: true } : { execution_id: executionId, deferred: false });
+        item.done = true;
+      })
+    });
+    let result: OrganizationRuntimeWakeResult;
+    try {
+      const first = claimed[0]!.record;
+      result = await host.wake({ token, agentId: agent.id, event: {
+        version: "noopolis.daimon.wake.v1", id: agent.attention === undefined ? first.delivery_id : executionId, kind: first.event.kind,
+        occurredAt: first.event.occurred_at,
+        text: agent.attention === undefined ? first.event.text : inboxPrompt(messages, agent.attention.maxBatchBytes)
+      } });
+    } catch (error) {
+      result = { version: "noopolis.daimon.wake-result.v1", status: "failed", agentId: agent.id, wakeId: executionId, code: "engine_failed", detail: engineFailureDetail(error) };
+    } finally { clearInterval(heartbeat); }
+    try {
+      await mutation;
+      for (const item of claimed.filter((value) => !value.done)) {
+        if (this.stopping || result.status === "stopped") await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
+        else if (agent.attention !== undefined) {
+          // Successful reading is not completion. A failed execution also keeps
+          // unfinished deliveries, and its execution id for idempotent retry.
+          await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted", undefined, undefined, { deferred: true, clear_execution: result.status === "completed" });
+        } else if (result.status === "completed") await store.transitionClaimed(item.record.acceptance_id, item.claim, "completed", undefined, result.text);
+        else await store.transitionClaimed(item.record.acceptance_id, item.claim, "failed", "engine_failed", result.status === "failed" ? result.detail : undefined);
+      }
+    } finally { this.active.delete(agent.id); registry.delete(agent.id); await store.releaseClaim(claimed[0]!.claim); }
+  }
+
+  private failClosed(agentId: string, error: unknown): void {
+    this.errors.set(agentId, engineFailureDetail(error) ?? "execution_claim_lost");
+    this.fatal = "ledger_unavailable";
+    this.options.registry.clear(); this.active.clear(); this.halt();
+    // Losing a fence revokes runtime/tool authority before stopping cognition.
+    // This host has no per-agent abort lifecycle, so fail closed.
+    void this.options.host.stop().catch(() => undefined);
+  }
+
+  private async waitUntil(timestamp: string): Promise<void> {
+    if (this.stopping) return;
+    await new Promise<void>((resolve) => {
+      const finish = (): void => { clearTimeout(timer); this.waiters.delete(finish); resolve(); };
+      const timer = setTimeout(finish, Math.max(1, Date.parse(timestamp) - Date.now())); this.waiters.add(finish);
+    });
+  }
+}
+
+export function selectBatch(records: readonly StoredWakeAcceptanceRecord[], agent: OrganizationRuntimeAgentConfig, revisitDeferred: boolean): StoredWakeAcceptanceRecord[] {
+  const eligible = records.filter((record) => !record.deferred || revisitDeferred);
+  const first = eligible[0];
+  if (!first) return [];
+  // A durable execution identity survives a crash and partially completed batch.
+  if (first.execution_id !== undefined) return records.filter((record) => record.execution_id === first.execution_id);
+  if (agent.attention === undefined || first.event.kind !== "message") return [first];
+  const selected: StoredWakeAcceptanceRecord[] = [];
+  const count = agent.attention.maxBatchMessages ?? 8;
+  const bytes = agent.attention.maxBatchBytes ?? 12000;
+  for (const record of eligible) {
+    if (record.event.kind !== "message" || record.execution_id !== undefined || selected.length >= count) break;
+    const next = [...selected, record];
+    if (Buffer.byteLength(JSON.stringify(next.map((value) => ({ acceptance_id: value.acceptance_id, delivery_id: value.delivery_id, ...value.event })))) > bytes) break;
+    selected.push(record);
+  }
+  // Oversized individual payloads remain intact in daimon_inbox, not a silently
+  // truncated synthetic wake. The prompt references its durable delivery id.
+  return selected.length ? selected : [first];
+}
+
+function inboxPrompt(messages: readonly unknown[], maxBytes = 12000): string {
+  const body = JSON.stringify(messages);
+  return "Handle this inbox turn. Use daimon_inbox for deliveries and remaining allowances. Explicitly call daimon_inbox_disposition for each handled delivery (complete) or unfinished delivery (defer). Reading or ending this turn never completes a delivery. Deferred work waits for a later external wake.\n" + (Buffer.byteLength(body) > maxBytes ? "The selected payload exceeds the prompt budget; read it with daimon_inbox." : body);
+}
