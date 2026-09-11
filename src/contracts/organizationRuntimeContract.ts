@@ -32,6 +32,7 @@ export const ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS = ["none", "minimal", 
 export const ORGANIZATION_RUNTIME_CODEX_WORKSPACE_NO_NETWORK_POLICY = { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } as const;
 
 const PRODUCTION_TOOL_PROPERTIES = {
+  attention: { type: "object", additionalProperties: false, properties: { maxBatchMessages: { type: "integer", minimum: 1, maximum: 32 }, maxBatchBytes: { type: "integer", minimum: 1024, maximum: 12000 }, maxExecutions: { type: "integer", minimum: 1, maximum: 9007199254740991 }, maxTokens: { type: "integer", minimum: 1, maximum: 9007199254740991 } } },
   mcp: { type: "array", maxItems: 8, items: { type: "object", additionalProperties: false, required: ["name", "transport", "args", "env", "tools"], properties: {
     name: { type: "string", minLength: 1, maxLength: ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS }, transport: { enum: ["stdio", "sse", "streamable_http"] },
     command: { type: "string", pattern: "^/" }, url: { type: "string" }, authSecretEnv: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]*$" },

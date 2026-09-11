@@ -118,6 +118,12 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
     assert.equal(activityBody.version, "noopolis.daimon.organization-runtime-activity.v2");
     assert.equal(activityBody.items.some((item) => item.delivery_id === "delivery-1"), true);
     await waitForReceipt(t, port, token, acceptance.acceptance_id);
+    const availability = await fetch(`http://127.0.0.1:${port}/v2/availability`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(availability.status, 200);
+    const work = await availability.json() as { version: string; agents: Array<{ agent_id: string }> };
+    assert.equal(work.version, "noopolis.daimon.work-availability.v1");
+    assert.equal(work.agents[0]?.agent_id, "agent");
+    assert.equal((await fetch(`http://127.0.0.1:${port}/v2/availability`)).status, 401);
     const conflict = await fetch(`http://127.0.0.1:${port}/v2/wakes`, {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ agent_id: "agent", delivery_id: "delivery-1", event: {
         version: "noopolis.daimon.wake.v2", kind: "manual", text: "different", occurred_at: "2026-08-17T00:00:00.000Z"

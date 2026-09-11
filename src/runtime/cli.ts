@@ -126,6 +126,11 @@ async function handleRequest(
       const receipt = await control.wakeReceipt(expectedToken, acceptanceId);
       return receipt === undefined ? respond(response, 404, { error: "not_found" }) : respond(response, 200, receipt);
     }
+    if (control !== undefined && request.method === "GET" && url.pathname === "/v2/availability") {
+      assertQuery(url, []);
+      const availability = await control.availability(expectedToken);
+      return availability === undefined ? respond(response, 404, { error: "not_found" }) : respond(response, 200, availability);
+    }
     if (control !== undefined && request.method === "GET" && url.pathname === "/v2/activity") {
       assertQuery(url, []);
       const activity = await control.activityV2(expectedToken);

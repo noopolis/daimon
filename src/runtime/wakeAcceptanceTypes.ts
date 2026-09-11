@@ -25,7 +25,7 @@ export const WAKE_ACCEPTANCE_REQUEST_SCHEMA = {
 export const WAKE_RECEIPT_STATUS_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema", $id: WAKE_RECEIPT_STATUS_VERSION, type: "object", additionalProperties: false,
   required: ["version", "acceptance_id", "agent_id", "delivery_id", "request_digest", "state", "accepted_at", "updated_at"], properties: {
-    version: { const: WAKE_RECEIPT_STATUS_VERSION }, acceptance_id: { type: "string", pattern: "^[0-9a-f-]{36}$" }, agent_id: { type: "string" }, delivery_id: { type: "string" }, request_digest: { type: "string", pattern: "^[a-f0-9]{64}$" }, state: { enum: ["accepted", "running", "completed", "failed", "stopped"] }, accepted_at: { type: "string" }, updated_at: { type: "string" }, code: { enum: ["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] }, text: { type: "string", maxLength: MAX_WAKE_COMPLETION_TEXT_BYTES }
+    version: { const: WAKE_RECEIPT_STATUS_VERSION }, acceptance_id: { type: "string", pattern: "^[0-9a-f-]{36}$" }, agent_id: { type: "string" }, delivery_id: { type: "string" }, request_digest: { type: "string", pattern: "^[a-f0-9]{64}$" }, state: { enum: ["accepted", "running", "completed", "failed", "stopped"] }, accepted_at: { type: "string" }, updated_at: { type: "string" }, execution_id: { type: "string", pattern: "^[0-9a-f-]{36}$" }, deferred: { type: "boolean" }, code: { enum: ["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] }, text: { type: "string", maxLength: MAX_WAKE_COMPLETION_TEXT_BYTES }
   }
 } as const;
 
@@ -55,6 +55,8 @@ export type OrganizationRuntimeWakeReceiptStatus = Readonly<{
   state: WakeReceiptState;
   accepted_at: string;
   updated_at: string;
+  execution_id?: string;
+  deferred?: boolean;
   code?: WakeReceiptCode;
   text?: string;
 }>;
@@ -70,10 +72,12 @@ export type OrganizationRuntimeActivityV2Item = OrganizationRuntimeWakeReceiptSt
 export type OrganizationRuntimeActivityV2 = Readonly<{
   version: typeof ACTIVITY_V2_VERSION;
   items: readonly OrganizationRuntimeActivityV2Item[];
+  executions?: readonly Readonly<{ agent_id: string; execution_id: string; state: "running"; delivery_ids: readonly string[] }>[];
 }>;
 export type OrganizationRuntimeWakeAcceptanceResult = OrganizationRuntimeWakeAcceptance | Readonly<{
   version: typeof WAKE_ACCEPTANCE_VERSION;
   state: "rejected" | "stopped";
+  blocked?: Readonly<{ version: "noopolis.daimon.work-blocked.v1"; reason: "operator_stop" | "ledger_unavailable" | "host_stopping" | "host_stopped" | "queue_full"; retry_after_ms: number }>;
   code: "unauthorized" | "invalid_request" | "unknown_agent" | "host_stopping" | "host_stopped" | "delivery_conflict";
 }>;
 

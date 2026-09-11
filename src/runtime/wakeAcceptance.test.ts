@@ -96,113 +96,21 @@ test("direct v1 wakes are durably admitted by the armed fuse", async () => {
   } finally { core.release(); await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
-test("a fuse trip terminalizes queued deliveries, refuses arrivals, and awaits running work", async () => {
+test("budget exhaustion preserves queued deliveries and durable arrivals", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
   await writeFile(path.join(usage, "usage.jsonl"), "");
   const core = new FakeCoreHost();
-  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
-    acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
-    fuseEnvironment: fuseEnvironment(usage, 2)
-  });
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, { acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions, fuseEnvironment: fuseEnvironment(usage, 1) });
   try {
-    await control.start();
-    await control.accept(request("running"));
-    await core.waitForWakes(1);
-    await control.accept(request("queued"));
-    let settled = false;
-    const trip = control.accept(request("trip")).then((value) => { settled = true; return value; });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const items = (await control.activityV2(token))?.items ?? [];
-    assert.equal(items.filter((item) => item.state === "accepted").length, 0, "a trip must leave zero records in state accepted");
-    assert.equal(items.find((item) => item.delivery_id === "queued")?.state, "stopped");
-    assert.equal(items.find((item) => item.delivery_id === "queued")?.code, "host_stopping");
-    assert.equal(items.find((item) => item.delivery_id === "running")?.state, "running");
-    assert.equal(settled, false, "the trip waits for a running turn");
-    core.release();
-    assert.deepEqual(await trip, { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
-    assert.deepEqual(await control.accept(request("later")), { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
-    const wakeCount = core.wakes.length;
-    assert.deepEqual(await control.wake({ token, agentId: "alpha", event: { version: "noopolis.daimon.wake.v1", id: "direct-after-trip", kind: "manual", text: "blocked", occurredAt: "2026-08-17T00:00:00.000Z" } }), {
-      version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: "alpha", wakeId: "direct-after-trip", code: "host_stopping"
-    });
-    assert.equal(core.wakes.length, wakeCount);
-    await control.stop();
-  } finally { core.release(); await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
-});
-
-test("a persistence that lands after the trip snapshot is terminalized", async () => {
-  const root = await privateRoot();
-  const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
-  await writeFile(path.join(usage, "usage.jsonl"), "");
-  let reachedTransition!: () => void;
-  const transitionReached = new Promise<void>((resolve) => { reachedTransition = resolve; });
-  let releaseTransition!: () => void;
-  const transitionRelease = new Promise<void>((resolve) => { releaseTransition = resolve; });
-  let blockOnce = true;
-  const core = new FakeCoreHost();
-  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
-    acceptanceStorePath: root, controlToken: token,
-    storeOptions: { ...testStoreOptions, afterFinalLockAssertion: async () => {
-      if (!blockOnce) return;
-      blockOnce = false;
-      reachedTransition();
-      await transitionRelease;
-    } },
-    fuseEnvironment: fuseEnvironment(usage, 2)
-  });
-  try {
-    await control.start();
-    const first = await control.accept(request("claim-blocked"));
-    assert.equal(first.state, "accepted");
-    await transitionReached;
-    const latePersistence = control.accept(request("persist-after-snapshot"));
-    const trip = control.accept(request("trip-after-snapshot"));
-    releaseTransition();
-    assert.equal((await latePersistence).state, "accepted");
-    core.release();
-    assert.deepEqual(await trip, { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
-    const items = (await control.activityV2(token))?.items ?? [];
-    assert.equal(items.filter((item) => item.state === "accepted").length, 0);
-    assert.equal(items.find((item) => item.delivery_id === "persist-after-snapshot")?.state, "stopped");
-    await control.stop();
-  } finally { releaseTransition(); core.release(); await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
-});
-
-test("a request admitted before a concurrent trip is refused before persistence", async () => {
-  const root = await privateRoot();
-  const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
-  await writeFile(path.join(usage, "usage.jsonl"), "");
-  let admissionReached!: () => void;
-  const reachedAdmission = new Promise<void>((resolve) => { admissionReached = resolve; });
-  let releaseAdmission!: () => void;
-  const admissionRelease = new Promise<void>((resolve) => { releaseAdmission = resolve; });
-  let tripReached!: () => void;
-  const reachedTrip = new Promise<void>((resolve) => { tripReached = resolve; });
-  let releaseTrip!: () => void;
-  const tripRelease = new Promise<void>((resolve) => { releaseTrip = resolve; });
-  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, new FakeCoreHost(), {
-    acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
-    fuseEnvironment: fuseEnvironment(usage, 10), fusePollIntervalMsForTest: 1,
-    afterFuseAdmissionForTest: async () => { admissionReached(); await admissionRelease; },
-    beforeTripTerminalizationForTest: async () => { tripReached(); await tripRelease; }
-  });
-  try {
-    await control.start();
-    const pending = control.accept(request("admitted-before-trip"));
-    await reachedAdmission;
-    await writeFile(path.join(usage, "fuse.stop"), "");
-    await Promise.race([reachedTrip, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("concurrent trip timed out")), 1_000))]);
-    releaseAdmission();
-    assert.deepEqual(await pending, { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
-    const items = (await control.activityV2(token))?.items ?? [];
-    assert.equal(items.some((item) => item.delivery_id === "admitted-before-trip"), false, "a request caught by the admit/persist trip window must not create a store record");
-  } finally {
-    releaseAdmission(); releaseTrip();
-    await control.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
-    await rm(usage, { recursive: true, force: true });
-  }
+    await control.start(); await control.accept(request("running")); await core.waitForWakes(1);
+    for (const id of ["queued", "later"]) assert.equal((await control.accept(request(id))).state, "accepted");
+    const items = (await control.activityV2(token))!.items;
+    assert.equal(items.filter((item) => item.state === "accepted").length, 2);
+    core.release(); await waitFor(async () => (await control.availability(token))!.state === "paused");
+    assert.equal(core.wakes.length, 1);
+    assert.equal((await control.accept(request("after-pause"))).state, "accepted");
+  } finally { core.release(); await control.stop(); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
 test("invalid authorities consume no admission and duplicate delivery is fuse-idempotent", async () => {
@@ -226,12 +134,13 @@ test("invalid authorities consume no admission and duplicate delivery is fuse-id
     if (first.state === "accepted") await waitFor(async () => (await control.wakeReceipt(token, first.acceptance_id))?.state === "completed");
     assert.equal((await control.accept(request("paid-once"))).state, "accepted");
     const tripped = control.accept(request("second-unique"));
-    assert.deepEqual(await tripped, { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
+    assert.equal((await tripped).state, "accepted");
+    assert.equal((await control.availability(token))!.state, "paused");
     await control.stop();
   } finally { await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
-test("startup into an operator-tripped fuse terminalizes recovery without dispatch", async () => {
+test("startup into an operator-tripped fuse preserves recovery without dispatch", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
   await writeFile(path.join(usage, "usage.jsonl"), "");
@@ -247,12 +156,12 @@ test("startup into an operator-tripped fuse terminalizes recovery without dispat
     });
     await control.start();
     assert.equal(core.wakes.length, 0);
-    assert.equal((await control.wakeReceipt(token, parked.record.acceptance_id))?.state, "stopped");
+    assert.equal((await control.wakeReceipt(token, parked.record.acceptance_id))?.state, "accepted");
     await control.stop();
   } finally { await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
-test("startup into a ceiling-tripped fuse terminalizes accepted recovery without dispatch", async () => {
+test("startup into a ceiling-tripped fuse preserves accepted recovery without dispatch", async () => {
   const root = await privateRoot();
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
   await writeFile(path.join(usage, "usage.jsonl"), "");
@@ -272,8 +181,8 @@ test("startup into a ceiling-tripped fuse terminalizes accepted recovery without
     await control.start();
     const items = (await control.activityV2(token))?.items ?? [];
     assert.equal(core.wakes.length, 0);
-    assert.equal(items.filter((item) => item.state === "accepted").length, 0);
-    assert.equal((await control.wakeReceipt(token, parked.record.acceptance_id))?.state, "stopped");
+    assert.equal(items.filter((item) => item.state === "accepted").length, 1);
+    assert.equal((await control.wakeReceipt(token, parked.record.acceptance_id))?.state, "accepted");
     await control.stop();
   } finally { await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
@@ -292,34 +201,20 @@ test("startup fails before the core host when the fuse cannot open", async () =>
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("a rejecting polled trip does not become an unhandled rejection", async () => {
-  const root = await privateRoot();
-  const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
+test("operator stop polling blocks new delivery without losing accepted work", async () => {
+  const root = await privateRoot(); const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-fuse-usage-"));
   await writeFile(path.join(usage, "usage.jsonl"), "");
-  const unhandled: unknown[] = [];
-  const listener = (reason: unknown): void => { unhandled.push(reason); };
-  process.on("unhandledRejection", listener);
-  let tripAttempted!: () => void;
-  const attempted = new Promise<void>((resolve) => { tripAttempted = resolve; });
   const core = new FakeCoreHost();
-  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, {
-    acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions,
-    fuseEnvironment: fuseEnvironment(usage, 10), fusePollIntervalMsForTest: 1,
-    beforeTripTerminalizationForTest: async () => { tripAttempted(); throw new Error("injected terminalization failure"); }
-  });
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, { acceptanceStorePath: root, controlToken: token, storeOptions: testStoreOptions, fuseEnvironment: fuseEnvironment(usage, 10), fusePollIntervalMsForTest: 1 });
   try {
-    await control.start();
-    await writeFile(path.join(usage, "fuse.stop"), "");
-    await Promise.race([attempted, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("trip poll timed out")), 1_000))]);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.deepEqual(unhandled, []);
-    assert.deepEqual(await control.accept(request("after-partial-trip")), { version: "noopolis.daimon.wake-acceptance.v2", state: "stopped", code: "host_stopping" });
-  } finally {
-    process.off("unhandledRejection", listener);
-    await control.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
-    await rm(usage, { recursive: true, force: true });
-  }
+    await control.start(); await control.accept(request("before-stop")); await core.waitForWakes(1);
+    await control.accept(request("queued-before-stop")); await writeFile(path.join(usage, "fuse.stop"), "");
+    await waitFor(async () => (await control.availability(token))!.state === "stopped");
+    const result = await control.accept(request("after-stop")); assert.equal(result.state, "stopped");
+    assert.equal(result.blocked!.reason, "operator_stop");
+    core.release();
+    assert.equal((await control.activityV2(token))!.items.find((row) => row.delivery_id === "queued-before-stop")!.state, "accepted");
+  } finally { core.release(); await control.stop(); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
 test("schedule acceptance preserves its WakeEvent kind through the durable FIFO", async () => {
@@ -429,9 +324,10 @@ test("a held per-agent head blocks later delivery on a replacement host", async 
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(replacementCore.wakes.length, 0);
     firstCore.release();
-    await replacementCore.waitForWakes(1);
-    assert.equal(replacementCore.wakes[0]?.event.id, "later");
-    replacementCore.release();
+    await waitFor(() => firstCore.wakes.length + replacementCore.wakes.length === 2);
+    const later = [...firstCore.wakes.slice(1), ...replacementCore.wakes];
+    assert.equal(later.length, 1); assert.equal(later[0]?.event.id, "later");
+    firstCore.release(); replacementCore.release();
     await Promise.all([first.stop(), replacement.stop()]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

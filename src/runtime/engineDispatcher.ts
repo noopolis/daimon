@@ -1,3 +1,4 @@
+import { attentionTools, type AttentionRegistry } from "./attention.js";
 import path from "node:path";
 
 import type { AgentHandle } from "../core/types.js";
@@ -28,7 +29,8 @@ export async function startOrganizationRuntimeEngine(
   agyBusAddress?: string,
   grokBroker?: EngineBrokerTurnClient,
   organizationAgents?: readonly OrganizationRuntimeAgentConfig[],
-  sharedProtectedPaths: readonly string[] = []
+  sharedProtectedPaths: readonly string[] = [],
+  attention?: AttentionRegistry
 ): Promise<AgentHandle> {
   await paths?.verify();
   const canonicalAgent = paths === undefined ? agent : { ...agent, workspacePath: paths.workspacePath, runtimeHomePath: paths.runtimeHomePath };
@@ -51,7 +53,7 @@ export async function startOrganizationRuntimeEngine(
         readablePaths: codexSandboxReadablePaths(canonicalAgent)
       }
     : undefined;
-  const adapter = adapterFor(canonicalAgent, controlTokenEnv, readiness.verify, readiness.executablePath, readiness.engineHomePath, paths?.verify, agyBusAddress, await createProductionAgentTools(canonicalAgent, wakeContext), wakeContext, grokSandbox,grokBroker,codexSandboxPaths);
+  const adapter = adapterFor(canonicalAgent, controlTokenEnv, readiness.verify, readiness.executablePath, readiness.engineHomePath, paths?.verify, agyBusAddress, [...await createProductionAgentTools(canonicalAgent, wakeContext), ...(agent.attention !== undefined && attention !== undefined ? attentionTools(agent.id, attention) : [])], wakeContext, grokSandbox,grokBroker,codexSandboxPaths);
   const handle = await adapter.startAgent({
     id: canonicalAgent.id,
     name: canonicalAgent.name,
