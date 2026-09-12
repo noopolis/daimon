@@ -57,6 +57,11 @@ Codex uses a private `.codex/auth.json` under each agent runtime home. Optional
 Codex config fields are `model`, `reasoningEffort`, and the fixed no-network
 workspace sandbox policy.
 
+Every Codex wake enables and requires Daimon's per-wake MCP server, including
+standalone and strict sandbox launches. If the server cannot initialize, Codex
+fails the wake before model work instead of continuing with only built-in tools.
+The startup error follows the existing bounded, redacted engine failure path.
+
 The production Grok path uses an external Daimon engine broker with one durable
 subscription credential authority. Agent workers receive scoped capabilities;
 the broker owns refresh and stale-credential recovery. The runtime checks broker

@@ -45,11 +45,19 @@ test("Codex output, sandbox, config, and cwd boundaries reject caller overrides"
   assert.equal(args.includes("--json"), true);
 });
 
-test("codex argv is byte-identical to before model selection existed when model/reasoningEffort are absent", () => {
-  const before = ["exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "--color", "never", "--json", "-C", "/workspace",
-    "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-"];
-  const after = renderCodexArgs({ commandArgs: [] }, "/workspace", "http://127.0.0.1:1/mcp");
-  assert.deepEqual(after, before);
+for (const mode of ["standalone", "strict"] as const) {
+  test(`Codex ${mode} launch requires the per-wake MCP server`, () => {
+    const args = renderCodexArgs(mode === "standalone" ? {} : {
+      codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" }
+    }, "/workspace", "http://127.0.0.1:1/mcp");
+    assert.deepEqual(args.slice(-5), ["-c", "mcp_servers.daimon.enabled=true", "-c", "mcp_servers.daimon.required=true", "-"]);
+  });
+}
+
+test("codex argv preserves model defaults while requiring the per-wake MCP server", () => {
+  const args = renderCodexArgs({ commandArgs: [] }, "/workspace", "http://127.0.0.1:1/mcp");
+  assert.deepEqual(args, ["exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "--color", "never", "--json", "-C", "/workspace",
+    "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-c", "mcp_servers.daimon.enabled=true", "-c", "mcp_servers.daimon.required=true", "-"]);
 });
 
 test("codex strict policy is rendered as per-turn Daimon-owned CLI config", () => {
@@ -125,13 +133,13 @@ test("Codex permission profile lets protected denies override readable paths", (
 test("codex argv renders -m for a pinned model and leaves everything else untouched", () => {
   const args = renderCodexArgs({ commandArgs: [], model: "gpt-5-codex" }, "/workspace", "http://127.0.0.1:1/mcp");
   assert.deepEqual(args, ["exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "--model=gpt-5-codex", "--color", "never", "--json", "-C", "/workspace",
-    "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-"]);
+    "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-c", "mcp_servers.daimon.enabled=true", "-c", "mcp_servers.daimon.required=true", "-"]);
 });
 
 test("codex argv renders both model and reasoningEffort together in stable order", () => {
   const args = renderCodexArgs({ commandArgs: [], model: "gpt-5-codex", reasoningEffort: "xhigh" }, "/workspace", "http://127.0.0.1:1/mcp");
   assert.deepEqual(args, ["exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "--model=gpt-5-codex", "-c", "model_reasoning_effort=xhigh", "--color", "never", "--json", "-C", "/workspace",
-    "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-"]);
+    "-c", "mcp_servers.daimon.url=http://127.0.0.1:1/mcp", "-c", "mcp_servers.daimon.enabled=true", "-c", "mcp_servers.daimon.required=true", "-"]);
 });
 
 test("codex argv renders reasoningEffort alone without a model flag", () => {

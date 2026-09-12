@@ -22,8 +22,11 @@ export const renderGrokSandboxArgs = (
  * `--flag=value` argv token (never a bare flag followed by a separate value
  * token), so a value that itself looks like a flag (e.g. `--sandbox`) can
  * never be parsed as a second, independent argument — the same shape already
- * used below for `mcp_servers.daimon.url=`. Omitting both fields renders the
- * exact argv Daimon produced before model selection existed.
+ * used below for `mcp_servers.daimon.url=`. Omitting both fields leaves Codex's
+ * model defaults unchanged.
+ *
+ * The per-wake MCP server is always enabled and required. Otherwise Codex can
+ * continue a normal turn with only built-in tools after MCP startup fails.
  */
 export const renderCodexArgs = (
   options: Pick<CliEngineOptions, "commandArgs" | "model" | "reasoningEffort" | "codexSandbox" | "codexSandboxProtectedPaths" | "codexSandboxReadablePaths">,
@@ -51,7 +54,9 @@ export const renderCodexArgs = (
   ...(options.model === undefined ? [] : [`--model=${options.model}`]),
   ...(options.reasoningEffort === undefined ? [] : ["-c", `model_reasoning_effort=${options.reasoningEffort}`]),
   "--color", "never", "--json", "-C", cwd,
-  "-c", `mcp_servers.daimon.url=${endpoint}`, "-"];
+  "-c", `mcp_servers.daimon.url=${endpoint}`,
+  "-c", "mcp_servers.daimon.enabled=true",
+  "-c", "mcp_servers.daimon.required=true", "-"];
 };
 
 export const renderCodexPermissionProfile = (
