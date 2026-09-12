@@ -10,9 +10,14 @@ const runtimeDist = fileURLToPath(new URL("../dist/runtime/", import.meta.url));
 const manifestName = "contract-manifest.json";
 const digestName = "contract-manifest.sha256";
 
-export const contractManifestArtifacts = () => {
+type ContractManifestArtifacts = Readonly<{
+  digest: Buffer;
+  manifest: Buffer;
+}>;
+
+export const contractManifestArtifacts = (): ContractManifestArtifacts => {
   const canonical = canonicalJson(RUNTIME_CONTRACT_MANIFEST);
-  const parsed = JSON.parse(canonical);
+  const parsed = JSON.parse(canonical) as unknown;
   if (canonicalJson(parsed) !== canonical) throw new Error("contract manifest failed canonical round trip");
   const manifest = Buffer.from(`${canonical}\n`, "utf8");
   const hash = createHash("sha256").update(manifest).digest("hex");
@@ -20,35 +25,35 @@ export const contractManifestArtifacts = () => {
   return Object.freeze({ manifest, digest: Buffer.from(`sha256:${hash}\n`, "ascii") });
 };
 
-const assertRuntimeDist = async (outputDirectory) => {
+const assertRuntimeDist = async (outputDirectory: string): Promise<void> => {
   const entry = await stat(outputDirectory);
   if (!entry.isDirectory()) throw new Error("compiled runtime output is not a directory");
 };
 
-export const emitContractManifestArtifacts = async (outputDirectory = runtimeDist) => {
+export const emitContractManifestArtifacts = async (outputDirectory = runtimeDist): Promise<void> => {
   await assertRuntimeDist(outputDirectory);
   const artifacts = contractManifestArtifacts();
   await writeFile(path.join(outputDirectory, manifestName), artifacts.manifest, { flag: "w" });
   await writeFile(path.join(outputDirectory, digestName), artifacts.digest, { flag: "w" });
 };
 
-export const verifyContractManifestArtifacts = async (outputDirectory = runtimeDist) => {
+export const verifyContractManifestArtifacts = async (outputDirectory = runtimeDist): Promise<void> => {
   await assertRuntimeDist(outputDirectory);
   const expected = contractManifestArtifacts();
   const [manifest, digest] = await Promise.all([
     readFile(path.join(outputDirectory, manifestName)),
-    readFile(path.join(outputDirectory, digestName))
+    readFile(path.join(outputDirectory, digestName)),
   ]);
   if (!manifest.equals(expected.manifest) || !digest.equals(expected.digest)) {
     throw new Error("emitted runtime contract artifacts drift from source constants");
   }
 };
 
-const main = async () => {
+const main = async (): Promise<void> => {
   const args = process.argv.slice(2);
   if (args.length === 0) return emitContractManifestArtifacts();
   if (args.length === 1 && args[0] === "--check") return verifyContractManifestArtifacts();
-  throw new Error("usage: emitRuntimeContractManifest.mjs [--check]");
+  throw new Error("usage: emitRuntimeContractManifest.ts [--check]");
 };
 
 const invoked = process.argv[1];

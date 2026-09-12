@@ -12,7 +12,7 @@ const sourceHash = createHash('sha256');
 for (const file of sourceFiles) sourceHash.update(readFileSync(path.join(root, file)));
 const sourceSha256 = `sha256:${sourceHash.digest('hex')}`;
 mkdirSync(artifacts, { recursive: true });
-for (const [architecture, platform] of [['x64', 'amd64'], ['arm64', 'arm64']]) {
+for (const [architecture, platform] of [['x64', 'amd64'], ['arm64', 'arm64']] as const) {
   const nonce = randomUUID(), image = `daimon-engine-broker:${nonce}`, container = `daimon-engine-broker-${nonce}`;
   try {
     execFileSync('docker', ['build', '--network=none', '--platform', `linux/${platform}`, '-t', image, root], { stdio: 'inherit' });

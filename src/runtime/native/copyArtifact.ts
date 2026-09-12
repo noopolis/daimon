@@ -2,7 +2,7 @@ import { chmod, copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-await import('./verifyArtifacts.mjs');
+await import('./verifyArtifacts.ts');
 const root = path.dirname(fileURLToPath(import.meta.url));
 const architecture = process.arch;
 if (!['x64', 'arm64'].includes(architecture) || process.platform !== 'linux') {

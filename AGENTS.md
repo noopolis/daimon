@@ -8,9 +8,13 @@ deployment. Daimon owns only the per-agent runtime boundary.
 
 ## Structure
 
+- `docs/` explains the current package surface and runtime behavior.
+- `archive/` preserves historical plans and audits that are no longer current
+  operating documentation.
 - `src/core/` defines per-agent harness contracts.
 - `src/pi/` implements the contract using Pi's SDK.
 - `src/observability/` records local agent/org activity traces.
+- `src/runtime/` owns the organization-runtime host and durable control plane.
 - `src/examples/` contains runnable local examples and E2E checks.
 
 ## Rules

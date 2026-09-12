@@ -17,11 +17,11 @@ const authFile = path.join(process.env.GROK_HOME ?? path.join(os.homedir(), ".gr
 const root = await mkdtemp(path.join(os.tmpdir(), "daimon-live-grok-"));
 const sentinel = "GROK_DAIMON_AUTH_OK";
 const authority = {
-  async accessToken(forceRefresh) {
+  async accessToken(forceRefresh: boolean): Promise<string> {
     if (forceRefresh) throw new Error("Live probe requires a current Grok login");
     return (await readGrokBrokerCredential(authFile)).accessToken;
   },
-  async markRejected() { throw new Error("Live probe requires a current Grok login"); }
+  async markRejected(): Promise<void> { throw new Error("Live probe requires a current Grok login"); },
 };
 let stage = "credential preflight";
 
@@ -47,21 +47,22 @@ try {
       const child = trackCliChild(spawn("grok", [
         "--sandbox", "strict", "--prompt-file", prompt, "--no-memory", "--no-subagents",
         "--disable-web-search", "--max-turns", "1", "--permission-mode", "dontAsk",
-        "--model", "daimon-broker-grok", "--output-format", "streaming-messages-json"
+        "--model", "daimon-broker-grok", "--output-format", "streaming-messages-json",
       ], {
         cwd: home, detached: process.platform !== "win32",
         env: { PATH: process.env.PATH, HOME: home, GROK_HOME: home, LANG: "C", LC_ALL: "C", TZ: "UTC" },
-        stdio: ["ignore", "pipe", "pipe"]
+        stdio: ["ignore", "pipe", "pipe"],
       }));
-      let output;
+      let output: string;
       try { output = await readChild(child, 90_000, [capability], { retainStdoutTail: true }); }
       finally { await terminateChild(child); }
       stage = `terminal verification ${round}`;
       const turn = decodeGrokHeadlessTurn(output);
       assert.equal(turn.text, sentinel);
-      assert.ok(turn.usage?.total > 0, "Expected real provider usage");
+      const usage = turn.usage;
+      assert.ok(usage !== undefined && usage.total > 0, "Expected real provider usage");
       await assert.rejects(access(path.join(home, "auth.json")), { code: "ENOENT" });
-      process.stdout.write(`${JSON.stringify({ round, reply: sentinel, usage: turn.usage })}\n`);
+      process.stdout.write(`${JSON.stringify({ round, reply: sentinel, usage })}\n`);
     } finally { await proxy.close(); }
   }
   process.stdout.write("GROK_BROKER_AUTH_RESTART_OK\n");

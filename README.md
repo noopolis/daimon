@@ -342,14 +342,13 @@ The Pi E2E uses the local Codex CLI subscription auth file to seed an ignored Pi
 `auth.json` under `.runtime/`.
 
 These are live runs: they spend real tokens and require local engine auth
-(`~/.codex/auth.json` for Pi/Codex; mixed-engine and triad additionally need
+(`~/.codex/auth.json` for Pi/Codex; triad additionally needs
 authenticated `grok` and `agy` CLIs on PATH). They are not part of `npm test`.
 
 ```bash
 npm install
 npm run e2e:pi-agent
 npm run e2e:pi-memory-org
-npm run e2e:mixed-engine-org
 npm run e2e:jungian-play-org
 npm run e2e:jungian-triad-org
 ```
@@ -381,14 +380,15 @@ speaks through a Pi agent seeded from local Codex subscription auth. All three
 selves carry the same full archetype set, rotated through the run so every
 archetype gets consulted.
 
-## Design Notes
+## Docs
 
-- `MEMORY-SYSTEM.md` describes the implemented scoped memory runtime.
-- `ENGINE-SYSTEM.md` describes the engine abstraction plan: Pi, local/API
-  model providers, and CLI-backed engines such as `codex`, `claude`, `grok`,
-  and `agy`.
-- Mneme is a sibling package, `@noopolis/mneme`, published separately and used
-  by Daimon in-process for Pi agents. Other runtimes can use Mneme through its
-  MCP server. The agent-facing tools stay named `memory_search`,
-  `memory_register`, and `memory.*` at the protocol boundary because those names
-  are clearer to agents.
+Start with `docs/README.md` for the current documentation map:
+
+- `docs/runtime.md` explains the organization-runtime config, control API,
+  schedules, durable wake acceptance, and attention.
+- `docs/engines.md` explains Pi and CLI engine boundaries.
+- `docs/memory.md` explains Daimon's Mneme adapter.
+- `docs/observability.md` explains causal events, raw capture, and world
+  trajectories.
+
+Historical migration plans and audits live under `archive/`.

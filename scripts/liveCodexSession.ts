@@ -7,6 +7,15 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 
 import { createCliSessionFactory } from "../src/pi/cliSession.ts";
 
+type TextContent = { text: string; type: "text" };
+
+const isTextContent = (value: unknown): value is TextContent => (
+  value !== null
+  && typeof value === "object"
+  && (value as { type?: unknown }).type === "text"
+  && typeof (value as { text?: unknown }).text === "string"
+);
+
 const workspacePath = await mkdtemp(path.join(os.tmpdir(), "daimon-live-codex-"));
 let toolInvoked = false;
 const lookup = defineTool({
@@ -16,7 +25,7 @@ const lookup = defineTool({
   parameters: Type.Object({
     question: Type.String({ description: "The verification question." })
   }, { additionalProperties: false }),
-  async execute(_toolCallId, params) {
+  async execute(_toolCallId, params: { question: string }) {
     toolInvoked = true;
     return {
       content: [{ type: "text", text: `The verified answer is PINEAPPLE. Question: ${params.question}` }],
@@ -30,13 +39,14 @@ try {
     engine: "codex",
     maxToolTurns: 3,
     timeoutMs: 120_000,
-    onToolsMounted: (tools) => process.stderr.write(`mounted tools: ${tools.map((tool) => tool.name).join(", ")}\n`)
+    onToolsMounted: (tools) => process.stderr.write(`mounted tools: ${tools.map((tool) => tool.name).join(", ")}\n`),
   })({ cwd: workspacePath, customTools: [lookup] });
   let finalText = "";
   const unsubscribe = session.subscribe((event) => {
     if (event.type !== "turn_end") return;
+    if (!("content" in event.message)) return;
     finalText = Array.isArray(event.message.content)
-      ? event.message.content.filter((entry) => entry.type === "text").map((entry) => entry.text).join("")
+      ? event.message.content.filter(isTextContent).map((entry) => entry.text).join("")
       : event.message.content;
   });
   await session.prompt("You must call the live_lookup tool before answering. Then reply with the verified answer and nothing else.");
