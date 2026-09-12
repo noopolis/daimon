@@ -73,7 +73,21 @@ Attention is opt-in per agent:
 
 Attention agents require the durable v2 route. They receive `daimon_inbox` and
 `daimon_inbox_disposition`; reading does not complete a message, and unmarked
-or deferred deliveries stay pending.
+or deferred deliveries stay pending. The generated execution prompt must fit
+both the 4,096-codepoint and 16,384-byte runtime limits, including the inbox
+wrapper. Larger selected payloads remain intact in `daimon_inbox`; the prompt
+instructs the agent to read them there.
+
+Rejected or failed executions also leave unfinished deliveries pending, but
+persist a bounded, credential-redacted diagnostic. `GET /v2/availability`
+reports that agent's `error` and a `paused` aggregate state, even after restart
+or successful work on a different delivery. The diagnostic clears when that
+delivery is successfully handled or explicitly deferred by the agent. Retry
+still requires new external input; failures do not create a self-wake loop.
+
+The diagnostic is an optional private `execution_error` field in the stored
+receipt. Public receipt schemas are unchanged. Older runtimes cannot read a
+store containing that field; retain the newer runtime when recovering it.
 
 Version 2 schedules are normalized on the agent:
 

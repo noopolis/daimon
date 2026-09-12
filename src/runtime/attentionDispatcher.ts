@@ -5,6 +5,7 @@ import { engineFailureDetail } from "./organizationRuntimeHost.js";
 import { WakeAcceptanceStore, WakeExecutionClaimLostError, type WakeExecutionClaim } from "./wakeAcceptanceStore.js";
 import type { StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
 import { WakeFuse } from "./wakeFuse.js";
+import { ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES } from "../contracts/organizationRuntimeContract.js";
 
 type Claimed = { record: StoredWakeAcceptanceRecord; claim: WakeExecutionClaim; done: boolean };
 type Options = Readonly<{ store: WakeAcceptanceStore; host: OrganizationRuntimeHost; fuse: WakeFuse; agents: readonly OrganizationRuntimeAgentConfig[]; registry: AttentionRegistry; token: string | undefined; onIdle(agentId: string): void }>;
@@ -100,7 +101,7 @@ export class AttentionDispatcher {
           return;
         }
         if (item.done && disposition === "defer") return;
-        item.record = await store.transitionClaimed(item.record.acceptance_id, item.claim, disposition === "complete" ? "completed" : "accepted", undefined, disposition === "complete" ? "" : undefined, disposition === "defer" ? { deferred: true, clear_execution: true } : { execution_id: executionId, deferred: false });
+        item.record = await store.transitionClaimed(item.record.acceptance_id, item.claim, disposition === "complete" ? "completed" : "accepted", undefined, disposition === "complete" ? "" : undefined, disposition === "defer" ? { deferred: true, clear_execution: true, execution_error: null } : { execution_id: executionId, deferred: false, execution_error: null });
         item.done = true;
       })
     });
@@ -117,12 +118,14 @@ export class AttentionDispatcher {
     } finally { clearInterval(heartbeat); }
     try {
       await mutation;
+      const executionError = result.status === "rejected" ? `wake rejected: ${result.code}`
+        : result.status === "failed" ? `engine_failed: ${result.detail ?? "engine execution failed"}` : null;
       for (const item of claimed.filter((value) => !value.done)) {
         if (this.stopping || result.status === "stopped") await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
         else if (agent.attention !== undefined) {
           // Successful reading is not completion. A failed execution also keeps
           // unfinished deliveries, and its execution id for idempotent retry.
-          await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted", undefined, undefined, { deferred: true, clear_execution: result.status === "completed" });
+          await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted", undefined, undefined, { deferred: true, clear_execution: result.status === "completed", execution_error: executionError });
         } else if (result.status === "completed") await store.transitionClaimed(item.record.acceptance_id, item.claim, "completed", undefined, result.text);
         else await store.transitionClaimed(item.record.acceptance_id, item.claim, "failed", "engine_failed", result.status === "failed" ? result.detail : undefined);
       }
@@ -170,5 +173,13 @@ export function selectBatch(records: readonly StoredWakeAcceptanceRecord[], agen
 
 function inboxPrompt(messages: readonly unknown[], maxBytes = 12000): string {
   const body = JSON.stringify(messages);
-  return "Handle this inbox turn. Use daimon_inbox for deliveries and remaining allowances. Explicitly call daimon_inbox_disposition for each handled delivery (complete) or unfinished delivery (defer). Reading or ending this turn never completes a delivery. Deferred work waits for a later external wake.\n" + (Buffer.byteLength(body) > maxBytes ? "The selected payload exceeds the prompt budget; read it with daimon_inbox." : body);
+  const prefix = "Handle this inbox turn. Use daimon_inbox for deliveries and remaining allowances. Explicitly call daimon_inbox_disposition for each handled delivery (complete) or unfinished delivery (defer). Reading or ending this turn never completes a delivery. Deferred work waits for a later external wake.\n";
+  const prompt = prefix + body;
+  // The inbox budget bounds selection; the v1 execution boundary independently
+  // bounds the complete prompt, including metadata, escaping, and instructions.
+  if (Buffer.byteLength(body) > maxBytes || Buffer.byteLength(prompt) > ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES
+      || [...prompt].length > ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS) {
+    return prefix + "The selected payload exceeds the prompt budget; read it with daimon_inbox.";
+  }
+  return prompt;
 }
