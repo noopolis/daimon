@@ -8,6 +8,10 @@ import { WakeAcceptanceStore } from "./wakeAcceptanceStore.js";
 import { parseStoredWakeAcceptance, sanitizeExecutionError } from "./wakeAcceptanceRecord.js";
 import { parseWakeAcceptanceRequest } from "./wakeAcceptanceTypes.js";
 
+type PublicActivityRow = Awaited<ReturnType<WakeAcceptanceStore["activity"]>>[number];
+const publicViewOmitsExecutionError: "execution_error" extends keyof PublicActivityRow ? false : true = true;
+void publicViewOmitsExecutionError;
+
 const storeOptions = process.platform === "linux" ? {} : {
   processIdentity: async () => ({ pid: 1, process_start: "test-start", boot_id: "test-boot", pid_namespace_dev: 1, pid_namespace_ino: 1 }),
   ownerLiveness: async () => true

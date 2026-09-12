@@ -89,7 +89,7 @@ export class WakeAcceptanceStore {
     const record = await this.findByAcceptanceId(acceptanceId);
     return record === undefined ? undefined : publicStatus(record);
   }
-  async activity(): Promise<readonly ActivityRow[]> { return await this.activityRows(false); }
+  async activity(): Promise<readonly Omit<ActivityRow, "execution_error">[]> { return await this.activityRows(false); }
   /** Internal availability view; diagnostics never enter the public receipt wire. */
   async activityWithExecutionErrors(): Promise<readonly ActivityRow[]> { return await this.activityRows(true); }
   private async activityRows(includeExecutionErrors: boolean): Promise<readonly ActivityRow[]> {
