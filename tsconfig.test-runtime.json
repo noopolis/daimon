@@ -1,5 +1,10 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "declaration": false, "declarationMap": false, "outDir": "dist-test-runtime", "sourceMap": false },
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/runtime/native/build.ts",
+    "src/runtime/native/copyArtifact.ts",
+    "src/runtime/native/verifyArtifacts.ts"
+  ]
 }

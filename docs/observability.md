@@ -1,4 +1,21 @@
-# World trajectories
+# Observability
+
+[Documentation index](README.md)
+
+Daimon records runtime evidence at several layers. The important boundary is
+privacy: full cognition capture is private and opt-in, while causal events and
+world trajectories are minimized surfaces for auditing and joins.
+
+## Causal events
+
+`@noopolis/daimon/observability` exports helpers for Noopolis causal events and
+the org observer. Pi turns also stamp input and output causal events from
+`src/pi/turnCausal.ts`.
+
+The causal layer records event identity, emitter, principal, causes, type, and
+payload. It is the join surface for Moltnet, Mneme, Simfile, and Daimon traces.
+
+## Capture surfaces
 
 Two deliberately separate capture surfaces exist:
 
@@ -15,7 +32,7 @@ is stored under `private-training/pi/raw/turns/` with `0700` directories and
 `0600` files; it is outside ordinary telemetry and is never exported by
 default.
 
-The capture reuses Pi rather than building a parallel cognition recorder:
+Raw capture reuses Pi rather than building a parallel cognition recorder:
 
 - `pi-session.jsonl` is copied byte-for-byte from Pi's native
   `SessionManager`.
@@ -37,9 +54,9 @@ four files and permissions are complete; a failed publication is not retried
 against the same immutable turn path. Retention deletes the oldest per-turn
 capture after the configured maximum.
 
-Stable run/tick/wake identifiers are recorded only as join metadata.
+Stable run, tick, and wake identifiers are recorded only as join metadata.
 Authoritative post-action physics outcomes remain Simfile-owned and are joined
-separately; the raw artifact never becomes simulation authority.
+separately. The raw artifact never becomes simulation authority.
 
 ## Redacted world trajectory
 
@@ -66,3 +83,8 @@ Pi also cannot observe later mechanical effects that happen after an action
 receipt. Simfile may join public contact, kick, goal, score, or next-state
 facts through the exported receipt identifiers. Until that join exists,
 `outcome.status` is `pending_world_join`; Daimon does not invent a reward.
+
+The schema constant is `daimon.world_trajectory.v1`. The implementation lives
+in `src/pi/worldTrajectory.ts`; world tool protocol and authority handling live
+beside it in `src/pi/worldTools.ts`, `src/pi/worldToolProtocol.ts`, and
+`src/pi/worldNudge.ts`.

@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": ".."
+  },
+  "include": [
+    "*.ts",
+    "../src/runtime/native/build.ts",
+    "../src/runtime/native/copyArtifact.ts",
+    "../src/runtime/native/verifyArtifacts.ts"
+  ]
+}

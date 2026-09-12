@@ -11,7 +11,7 @@ import { canonicalRuntimeContractManifest } from "./contractManifest.js";
 const exec = promisify(execFile);
 const manifestPath = path.resolve("dist/runtime/contract-manifest.json");
 const digestPath = path.resolve("dist/runtime/contract-manifest.sha256");
-const emitterPath = path.resolve("scripts/emitRuntimeContractManifest.mjs");
+const emitterPath = path.resolve("scripts/emitRuntimeContractManifest.ts");
 
 const npm = async (...args: string[]): Promise<string> => {
   const result = await exec("npm", args, {

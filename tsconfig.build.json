@@ -5,6 +5,9 @@
     "src/runtime/testRuntimeMoltnetActions.ts",
     "src/runtime/testRuntimeMcpActions.ts",
     "src/runtime/fixtures/testMcpServer.mjs",
-    "src/runtime/testRuntimeSubprocess.ts"
+    "src/runtime/testRuntimeSubprocess.ts",
+    "src/runtime/native/build.ts",
+    "src/runtime/native/copyArtifact.ts",
+    "src/runtime/native/verifyArtifacts.ts"
   ]
 }

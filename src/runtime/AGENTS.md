@@ -115,6 +115,8 @@ declared networks and room/DM surfaces. Optional stdio MCP calls consume only a
 Spawnfile-compiled, digest-attested test artifact and enforce its agent/server/tool
 allowlist. These modules build only into `dist-test-runtime`, never production
 `dist`, and remain inert unless the fixed test-mode environment gate is present.
+The optional container fixture for that explicit test runtime lives at
+`src/runtime/fixtures/Dockerfile.test-runtime`.
 
 Every agent-facing tool in `productionAgentTools.ts` must return its payload in
 `details`, not only in `content`. The MCP mount lowers `details` to

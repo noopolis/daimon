@@ -3,8 +3,9 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 const root = path.resolve("dist");
-const files = [];
-async function walk(directory) {
+const files: string[] = [];
+
+async function walk(directory: string): Promise<void> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const file = path.join(directory, entry.name);
     if (entry.isDirectory()) await walk(file); else files.push(file);
