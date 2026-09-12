@@ -141,12 +141,15 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
       if (!tokensEqual(expectedToken, token) || !store || !fuse) return undefined;
       await fuse.pollOperatorStop();
       const items = await store.activity();
+      const executionErrors = new Map((await store.recoverable(knownAgents))
+        .filter((record) => record.execution_error !== undefined).map((record) => [record.agent_id, record.execution_error!]));
       const agents = await Promise.all(config.agents.map(async (agent) => ({
         agent_id: agent.id, pending: items.filter((item) => item.agent_id === agent.id && (item.state === "accepted" || item.state === "running" && !dispatcher?.activeExecutions().some((execution) => execution.agent_id === agent.id))).length,
         running: dispatcher?.activeExecutions().some((execution) => execution.agent_id === agent.id) ?? false,
         deferred: items.filter((item) => item.agent_id === agent.id && item.state === "accepted" && item.deferred).length,
         budget: await fuse!.snapshot(agent.id, agent.attention),
-        ...(dispatcher?.failure(agent.id) ? { error: dispatcher.failure(agent.id) } : {})
+        ...((dispatcher?.failure(agent.id) ?? executionErrors.get(agent.id))
+          ? { error: dispatcher?.failure(agent.id) ?? executionErrors.get(agent.id) } : {})
       })));
       return { version: "noopolis.daimon.work-availability.v1", state: hardReason() ? "stopped" : agents.some((agent) => agent.budget.state !== "available" || agent.error) ? "paused" : "running", agents };
     },

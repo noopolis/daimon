@@ -1,3 +1,4 @@
+import { redactCredentialText } from "../core/credentialRedaction.js";
 import {
   WAKE_ACCEPTANCE_VERSION,
   WAKE_RECEIPT_STATUS_VERSION,
@@ -14,7 +15,7 @@ import {
 export type StoredWakeAcceptanceRecord = Readonly<{
   acceptance_id: string; agent_id: string; delivery_id: string; request_digest: string;
   event: OrganizationRuntimeWakeAcceptanceRequest["event"]; state: WakeReceiptState;
-  accepted_at: string; updated_at: string; claim_generation?: string; execution_id?: string; deferred?: boolean; code?: WakeReceiptCode; text?: string;
+  accepted_at: string; updated_at: string; claim_generation?: string; execution_id?: string; deferred?: boolean; execution_error?: string; code?: WakeReceiptCode; text?: string;
 }>;
 
 export function publicAcceptance(record: StoredWakeAcceptanceRecord): OrganizationRuntimeWakeAcceptance {
@@ -26,7 +27,7 @@ export function publicStatus(record: StoredWakeAcceptanceRecord): OrganizationRu
 export function parseStoredWakeAcceptance(value: unknown): StoredWakeAcceptanceRecord {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("wake acceptance record is invalid");
   const record = value as Record<string, unknown>;
-  const keys = ["acceptance_id", "agent_id", "delivery_id", "request_digest", "event", "state", "accepted_at", "updated_at", "claim_generation", "execution_id", "deferred", "code", "text"];
+  const keys = ["acceptance_id", "agent_id", "delivery_id", "request_digest", "event", "state", "accepted_at", "updated_at", "claim_generation", "execution_id", "deferred", "execution_error", "code", "text"];
   if (Object.keys(record).some((key) => !keys.includes(key))) throw new Error("wake acceptance record is invalid");
   const parsed = parseWakeAcceptanceRequest({ token: undefined, agent_id: string(record.agent_id), delivery_id: string(record.delivery_id), event: record.event });
   const state = string(record.state) as WakeReceiptState;
@@ -35,6 +36,8 @@ export function parseStoredWakeAcceptance(value: unknown): StoredWakeAcceptanceR
   const claimGeneration = record.claim_generation === undefined ? undefined : string(record.claim_generation);
   const executionId = record.execution_id === undefined ? undefined : string(record.execution_id);
   if (executionId !== undefined && !uuid(executionId) || record.deferred !== undefined && typeof record.deferred !== "boolean") throw new Error("wake acceptance attention state is invalid");
+  const executionError = record.execution_error === undefined ? undefined : sanitizeExecutionError(string(record.execution_error));
+  if (executionError !== record.execution_error || executionError === "") throw new Error("wake acceptance execution error is invalid");
   const completionText = record.text === undefined ? undefined : sanitizeWakeCompletionText(string(record.text));
   if (claimGeneration !== undefined && !uuid(claimGeneration)) throw new Error("wake acceptance record is invalid");
   if (code !== undefined && !(["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] as const).includes(code)) throw new Error("wake acceptance record is invalid");
@@ -42,8 +45,13 @@ export function parseStoredWakeAcceptance(value: unknown): StoredWakeAcceptanceR
   if ((state === "failed" || state === "stopped") && code === undefined) throw new Error("wake acceptance record is invalid");
   if ((state !== "completed" && state !== "failed" && completionText !== undefined) || completionText !== record.text) throw new Error("wake acceptance record is invalid");
   if (string(record.request_digest) !== wakeAcceptanceDigest(parsed) || !uuid(string(record.acceptance_id))) throw new Error("wake acceptance record is invalid");
-  return { acceptance_id: string(record.acceptance_id), agent_id: parsed.agent_id, delivery_id: parsed.delivery_id, request_digest: string(record.request_digest), event: parsed.event, state, accepted_at: timestamp(record.accepted_at), updated_at: timestamp(record.updated_at), ...(claimGeneration === undefined ? {} : { claim_generation: claimGeneration }), ...(executionId === undefined ? {} : { execution_id: executionId }), ...(record.deferred === undefined ? {} : { deferred: record.deferred as boolean }), ...(code === undefined ? {} : { code }), ...(completionText === undefined ? {} : { text: completionText }) };
+  return { acceptance_id: string(record.acceptance_id), agent_id: parsed.agent_id, delivery_id: parsed.delivery_id, request_digest: string(record.request_digest), event: parsed.event, state, accepted_at: timestamp(record.accepted_at), updated_at: timestamp(record.updated_at), ...(claimGeneration === undefined ? {} : { claim_generation: claimGeneration }), ...(executionId === undefined ? {} : { execution_id: executionId }), ...(record.deferred === undefined ? {} : { deferred: record.deferred as boolean }), ...(code === undefined ? {} : { code }), ...(completionText === undefined ? {} : { text: completionText }), ...(executionError === undefined ? {} : { execution_error: executionError }) };
 }
 function string(value: unknown): string { if (typeof value !== "string") throw new Error("wake acceptance record is invalid"); return value; }
 function timestamp(value: unknown): string { const result = string(value); if (Number.isNaN(Date.parse(result)) || new Date(result).toISOString() !== result) throw new Error("wake acceptance record is invalid"); return result; }
 function uuid(value: string): boolean { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value); }
+
+/** Private failure diagnostic, surfaced through the existing availability error. */
+export function sanitizeExecutionError(value: string): string {
+  return redactCredentialText(value, [], 2048).trim();
+}

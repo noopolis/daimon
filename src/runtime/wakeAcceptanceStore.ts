@@ -13,7 +13,7 @@ import {
   type WakeReceiptState,
   wakeAcceptanceDigest
 } from "./wakeAcceptanceTypes.js";
-import { parseStoredWakeAcceptance, publicAcceptance, publicStatus, type StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
+import { sanitizeExecutionError, parseStoredWakeAcceptance, publicAcceptance, publicStatus, type StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
 import { assertOfflineReconciliationLeaseAvailable } from "./wakeAcceptanceReconciliation.js";
 import { acquireHostRegistration, releaseHostRegistration, type StoreHostRegistration } from "./storeCoordination.js";
 import { MAX_WAKE_ACCEPTANCE_RECORDS, terminalFilesToCompact } from "./wakeAcceptanceRetention.js";
@@ -174,7 +174,7 @@ export class WakeAcceptanceStore {
     });
   }
   /** `text` carries the completion output on success and the engine failure cause on failure. */
-  transitionClaimed(acceptanceId: string, claim: WakeExecutionClaim, state: WakeReceiptState, code?: WakeReceiptCode, completedText?: string, attention?: { execution_id?: string; deferred?: boolean; clear_execution?: boolean }): Promise<Stored> {
+  transitionClaimed(acceptanceId: string, claim: WakeExecutionClaim, state: WakeReceiptState, code?: WakeReceiptCode, completedText?: string, attention?: { execution_id?: string; deferred?: boolean; clear_execution?: boolean; execution_error?: string | null }): Promise<Stored> {
     return this.serialize(async () => {
       if (completedText !== undefined && state !== "completed" && state !== "failed") throw new Error("wake text requires completed or failed state");
       const initial = await this.findByAcceptanceId(acceptanceId);
@@ -193,7 +193,7 @@ export class WakeAcceptanceStore {
         await this.afterFinalLockAssertion?.();
         await this.assertTransitionLock(record, lock);
         const target = this.fileFor(record.agent_id, record.delivery_id);
-        const next: Stored = { ...record, state, updated_at: new Date().toISOString(), claim_generation: claim.generation, ...(code === undefined ? {} : { code }), ...(completedText === undefined ? {} : { text: sanitizeWakeCompletionText(completedText) }), ...(attention === undefined ? {} : { execution_id: attention.clear_execution ? undefined : attention.execution_id ?? record.execution_id, deferred: attention.deferred ?? record.deferred }) };
+        const next: Stored = { ...record, state, updated_at: new Date().toISOString(), claim_generation: claim.generation, ...(code === undefined ? {} : { code }), ...(completedText === undefined ? {} : { text: sanitizeWakeCompletionText(completedText) }), ...(attention === undefined ? {} : { execution_id: attention.clear_execution ? undefined : attention.execution_id ?? record.execution_id, deferred: attention.deferred ?? record.deferred, execution_error: attention.execution_error === null ? undefined : attention.execution_error === undefined ? record.execution_error : sanitizeExecutionError(attention.execution_error) }) };
         await this.replace(target, next);
         if (claim.acceptance_ids === undefined && (isTerminal(state) || state === "accepted")) {
           const currentClaim = await this.readClaimOptional(this.claimFor(record));
