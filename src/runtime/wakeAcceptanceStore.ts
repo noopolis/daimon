@@ -18,6 +18,7 @@ import { assertOfflineReconciliationLeaseAvailable } from "./wakeAcceptanceRecon
 import { acquireHostRegistration, releaseHostRegistration, type StoreHostRegistration } from "./storeCoordination.js";
 import { MAX_WAKE_ACCEPTANCE_RECORDS, terminalFilesToCompact } from "./wakeAcceptanceRetention.js";
 type Stored = StoredWakeAcceptanceRecord;
+type ActivityRow = OrganizationRuntimeWakeReceiptStatus & Readonly<{ active: boolean; queue_position?: number; execution_error?: string }>;
 export type WakeExecutionClaim = Readonly<{ acceptance_id: string; owner_id: string; generation: string; expires_at: string; acceptance_ids?: readonly string[]; execution_id?: string }>;
 export type WakeExecutionClaimResult = Readonly<{ state: "acquired"; claim: WakeExecutionClaim }> | Readonly<{ state: "held"; retry_at: string }> | Readonly<{ state: "terminal" }>;
 type DirectoryIdentity = Readonly<{ dev: number; ino: number; uid: number; mode: number }>;
@@ -88,7 +89,10 @@ export class WakeAcceptanceStore {
     const record = await this.findByAcceptanceId(acceptanceId);
     return record === undefined ? undefined : publicStatus(record);
   }
-  async activity(): Promise<readonly (OrganizationRuntimeWakeReceiptStatus & Readonly<{ active: boolean; queue_position?: number }>)[]> {
+  async activity(): Promise<readonly ActivityRow[]> { return await this.activityRows(false); }
+  /** Internal availability view; diagnostics never enter the public receipt wire. */
+  async activityWithExecutionErrors(): Promise<readonly ActivityRow[]> { return await this.activityRows(true); }
+  private async activityRows(includeExecutionErrors: boolean): Promise<readonly ActivityRow[]> {
     const records = await Promise.all((await this.files()).map(async (file) => await this.read(path.join(this.root, file))));
     records.sort((left, right) => left.accepted_at.localeCompare(right.accepted_at) || left.acceptance_id.localeCompare(right.acceptance_id));
     const queued = new Map<string, number>();
@@ -98,7 +102,8 @@ export class WakeAcceptanceStore {
       if (position !== undefined) queued.set(record.agent_id, position);
       const active = record.state === "running" && !activeExecutions.has(record.agent_id);
       if (active) activeExecutions.add(record.agent_id);
-      return { ...publicStatus(record), active, ...(position === undefined ? {} : { queue_position: position }) };
+      return { ...publicStatus(record), active, ...(position === undefined ? {} : { queue_position: position }),
+        ...(includeExecutionErrors && record.execution_error !== undefined ? { execution_error: record.execution_error } : {}) };
     });
   }
   async recoverable(agentIds: ReadonlySet<string>): Promise<readonly Stored[]> {
@@ -193,7 +198,7 @@ export class WakeAcceptanceStore {
         await this.afterFinalLockAssertion?.();
         await this.assertTransitionLock(record, lock);
         const target = this.fileFor(record.agent_id, record.delivery_id);
-        const next: Stored = { ...record, state, updated_at: new Date().toISOString(), claim_generation: claim.generation, ...(code === undefined ? {} : { code }), ...(completedText === undefined ? {} : { text: sanitizeWakeCompletionText(completedText) }), ...(attention === undefined ? {} : { execution_id: attention.clear_execution ? undefined : attention.execution_id ?? record.execution_id, deferred: attention.deferred ?? record.deferred, execution_error: attention.execution_error === null ? undefined : attention.execution_error === undefined ? record.execution_error : sanitizeExecutionError(attention.execution_error) }) };
+        const next: Stored = { ...record, state, updated_at: new Date().toISOString(), claim_generation: claim.generation, ...(code === undefined ? {} : { code }), ...(completedText === undefined ? {} : { text: sanitizeWakeCompletionText(completedText) }), ...(attention === undefined ? {} : { execution_id: attention.clear_execution ? undefined : attention.execution_id ?? record.execution_id, deferred: attention.deferred ?? record.deferred, execution_error: attention.execution_error === null ? undefined : attention.execution_error === undefined ? record.execution_error : sanitizeExecutionError(attention.execution_error) || undefined }) };
         await this.replace(target, next);
         if (claim.acceptance_ids === undefined && (isTerminal(state) || state === "accepted")) {
           const currentClaim = await this.readClaimOptional(this.claimFor(record));

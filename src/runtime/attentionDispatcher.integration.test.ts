@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { attentionTools, type AttentionRegistry, type AttentionTurn } from "./at
 import { createOrganizationRuntimeHostForTest } from "./organizationRuntimeHost.js";
 import { createOrganizationRuntimeControlHostWithCoreForTest } from "./organizationRuntimeControl.js";
 import { parseOrganizationRuntimeWakeRequest } from "./organizationRuntime.js";
+import { wakeAcceptanceDigest } from "./wakeAcceptanceTypes.js";
 
 const tokenEnv = "DAIMON_ATTENTION_INTEGRATION_TOKEN";
 const token = "attention-integration";
@@ -163,5 +164,22 @@ test("an agent can explicitly defer recovered work without leaving a runtime fai
     assert.equal(receipt.state, "accepted"); assert.equal(receipt.deferred, true); assert.equal(receipt.execution_id, undefined);
     await f.restart();
     assert.equal((await f.control.availability(token))!.state, "running");
+  } finally { await f.cleanup(); }
+});
+
+
+test("availability stays answerable when durable work belongs to an old agent identity", async () => {
+  const f = await fixture();
+  try {
+    f.reject = true; await f.control.accept(request("old", "work"));
+    await until(async () => (await f.control.availability(token))!.state === "paused");
+    await until(async () => (await f.control.activityV2(token))!.executions!.length === 0);
+    const file = (await readdir(f.root)).find((name) => /^[0-9a-f]{64}\.json$/.test(name))!;
+    const record = JSON.parse(await readFile(path.join(f.root, file), "utf8"));
+    record.agent_id = "retired";
+    record.request_digest = wakeAcceptanceDigest({ token: undefined, agent_id: record.agent_id, delivery_id: record.delivery_id, event: record.event });
+    await writeFile(path.join(f.root, file), JSON.stringify(record), { mode: 0o600 });
+    const status = await f.control.availability(token);
+    assert.ok(status); assert.equal(status.agents[0]!.pending, 0);
   } finally { await f.cleanup(); }
 });

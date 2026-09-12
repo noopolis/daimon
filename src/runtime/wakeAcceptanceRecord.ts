@@ -37,7 +37,7 @@ export function parseStoredWakeAcceptance(value: unknown): StoredWakeAcceptanceR
   const executionId = record.execution_id === undefined ? undefined : string(record.execution_id);
   if (executionId !== undefined && !uuid(executionId) || record.deferred !== undefined && typeof record.deferred !== "boolean") throw new Error("wake acceptance attention state is invalid");
   const executionError = record.execution_error === undefined ? undefined : sanitizeExecutionError(string(record.execution_error));
-  if (executionError !== record.execution_error || executionError === "") throw new Error("wake acceptance execution error is invalid");
+  if (executionError === "" || record.execution_error !== undefined && Buffer.byteLength(string(record.execution_error)) > MAX_EXECUTION_ERROR_BYTES) throw new Error("wake acceptance execution error is invalid");
   const completionText = record.text === undefined ? undefined : sanitizeWakeCompletionText(string(record.text));
   if (claimGeneration !== undefined && !uuid(claimGeneration)) throw new Error("wake acceptance record is invalid");
   if (code !== undefined && !(["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] as const).includes(code)) throw new Error("wake acceptance record is invalid");
@@ -51,7 +51,8 @@ function string(value: unknown): string { if (typeof value !== "string") throw n
 function timestamp(value: unknown): string { const result = string(value); if (Number.isNaN(Date.parse(result)) || new Date(result).toISOString() !== result) throw new Error("wake acceptance record is invalid"); return result; }
 function uuid(value: string): boolean { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value); }
 
+const MAX_EXECUTION_ERROR_BYTES = 2048;
 /** Private failure diagnostic, surfaced through the existing availability error. */
 export function sanitizeExecutionError(value: string): string {
-  return redactCredentialText(value, [], 2048).trim();
+  return redactCredentialText(value, [], MAX_EXECUTION_ERROR_BYTES).trim();
 }

@@ -140,9 +140,9 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
     async availability(token) {
       if (!tokensEqual(expectedToken, token) || !store || !fuse) return undefined;
       await fuse.pollOperatorStop();
-      const items = await store.activity();
-      const executionErrors = new Map((await store.recoverable(knownAgents))
-        .filter((record) => record.execution_error !== undefined).map((record) => [record.agent_id, record.execution_error!]));
+      const items = await store.activityWithExecutionErrors();
+      const executionErrors = new Map(items.filter((record) => (record.state === "accepted" || record.state === "running")
+        && record.execution_error !== undefined).map((record) => [record.agent_id, record.execution_error!]));
       const agents = await Promise.all(config.agents.map(async (agent) => ({
         agent_id: agent.id, pending: items.filter((item) => item.agent_id === agent.id && (item.state === "accepted" || item.state === "running" && !dispatcher?.activeExecutions().some((execution) => execution.agent_id === agent.id))).length,
         running: dispatcher?.activeExecutions().some((execution) => execution.agent_id === agent.id) ?? false,
