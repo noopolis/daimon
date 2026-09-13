@@ -3,6 +3,8 @@ export * from "./contractManifest.js";
 export * from "./agySubscriptionRealm.js";
 export { createOrganizationRuntimeHost } from "./organizationRuntimeHost.js";
 export { createOrganizationRuntimeControlHost } from "./organizationRuntimeControl.js";
+export { CODEX_SANDBOX_PROJECTION_VERSION, resolveOrganizationCodexSandboxProjection,
+  type OrganizationCodexSandboxProjection } from "./codexSandboxProjection.js";
 export { WakeTransitionLockBlockedError } from "./wakeAcceptanceStore.js";
 export {
   OFFLINE_RECONCILIATION_BLOCKED_CODE,

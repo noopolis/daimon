@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 import { trackCliChild } from "./cliProcess.js";
 import { cliChildEnvironment } from "./cliEnvironment.js";
+import { codexFilesystemRules } from "./codexFilesystemRules.js";
 import type { CliEngineOptions, CliSessionInput } from "./cliSession.js";
 
 export const GROK_STRICT_SANDBOX_PROFILE = "strict";
@@ -49,7 +50,7 @@ export const renderCodexArgs = (
     "--strict-config",
     "-c", "web_search=\"disabled\"",
     "-c", `default_permissions=${JSON.stringify(profileName)}`,
-    "-c", renderCodexPermissionProfile(profileName, options.codexSandboxProtectedPaths ?? [], options.codexSandboxReadablePaths ?? []),
+    "-c", renderCodexPermissionProfile(profileName, options.codexSandboxProtectedPaths ?? [], options.codexSandboxReadablePaths ?? [], cwd),
     "-c", "approval_policy=\"never\"",
     "-c", `mcp_servers={daimon={url=\"${endpoint}\",enabled=true,default_tools_approval_mode=\"approve\"}}`
   ];
@@ -66,13 +67,13 @@ export const renderCodexArgs = (
 export const renderCodexPermissionProfile = (
   profileName: string,
   protectedPaths: readonly string[],
-  readablePaths: readonly string[] = []
+  readablePaths: readonly string[] = [],
+  workspacePath?: string
 ): string => {
   const filesystem: Record<string, "read" | "write" | "deny" | Record<string, "write">> = {
-    ":workspace_roots": { ".": "write" }
+    ":workspace_roots": { ".": "write" },
+    ...codexFilesystemRules(protectedPaths, readablePaths, workspacePath)
   };
-  for (const readablePath of readablePaths) filesystem[readablePath] = "read";
-  for (const protectedPath of protectedPaths) filesystem[protectedPath] = "deny";
   return `permissions=${tomlInline({ [profileName]: {
     extends: ":workspace",
     filesystem,
