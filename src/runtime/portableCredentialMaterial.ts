@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -15,6 +15,7 @@ type FileIdentity = Readonly<{
   mtimeMs: number;
   size: number;
   uid: number;
+  nlink: number;
 }>;
 
 /**
@@ -72,13 +73,25 @@ async function readCredential(
 ): Promise<{ bytes: Buffer; identity: FileIdentity }> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const before = await assertCredential(filePath, mode, agent);
-    handle = await open(filePath, constants.O_RDONLY | noFollow());
-    const opened = identity(await handle.stat());
-    if (!sameIdentity(before, opened)) throw new Error("credential changed during import");
-    const bytes = await handle.readFile();
-    const after = identity(await handle.stat());
-    if (!sameIdentity(before, after) || bytes.length !== before.size) {
+    // Opening a read-only bind can refresh its metadata. Validate the actual
+    // descriptor before consulting the refreshed path or reading any bytes.
+    // Nonblocking open lets us reject a FIFO by type instead of hanging here.
+    handle = await open(filePath, constants.O_RDONLY | noFollow() | constants.O_NONBLOCK);
+    const before = assertCredentialEntry(await handle.stat(), mode, agent);
+    if (!sameIdentity(before, await assertCredential(filePath, mode, agent))) throw new Error("credential changed during import");
+    // One extra byte detects growth without allowing a changing file to drive
+    // an unbounded read/allocation. Partial reads advance within this buffer.
+    const buffer = Buffer.alloc(before.size + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const result = await handle.read(buffer, length, buffer.length - length, length);
+      if (result.bytesRead === 0) break;
+      length += result.bytesRead;
+    }
+    const bytes = buffer.subarray(0, length);
+    const after = assertCredentialEntry(await handle.stat(), mode, agent);
+    const afterPath = await assertCredential(filePath, mode, agent);
+    if (!sameIdentity(before, after) || !sameIdentity(before, afterPath) || bytes.length !== before.size) {
       throw new Error("credential changed during import");
     }
     return { bytes, identity: before };
@@ -147,6 +160,10 @@ async function assertCredential(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
     throw unavailable(agent, error);
   }
+  return assertCredentialEntry(entry, mode, agent);
+}
+
+function assertCredentialEntry(entry: Stats, mode: number, agent: PortableAgent): FileIdentity {
   if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== process.getuid?.()
     || entry.nlink !== 1 || (entry.mode & 0o777) !== mode
     || entry.size === 0 || entry.size > MAX_CREDENTIAL_BYTES) {
@@ -172,6 +189,7 @@ function identity(value: Awaited<ReturnType<typeof lstat>>): FileIdentity {
     mtimeMs: number;
     size: number;
     uid: number;
+    nlink: number;
   };
   return {
     dev: numeric.dev,
@@ -179,12 +197,13 @@ function identity(value: Awaited<ReturnType<typeof lstat>>): FileIdentity {
     mode: numeric.mode & 0o7777,
     mtimeMs: numeric.mtimeMs,
     size: numeric.size,
-    uid: numeric.uid
+    uid: numeric.uid,
+    nlink: numeric.nlink
   };
 }
 function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
-    && left.mtimeMs === right.mtimeMs && left.size === right.size && left.uid === right.uid;
+    && left.mtimeMs === right.mtimeMs && left.size === right.size && left.uid === right.uid && left.nlink === right.nlink;
 }
 function noFollow(): number {
   return (constants as typeof constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
