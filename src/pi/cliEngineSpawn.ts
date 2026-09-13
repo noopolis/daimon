@@ -27,6 +27,9 @@ export const renderGrokSandboxArgs = (
  *
  * The per-wake MCP server is always enabled and required. Otherwise Codex can
  * continue a normal turn with only built-in tools after MCP startup fails.
+ * Subscription apps and installed plugins are not caller-declared tools.
+ * Disable their discovery per invocation, including with strict config: the
+ * CLI's defaults can otherwise add them even when user config is ignored.
  */
 export const renderCodexArgs = (
   options: Pick<CliEngineOptions, "commandArgs" | "model" | "reasoningEffort" | "codexSandbox" | "codexSandboxProtectedPaths" | "codexSandboxReadablePaths">,
@@ -55,6 +58,7 @@ export const renderCodexArgs = (
   ...(options.reasoningEffort === undefined ? [] : ["-c", `model_reasoning_effort=${options.reasoningEffort}`]),
   "--color", "never", "--json", "-C", cwd,
   "-c", `mcp_servers.daimon.url=${endpoint}`,
+  "-c", "features.apps=false", "-c", "features.plugins=false",
   "-c", "mcp_servers.daimon.enabled=true",
   "-c", "mcp_servers.daimon.required=true", "-"];
 };
@@ -165,7 +169,7 @@ const assertSafeAgyCommandArgs = (args: readonly string[] | undefined): readonly
 /** Caller arguments cannot reopen Codex's sandbox, output, cwd, or config boundary. */
 const assertSafeCodexCommandArgs = (args: readonly string[] | undefined, strictPolicy = false): readonly string[] => {
   const values = args ?? [];
-  const pattern = /^(?:--json|--sandbox|--dangerously-bypass-approvals-and-sandbox|--output-last-message|--config|--ignore-user-config|--ignore-rules|--skip-git-repo-check|--color|--cd|-c|-C)(?:=|$)/u;
+  const pattern = /^(?:--json|--sandbox|--dangerously-bypass-approvals-and-sandbox|--output-last-message|--config|--ignore-user-config|--ignore-rules|--skip-git-repo-check|--color|--cd|--enable|-c|-C)(?:=|$)/u;
   const strictPattern = /^(?:--strict-config|--profile|-p|-P|--permissions-profile|--enable|--disable|--add-dir|--search)(?:=|$)|^(?:default_permissions|permissions)(?:=|\.)/u;
   if (values.some((value) => pattern.test(value) || (strictPolicy && strictPattern.test(value)))) {
     throw new Error("Codex security-boundary arguments are Daimon-owned");

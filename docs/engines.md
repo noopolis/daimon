@@ -62,6 +62,19 @@ standalone and strict sandbox launches. If the server cannot initialize, Codex
 fails the wake before model work instead of continuing with only built-in tools.
 The startup error follows the existing bounded, redacted engine failure path.
 
+Daimon also disables Codex subscription apps and installed plugins on every
+wake with `features.apps=false` and `features.plugins=false`. This keeps ambient
+account tools out of discovery while preserving the declared per-wake MCP
+tools and built-in coding tools. These settings are invocation arguments;
+changing an engine home's config does not affect a strict launch that ignores
+user configuration. Caller `--enable` arguments are rejected because Codex
+applies them after ordinary config overrides.
+
+Codex may still defer declared tools behind `tool_search`. Server startup and
+tool discovery are separate checks; `list_mcp_resources` does not list tools.
+Codex 0.142.3 accepts the two isolation settings above, but its former
+`tool_search` feature toggle is a removed no-op and cannot disable discovery.
+
 The production Grok path uses an external Daimon engine broker with one durable
 subscription credential authority. Agent workers receive scoped capabilities;
 the broker owns refresh and stale-credential recovery. The runtime checks broker
