@@ -98,7 +98,7 @@ test("Grok replies redact both the staged credential and a credential rotated du
   let reads = 0;
   try {
     const { session } = await createCliSessionFactory({
-      command: process.execPath, commandArgs: [engine], engine: "grok",
+      command: process.execPath, commandArgs: [engine], engine: "grok", engineHomePath: path.join(root, ".grok"),
       credentialSecretValues: async () => ++reads === 1 ? [oldSecret] : [rotatedSecret]
     })({ cwd: root });
     let emitted = "";
@@ -123,7 +123,7 @@ test("Grok auth rejection is typed and never retains raw credential diagnostics"
   await writeFile(engine, `const a=process.argv.slice(2);if(a.includes("mcp"))process.stdout.write("ok");else{process.stderr.write("Authentication rejected by server ${secret}");process.exitCode=7;}`);
   try {
     const { session } = await createCliSessionFactory({
-      command: process.execPath, commandArgs: [engine], engine: "grok",
+      command: process.execPath, commandArgs: [engine], engine: "grok", engineHomePath: path.join(root, ".grok"),
       credentialSecretValues: async () => [secret]
     })({ cwd: root });
     await assert.rejects(session.prompt("work"), (error: unknown) => {
@@ -146,7 +146,7 @@ test("Grok auth rejection is classified before a long secret and verbose tail ar
   ].join("\n"));
   try {
     const { session } = await createCliSessionFactory({
-      command: process.execPath, commandArgs: [engine], engine: "grok",
+      command: process.execPath, commandArgs: [engine], engine: "grok", engineHomePath: path.join(root, ".grok"),
       credentialSecretValues: async () => [secret]
     })({ cwd: root });
     await assert.rejects(session.prompt("work"), (error: unknown) => {
