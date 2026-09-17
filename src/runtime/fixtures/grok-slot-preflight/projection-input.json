@@ -1,0 +1,20 @@
+{
+  "config": {
+    "version": "noopolis.daimon.organization-runtime.v2",
+    "host": { "bindHost": "127.0.0.1", "port": 19700, "controlTokenEnv": "DAIMON_CONTROL_TOKEN" },
+    "agents": [
+      { "id": "foreman", "name": "Foreman", "instructions": "Fixture agent.", "workspacePath": "/var/lib/spawnfile/instance/workspace/agents/foreman", "runtimeHomePath": "/var/lib/spawnfile/instance/homes/foreman", "schedule": { "kind": "disabled" }, "engine": { "kind": "grok", "model": "grok-4.6", "reasoningEffort": "low" } }
+    ]
+  },
+  "agentId": "foreman",
+  "options": {
+    "slot": 0,
+    "workerUid": 2200,
+    "workerHomePath": "/var/lib/daimon-workers/2200",
+    "architecture": "arm64",
+    "usageLedgerPath": "/run/daimon-slots/0/usage/usage.jsonl",
+    "limits": { "maxRequests": 24, "maxTokens": 400000, "timeoutMs": 480000 },
+    "acceptanceStorePath": "/run/paideia/control",
+    "denyPaths": ["/run/paideia", "/run/training/inputs"]
+  }
+}

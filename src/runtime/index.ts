@@ -5,6 +5,16 @@ export { createOrganizationRuntimeHost } from "./organizationRuntimeHost.js";
 export { createOrganizationRuntimeControlHost } from "./organizationRuntimeControl.js";
 export { CODEX_SANDBOX_PROJECTION_VERSION, resolveOrganizationCodexSandboxProjection,
   type OrganizationCodexSandboxProjection } from "./codexSandboxProjection.js";
+export { GROK_BROKER_PROJECTION_VERSION, grokBrokerProjectionSha256, grokBrokerServiceRegistrationFor, resolveOrganizationGrokBrokerProjection,
+  verifyGrokBrokerRegistrationMatchesProjection, type OrganizationGrokBrokerProjection, type OrganizationGrokBrokerProjectionOptions } from "./grokBrokerProjection.js";
+export { GROK_SLOT_PREFLIGHT_VERSION, grokSlotPreflightCanarySchema, grokSlotPreflightReceiptSchema, parseGrokSlotPreflightReceipt,
+  verifyGrokSlotPreflightReceipt, type GrokSlotPreflightReceipt } from "./grokSlotPreflightReceipt.js";
+export { grokBrokerWorkerConfigSha256, renderGrokBrokerWorkerConfig } from "./grokBrokerWorkerConfig.js";
+export { grokWorkerSandboxProfileSha256, renderGrokWorkerSandboxProfile } from "./grokWorkerSandboxProfile.js";
+export { engineBrokerRequestLedgerPathFor, parseEngineBrokerServiceConfig, type EngineBrokerServiceConfig, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
+export { DEFAULT_GROK_BROKER_TURN_LIMITS, ENGINE_BROKER_LIMIT_REASONS, type EngineBrokerLimitReason, type EngineBrokerTurnAccounting,
+  type EngineBrokerTurnLimits, type EngineBrokerTurnUsage } from "./engineBrokerTurnAccounting.js";
+export { dedupeTurnUsageRows } from "./turnUsageLedger.js";
 export { WakeTransitionLockBlockedError } from "./wakeAcceptanceStore.js";
 export {
   OFFLINE_RECONCILIATION_BLOCKED_CODE,
