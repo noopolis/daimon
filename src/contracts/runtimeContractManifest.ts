@@ -87,6 +87,36 @@ export const GROK_ENGINE_BROKER = {
     missingUsageEstimate: { inputBytesPerToken: 2, outputTokens: 4_096 }
   },
   wakeLimitEnvironment: { timeoutMs: "DAIMON_ENGINE_WAKE_TIMEOUT_MS", maxTokens: "DAIMON_ENGINE_WAKE_TOKEN_CEILING" },
+  // Evaluator inference grants (P2c). Judges and the optimizer (organization uid
+  // only, over the control socket) borrow the broker's Grok credential through
+  // the provider proxy; they never hold it, and their spend never reaches the
+  // subject usage ledger or wake fuse.
+  inferenceGrants: {
+    requestKinds: ["request_inference_grant", "release_inference_grant"],
+    purposes: ["judge", "optimizer"],
+    tokenPrefix: "inference_",
+    ttlMs: 600_000,
+    limits: { maxRequests: 64, maxTokens: 2_000_000 },
+    maxLiveGrants: 8,
+    maxInFlightRequestsPerGrant: 1,
+    // Top-level request members Grok 1.0.34 sends for a Paideia judge/optimizer call
+    // (live stub capture); `tools` and `tool_choice` are refused outright.
+    bodyMembers: ["messages", "model", "reasoning_effort", "response_format", "stream", "stream_options"],
+    messageRoles: ["system", "user", "assistant"],
+    failureCodes: ["auth_stale", "grant_limit", "invalid_request", "unavailable"],
+    ledgerVersion: "noopolis.daimon.inference-usage.v1",
+    ledgerDedupeKey: ["grant", "request"],
+    client: {
+      modelId: "daimon-inference-grok",
+      envKey: "DAIMON_INFERENCE_GRANT",
+      // sha256 of `renderGrokInferenceClientConfig` for the production proxy base URL and this env key.
+      configSha256: {
+        "grok-4.6": { low: "", medium: "", high: "" },
+        "grok-4.5": { low: "", medium: "", high: "" },
+        "grok-build": { low: "", medium: "", high: "" }
+      }
+    }
+  },
   projectionVersion: "noopolis.daimon.grok-broker-projection.v1",
   slotPreflightVersion: "noopolis.daimon.grok-slot-preflight.v1",
   artifacts: {
