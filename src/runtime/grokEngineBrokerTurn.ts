@@ -82,6 +82,10 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     await finishBrokerTurnWithUsage(deps.turns, request, completed, metering, { notionalUsd: decoded.usage?.notionalUsd ?? 0, complete: decoded.usage?.complete ?? false, estimatedRequests: snapshot.estimatedRequests, requests: requestRows(stream, snapshot), ...(stream.sessionId === undefined ? {} : { session: stream.sessionId }) }, () => { sealed = result_; });
     return result_;
   } catch (error) {
+    // Once the completed record is published it is the durable truth: anything
+    // failing after that (metering) must neither re-seal the turn as failed nor
+    // append a second row.
+    if (sealed !== undefined) return sealed;
     const snapshot = meter.snapshot();
     const code: EngineBrokerTurnFailure["code"] = snapshot.limitReason !== "none" ? "limit_exceeded" : deps.credentialStale() ? "auth_stale" : controller.signal.aborted ? "cancelled" : "engine_failed";
     const diagnostic = error instanceof NativeBrokerTurnFailure ? error.diagnostic : nativeDiagnostic && !attested ? { ...nativeDiagnostic, status: "worker_failed" as const, stage: "attestation" as const, failureClass: error instanceof GrokWorkerAttestationFailure ? error.failureClass : "profile_invalid" as const, profileApplied: false } : undefined;

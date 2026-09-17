@@ -176,6 +176,17 @@ test("a crash between sealing and appending is completed by the replay exactly o
   });
 });
 
+test("a ledger append that fails after the turn was sealed leaves it completed and appends nothing twice", async () => {
+  await withBroker(async ({ root, turn, usageRows }) => {
+    // The request stream cannot be written (its path is a directory); the usage stream can.
+    await mkdir(path.join(root, "requests.jsonl"));
+    assert.equal((await turn("wake-9", twoRequests)).outcome, "completed");
+    assert.deepEqual((await usageRows()).map((row) => [row.outcome, row.turn]), [["completed", turnIdFor("foreman", "wake-9")]]);
+    assert.equal((await turn("wake-9", twoRequests, undefined, undefined, path.join(root, "turns"))).outcome, "completed", "the sealed record was never rewritten as failed");
+    assert.equal((await usageRows()).length, 1);
+  });
+});
+
 test("an unwritable ledger leaves the turn recorded as completed, not failed", async () => {
   await withBroker(async ({ root, turn }) => {
     assert.equal((await turn("wake-7", twoRequests)).outcome, "completed");
