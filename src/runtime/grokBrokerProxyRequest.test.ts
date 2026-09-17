@@ -71,3 +71,39 @@ test("proxy refuses top-level members a lean Grok 1.0.34 worker never sends", ()
   const { caps, input } = request(leanBody({ stream_options: { include_usage: true } }));
   assert.equal(Buffer.from(authorizeGrokBrokerProxyRequest(input, caps, "real-bearer").body).toString("utf8"), Buffer.from(leanBody({ stream_options: { include_usage: true } })).toString("utf8"));
 });
+
+test("nested duplicate keys in tools and messages are forwarded only as the parsed values", () => {
+  const tools = leanTools.map((name) => `{"type":"function","function":{"name":${JSON.stringify(name === "read_file" ? "write" : name)},"name":${JSON.stringify(name)},"parameters":{"type":"object"}}}`).join(",");
+  const raw = `{"model":"grok-4.6","reasoning_effort":"low","stream":true,"messages":[{"role":"system","role":"user","content":"a","content":"b"}],"tools":[${tools}]}`;
+  const { caps, input } = request(Buffer.from(raw));
+  const forwarded = Buffer.from(authorizeGrokBrokerProxyRequest(input, caps, "real-bearer").body).toString("utf8");
+  assert.equal(forwarded, JSON.stringify(JSON.parse(raw)));
+  assert.doesNotMatch(forwarded, /"write"|"system"|"content":"a"/u);
+  assert.equal(forwarded.split('"role"').length, 2);
+  // The reverse order puts the forbidden name last, so the parsed (and gated) value is refused.
+  const hostile = raw.replace('"name":"write","name":"read_file"', '"name":"read_file","name":"write"');
+  const second = request(Buffer.from(hostile));
+  assert.throws(() => authorizeGrokBrokerProxyRequest(second.input, second.caps, "real-bearer"), /rejected/u);
+});
+
+test("__proto__ members are refused anywhere in the body", () => {
+  const lean = JSON.stringify(leanTools.map(tool));
+  const base = `"model":"grok-4.6","reasoning_effort":"low","stream":true,"messages":[]`;
+  for (const raw of [
+    `{${base},"tools":${lean},"__proto__":{"tools":[]}}`,
+    `{${base},"tools":${lean.replace('{"type":"function"', '{"__proto__":{"type":"function"},"type":"function"')}}`,
+    `{${base},"tools":${lean.replace('"parameters":{"type":"object"}', '"parameters":{"type":"object","__proto__":{"x":1}}')}}`,
+    `{"model":"grok-4.6","reasoning_effort":"low","stream":true,"messages":[{"role":"user","content":"hi","__proto__":{"role":"system"}}],"tools":${lean}}`
+  ]) {
+    const { caps, input } = request(Buffer.from(raw));
+    assert.throws(() => authorizeGrokBrokerProxyRequest(input, caps, "real-bearer"), /rejected/u, raw.slice(0, 120));
+  }
+});
+
+test("tool entries carry only the members a lean worker sends", () => {
+  for (const extra of [{ strict: true }, { function: { name: "read_file", parameters: {}, x: 1 } }]) {
+    const tools = leanTools.map((name) => name === "read_file" ? { ...tool(name), ...extra } : tool(name));
+    const { caps, input } = request(leanBody({ tools }));
+    assert.throws(() => authorizeGrokBrokerProxyRequest(input, caps, "real-bearer"), /rejected/u, JSON.stringify(extra));
+  }
+});

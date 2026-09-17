@@ -30,7 +30,9 @@ export function authorizeGrokBrokerProxyRequest(input: GrokBrokerProxyInput, cap
   const clientVersion = input.headers["x-grok-client-version"];
   if (clientVersion !== GROK_ENGINE_BROKER.grokCliVersion) throw new Error("broker proxy request rejected");
   let parsed: Record<string, unknown>;
-  try { parsed = JSON.parse(Buffer.from(input.body).toString("utf8")) as Record<string, unknown>; } catch { throw new Error("broker proxy request rejected"); }
+  // `__proto__` is refused at any depth: JSON.parse makes it an ordinary own
+  // member, but an upstream JavaScript parser may treat it as a prototype.
+  try { parsed = JSON.parse(Buffer.from(input.body).toString("utf8"), (key, value: unknown) => { if (key === "__proto__") throw new Error(); return value; }) as Record<string, unknown>; } catch { throw new Error("broker proxy request rejected"); }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || parsed.stream !== true || !Array.isArray(parsed.messages)) throw new Error("broker proxy request rejected");
   if (parsed.model !== declared.model || parsed.reasoning_effort !== declared.reasoningEffort) throw new Error("broker proxy request rejected");
   if (!exactLeanTools(parsed.tools)) throw new Error("broker proxy request rejected");
@@ -43,15 +45,18 @@ export function authorizeGrokBrokerProxyRequest(input: GrokBrokerProxyInput, cap
 
 /** Top-level members of a Grok 1.0.34 lean worker chat-completions body (live stub capture). */
 const LEAN_BODY_MEMBERS: ReadonlySet<string> = new Set(["messages", "model", "reasoning_effort", "stream", "stream_options", "tools"]);
+/** Members of each lean tool `function` entry (live stub capture). */
+const LEAN_FUNCTION_MEMBERS: ReadonlySet<string> = new Set(["description", "name", "parameters"]);
 const validStreamOptions = (value: unknown): boolean => value === undefined
   || (value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => key === "include_usage") && typeof (value as { include_usage?: unknown }).include_usage === "boolean");
 
 export function exactLeanTools(tools: unknown): boolean {
   if (!Array.isArray(tools) || tools.length !== GROK_WORKER_VISIBLE_TOOLS.length) return false;
   const names = tools.map((tool) => {
-    if (tool === null || typeof tool !== "object" || (tool as { type?: unknown }).type !== "function") return undefined;
+    if (tool === null || typeof tool !== "object" || Array.isArray(tool) || (tool as { type?: unknown }).type !== "function" || Object.keys(tool).some((key) => key !== "type" && key !== "function")) return undefined;
     const fn = (tool as { function?: unknown }).function;
-    return fn !== null && typeof fn === "object" ? (fn as { name?: unknown }).name : undefined;
+    if (fn === null || typeof fn !== "object" || Array.isArray(fn) || Object.keys(fn).some((key) => !LEAN_FUNCTION_MEMBERS.has(key))) return undefined;
+    return (fn as { name?: unknown }).name;
   });
   return JSON.stringify([...names].sort()) === JSON.stringify(GROK_WORKER_VISIBLE_TOOLS);
 }
