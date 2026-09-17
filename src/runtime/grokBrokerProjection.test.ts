@@ -53,20 +53,19 @@ test("a provisioned registration must describe its projection exactly", () => {
   }
 });
 
-test("the acceptance store mask may be a covering directory, and must actually cover the store", () => {
+test("the acceptance store mask may be the directory that covers the store", () => {
   // Grok 1.0.34 cannot materialize a deny target under a directory the worker cannot search, so a
-  // deployment that secures `<instance-root>/state` to `2000:2000 0700` masks that directory instead.
+  // deployment that secures `<instance-root>/state` to `2000:2000 0700` declares that directory here.
   const store = "/var/lib/spawnfile/instance/state/wake-acceptance";
-  const lifted = resolveOrganizationGrokBrokerProjection(config, "foreman",
-    { ...options, acceptanceStorePath: store, acceptanceStoreDenyPath: "/var/lib/spawnfile/instance/state" });
-  assert.equal(lifted.denyPaths.includes("/var/lib/spawnfile/instance/state"), true);
+  const state = "/var/lib/spawnfile/instance/state";
+  const lifted = resolveOrganizationGrokBrokerProjection(config, "foreman", { ...options, acceptanceStorePath: state });
+  assert.equal(lifted.denyPaths.includes(state), true);
   assert.equal(lifted.denyPaths.includes(store), false);
-  // Default: the store itself, exactly as before.
-  assert.equal(resolveOrganizationGrokBrokerProjection(config, "foreman", { ...options, acceptanceStorePath: store }).denyPaths.includes(store), true);
-  for (const acceptanceStoreDenyPath of ["/var/lib/spawnfile/instance/other", "/var/lib/spawnfile/instance/state/wake-acceptance/inner"]) {
-    assert.throws(() => resolveOrganizationGrokBrokerProjection(config, "foreman", { ...options, acceptanceStorePath: store, acceptanceStoreDenyPath }),
-      /acceptance store deny path must contain the acceptance store/u, acceptanceStoreDenyPath);
-  }
-  assert.throws(() => resolveOrganizationGrokBrokerProjection(config, "foreman", { ...options, acceptanceStorePath: store, acceptanceStoreDenyPath: "/var" }),
-    /canonical absolute acceptanceStoreDenyPath|base profile grant/u);
+  // The store itself still works where its parent is traversable, and produces a different digest —
+  // a recomputation that disagrees with the deployment fails closed rather than certifying the slot.
+  const leaf = resolveOrganizationGrokBrokerProjection(config, "foreman", { ...options, acceptanceStorePath: store });
+  assert.equal(leaf.denyPaths.includes(store), true);
+  assert.notEqual(grokBrokerProjectionSha256(leaf), grokBrokerProjectionSha256(lifted));
+  assert.throws(() => resolveOrganizationGrokBrokerProjection(config, "foreman", { ...options, acceptanceStorePath: "/var" }),
+    /base profile grant/u);
 });
