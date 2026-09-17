@@ -14,6 +14,11 @@
    reason reaches the host instead of `exit=1`. It is a diagnostic, never the
    turn's output: `output_length` stays 0 on every failure. */
 #define DBL_MAX_DIAGNOSTIC 512u
+/* The marker that joins the two ends of an elided diagnostic, byte-identical
+   to the TypeScript window's (`boundedDiagnosticWindow` in
+   `src/pi/cliChildOutput.ts`), so one grep finds every elision on either side
+   of the boundary. Its own bytes are paid for out of DBL_MAX_DIAGNOSTIC. */
+#define DBL_DIAGNOSTIC_ELISION "[\xe2\x80\xa6 %llu bytes elided \xe2\x80\xa6]"
 #ifndef DBL_REGISTRY
 #define DBL_REGISTRY "/etc/daimon-engine-broker/registrations.bin"
 #endif

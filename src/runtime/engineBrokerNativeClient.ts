@@ -72,10 +72,47 @@ function workerReason(tail:Uint8Array,secrets:readonly string[]):string|undefine
   // Redact first, unbounded, then window: redaction can lengthen the text
   // ([REDACTED] is longer than a short secret), so bounding before it could
   // hand back more bytes than the boundary admits.
-  const redacted=redactCredentialText(flattened,secrets,Number.MAX_SAFE_INTEGER).trim();
+  const redacted=redactCredentialText(scrubCutFragments(flattened,secrets),secrets,Number.MAX_SAFE_INTEGER).trim();
   const reason=boundedDiagnosticWindow(redacted,CLI_ENGINE_MAX_DIAGNOSTIC_BYTES).trim();
   return reason.length===0?undefined:reason;
 }
 /** Non-fatal by construction: a cut multi-byte sequence becomes U+FFFD, never an exception. */
 const UTF8=new TextDecoder("utf-8");
+
+/**
+ * A credential the launcher's window cut in half, at either side of a cut.
+ *
+ * Exact redaction matches a secret whole, so a secret a cut split survives as
+ * a fragment it can never match: the piece before a cut can end with a
+ * secret's prefix, and the piece after it can begin with a secret's suffix.
+ * The trick that answers this where Daimon owns both ends — retain one whole
+ * secret more than is reported (`cliChildOutput.ts`) — cannot work at this
+ * boundary, because the launcher's window *is* what it sends: a margin
+ * reserved there would be reported along with everything else. So the fragment
+ * is matched here, where the turn's own capabilities are known, and every cut
+ * the window can make is covered: the two sides of each elision marker, and
+ * the outer ends, where the launcher's capture itself stopped reading.
+ *
+ * Only a fragment long enough to be a credential is scrubbed. Below
+ * {@link MIN_CREDENTIAL_FRAGMENT} characters a piece of a random token is
+ * indistinguishable from ordinary words and carries nothing usable, and
+ * scrubbing it would eat real text.
+ */
+const MIN_CREDENTIAL_FRAGMENT=12;
+const ELISION_MARKER=/(\[… \d+ bytes elided …\])/u;
+const scrubCutFragments=(value:string,secrets:readonly string[]):string=>
+  value.split(ELISION_MARKER).map((part)=>ELISION_MARKER.test(part)?part:scrubEnds(part,secrets)).join("");
+function scrubEnds(part:string,secrets:readonly string[]):string{
+  let result=part;
+  for(const secret of secrets){
+    if(secret.length<=MIN_CREDENTIAL_FRAGMENT)continue;
+    for(let length=Math.min(secret.length-1,result.length);length>=MIN_CREDENTIAL_FRAGMENT;length-=1){
+      if(result.endsWith(secret.slice(0,length))){result=`${result.slice(0,result.length-length)}[REDACTED]`;break;}
+    }
+    for(let length=Math.min(secret.length-1,result.length);length>=MIN_CREDENTIAL_FRAGMENT;length-=1){
+      if(result.startsWith(secret.slice(secret.length-length))){result=`[REDACTED]${result.slice(length)}`;break;}
+    }
+  }
+  return result;
+}
 function field(target:Buffer,offset:number,length:number,value:string):void{if(!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value)||Buffer.byteLength(value)>=length)throw new TypeError("invalid engine broker turn");target.write(value,offset,"utf8");}

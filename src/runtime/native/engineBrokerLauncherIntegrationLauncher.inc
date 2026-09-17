@@ -111,6 +111,48 @@ static void worker_failure_case(void) {
   close(p);
   close(c);
 }
+/* A worker that dies after printing far more than the window: the error is at
+   the START of what it printed and the echo at the end, which is the shape a
+   pure tail got wrong. The distinctive head run STRADDLES the head's own cut —
+   its first bytes are inside the retained head and its later bytes are elided —
+   so a tail-only window loses it entirely and this case fails. */
+static void worker_flood_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("stderr-flood", "mcp.Flood-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  size_t printed = strlen("HEAD-OF-ERROR grok: profile refused ") + 4096u +
+                   strlen(" TAIL-OF-ECHO");
+  unsigned long long elided = 0;
+  char *reason, *marker, *shown;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && r.status == DBL_STATUS_WORKER_FAILED &&
+            r.exit_code == 1 && r.output_length == 0 &&
+            r.diagnostic_length > 0 &&
+            r.diagnostic_length <= DBL_MAX_DIAGNOSTIC,
+        "worker flood diagnostic length");
+  reason = calloc(1, r.diagnostic_length + 1);
+  check(read_all(s, reason, r.diagnostic_length), "worker flood diagnostic");
+  check(!strncmp(reason, "HEAD-OF-ERROR grok: profile refused",
+                 strlen("HEAD-OF-ERROR grok: profile refused")),
+        "worker flood head");
+  shown = strstr(reason, " TAIL-OF-ECHO");
+  check(shown && shown[strlen(" TAIL-OF-ECHO")] == 0, "worker flood tail");
+  marker = strstr(reason, "[\xe2\x80\xa6 ");
+  check(marker && sscanf(marker, "[\xe2\x80\xa6 %llu bytes elided", &elided) == 1,
+        "worker flood marker");
+  /* The count is exactly what was dropped: everything printed, less the two
+     ends that survived (the whole window less the marker itself). */
+  size_t marker_length = (size_t)(strchr(marker, ']') - marker) + 1u;
+  check((size_t)elided + (size_t)r.diagnostic_length - marker_length == printed,
+        "worker flood elided count");
+  char extra;
+  check(read(s, &extra, 1) == 0, "worker flood EOF");
+  free(reason);
+  close(s);
+  close(p);
+  close(c);
+}
 static void org_cases(void) {
   check(!setgid(DBL_BROKER_UID) && !setuid(DBL_BROKER_UID), "drop broker uid");
   client_case();
@@ -119,6 +161,7 @@ static void org_cases(void) {
   output_boundary_case("exact-output", 0);
   output_boundary_case("overflow-output", 1);
   worker_failure_case();
+  worker_flood_case();
   int s = connect_socket(), p = sealed("prompt"),
       c = sealed_bundle("provider.Token-1", "mcp.Token-2");
   struct dbl_request q = request();

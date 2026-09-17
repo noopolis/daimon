@@ -97,3 +97,36 @@ test("output that fits the window is returned byte-identical, with no marker", (
   for (const value of ["", "grok: exiting 1", `${"m".repeat(CLI_ENGINE_MAX_DIAGNOSTIC_BYTES - 4)}tail`])
     assert.equal(boundedDiagnosticWindow(value, CLI_ENGINE_MAX_DIAGNOSTIC_BYTES), value, "a short diagnostic must not be reshaped at all");
 });
+
+/**
+ * The cut the launcher makes is the one place exact redaction cannot reach on
+ * its own, and it is the cut this test straddles: the capability begins inside
+ * the retained head and ends inside the elided middle, so the redactor never
+ * sees it whole and, without the scrub, its first characters travel verbatim.
+ * The mirror case is the tail's leading edge, where the capability's last
+ * characters survive instead.
+ */
+test("a capability the launcher's window cut in half never crosses as a fragment", () => {
+  const provider = `provider-${"A".repeat(34)}`, mcp = `mcp-${"B".repeat(39)}`;
+  const elision = "[… 9000 bytes elided …]";
+  const cut = `grok: refused ${provider.slice(0, 20)}${elision}${mcp.slice(mcp.length - 20)} exiting 1`;
+  assert.throws(() => decodeNativeBrokerResult(frame({ status: 2, stage: 6, failure: 5, exit: 1, diagnostic: cut }), turnId, [provider, mcp]), (error: unknown) => {
+    assert.ok(error instanceof NativeBrokerTurnFailure);
+    const reason = error.diagnostic.reason ?? "";
+    assert.doesNotMatch(reason, /A{12}|B{12}|provider-A|BBB-?mcp/u, `no credential fragment may cross: ${reason}`);
+    assert.match(reason, /grok: refused \[REDACTED\]/u, "the head's cut fragment is marked where it was");
+    assert.match(reason, /\[REDACTED\] exiting 1$/u, "and so is the tail's");
+    assert.ok(reason.includes(elision), "the launcher's own elision marker is left alone");
+    return true;
+  });
+});
+
+test("ordinary words at a cut are not eaten by the fragment scrub", () => {
+  const provider = `provider-${"A".repeat(34)}`;
+  const words = "grok: profile refused, exiting 1";
+  assert.throws(() => decodeNativeBrokerResult(frame({ status: 2, stage: 6, failure: 5, exit: 1, diagnostic: words }), turnId, [provider]), (error: unknown) => {
+    assert.ok(error instanceof NativeBrokerTurnFailure);
+    assert.equal(error.diagnostic.reason, words, "text that is not a credential fragment is untouched");
+    return true;
+  });
+});

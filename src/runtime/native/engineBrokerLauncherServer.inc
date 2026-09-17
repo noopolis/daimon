@@ -148,6 +148,45 @@ static pid_t launch(const struct dbl_registration *r, int executable,
   launch_fail(status_fd, 6);
 }
 
+/* Both ends of a failed worker's own output, inside DBL_MAX_DIAGNOSTIC.
+   A pure tail was the wrong end for the process this exists for: a worker that
+   dies early prints its error first and then echoes its input, so the tail is
+   the echo. One live turn reported 512 bytes of the agent's own prompt read
+   back, with the error already off the front and erased here — the head is
+   only recoverable where it still exists, which is here.
+   The marker is paid for out of the same budget and sized against `used`, the
+   largest count it can ever carry, so the result never exceeds the bound for
+   any input; output that already fits is left exactly as it is, in place and
+   byte-identical, with no marker at all. A snprintf that will not fit falls
+   back to the tail this replaced. */
+static size_t diagnostic_window(unsigned char *bytes, size_t used) {
+  char marker[64];
+  int width, final;
+  size_t budget, head, tail;
+  if (used <= DBL_MAX_DIAGNOSTIC)
+    return used;
+  width = snprintf(marker, sizeof(marker), DBL_DIAGNOSTIC_ELISION,
+                   (unsigned long long)used);
+  budget = (width > 0 && (size_t)width + 2u <= DBL_MAX_DIAGNOSTIC)
+               ? DBL_MAX_DIAGNOSTIC - (size_t)width
+               : 0u;
+  if (!budget) {
+    memmove(bytes, bytes + (used - DBL_MAX_DIAGNOSTIC), DBL_MAX_DIAGNOSTIC);
+    return DBL_MAX_DIAGNOSTIC;
+  }
+  head = budget / 2u;
+  tail = budget - head;
+  final = snprintf(marker, sizeof(marker), DBL_DIAGNOSTIC_ELISION,
+                   (unsigned long long)(used - head - tail));
+  if (final <= 0 || (size_t)final > (size_t)width) {
+    memmove(bytes, bytes + (used - DBL_MAX_DIAGNOSTIC), DBL_MAX_DIAGNOSTIC);
+    return DBL_MAX_DIAGNOSTIC;
+  }
+  /* The head stays where it is; the tail moves up behind the marker. */
+  memmove(bytes + head + (size_t)final, bytes + (used - tail), tail);
+  memcpy(bytes + head, marker, (size_t)final);
+  return head + (size_t)final + tail;
+}
 static void supervise(int client, pid_t pid, int output,
                       struct dbl_result *out) {
   unsigned char bytes[DBL_MAX_OUTPUT + 1] = {0};
@@ -226,16 +265,16 @@ static void supervise(int client, pid_t pid, int output,
   }
   if (out->status != DBL_STATUS_OK) {
     /* A failed turn publishes no output, but a worker that exited on its own
-       account said why on the pipe it shares with stdout, and that tail is the
-       only reason the host can ever see: without it a failure reads `exit=1`.
-       Keep a bounded tail of it and erase the rest here; the broker redacts it
-       before it crosses any boundary. The other failures get none: an
-       output-limit tail is the very payload the bound refused to publish, a
-       cancelled turn has no reader left, and a prelaunch failure ran nothing. */
-    size_t keep = out->status != DBL_STATUS_WORKER_FAILED ? 0
-                  : used > DBL_MAX_DIAGNOSTIC ? DBL_MAX_DIAGNOSTIC
-                                              : used;
-    memmove(bytes, bytes + (used - keep), keep);
+       account said why on the pipe it shares with stdout, and that window is
+       the only reason the host can ever see: without it a failure reads
+       `exit=1`. Keep a bounded window of it and erase the rest here; the
+       broker redacts it before it crosses any boundary. The other failures get
+       none: an output-limit window is the very payload the bound refused to
+       publish, a cancelled turn has no reader left, and a prelaunch failure ran
+       nothing. */
+    size_t keep = out->status != DBL_STATUS_WORKER_FAILED
+                      ? 0
+                      : diagnostic_window(bytes, used);
     erase(bytes + keep, sizeof(bytes) - keep);
     out->output_length = 0;
     out->diagnostic_length = (uint32_t)keep;

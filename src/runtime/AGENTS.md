@@ -103,9 +103,14 @@ multi-byte sequence a byte-counted window can cut in half. And the window
 keeps **both ends** (`boundedDiagnosticWindow`): a worker that dies early
 prints its error before it echoes its input, so a pure tail is the echo. The
 marker is paid out of the same budget, and output that fits is returned
-byte-identical. The launcher's own 512-byte window is still tail-only — see
-`native/AGENTS.md`, it needs an artifact rebuild — so the head of a large blob
-is still lost before Daimon sees it. It is an optional, control-character-free
+byte-identical. The launcher's own 512-byte window keeps both ends too
+(`diagnostic_window`, `native/AGENTS.md`), so the head of a large blob now
+survives the one place it used to be erased. Its elision is a cut, and a cut
+can split a capability in half into a fragment exact redaction cannot match, so
+`scrubCutFragments` matches that fragment here, where the turn's capabilities
+are known — on both sides of every marker and at the window's outer ends. A
+margin reserved in the launcher could not do this: there, what is kept is
+exactly what is sent. It is an optional, control-character-free
 member of the sealed terminal response's closed diagnostic — admitted by
 `engineBrokerProtocol.ts` only for the statuses where a worker ran and spoke —
 so it replays with the sealed record and reaches the operator through

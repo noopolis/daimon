@@ -47,18 +47,31 @@ frame, while `output_length` stays 0 as before. Every other failure sends none,
 and `closed_result` refuses a frame that mixes the two. The bytes are the
 worker's own, so the broker redacts them before they cross any boundary.
 
-**Known gap: that window is the wrong end.** A worker that dies early prints
-its error first and then echoes its own input, so a pure tail keeps the echo:
-the one live capture this has ever produced was 512 bytes of the agent's own
-prompt read back, with the error already off the front and erased here. The
-broker side now keeps both ends of whatever it is handed
-(`boundedDiagnosticWindow` in `../../pi/cliChildOutput.ts`, the same
-head-plus-marker-plus-tail shape as an oversized tool result), but it cannot
-recover a head this supervisor never sent. The fix belongs in
-`engineBrokerLauncherServer.inc`, where the full `used` bytes are still in
-hand at the point of the `memmove`: keep the first `DBL_MAX_DIAGNOSTIC / 2`
-bytes, then a marker naming the elided count, then the last
-`DBL_MAX_DIAGNOSTIC / 2`. It is a source change to a *pinned* artifact, so it
-lands only together with `node --import tsx src/runtime/native/build.ts` and a
-re-pin of `artifacts.sourceSha256`/`x64Sha256`/`arm64Sha256`;
-`artifactsManifest.test.ts` fails by design until the binaries are rebuilt.
+**The window keeps both ends.** A worker that dies early prints its error
+first and then echoes its own input, so a pure tail kept the echo: the one live
+capture this had ever produced was 512 bytes of the agent's own prompt read
+back, with the error already off the front and erased here. `diagnostic_window`
+keeps the first `DBL_MAX_DIAGNOSTIC / 2`, then `DBL_DIAGNOSTIC_ELISION` naming
+the bytes dropped, then the last `DBL_MAX_DIAGNOSTIC / 2`, all inside the same
+bound — the marker is sized against `used`, the largest count it can carry, so
+the budget holds for every input, and a `snprintf` that will not fit falls back
+to the tail. Output that already fits is left in place, byte-identical, with no
+marker. The marker text is byte-identical to the TypeScript window's
+(`boundedDiagnosticWindow`), so one grep finds an elision on either side of the
+boundary.
+
+That elision is a *cut*, and a cut can split a turn capability in half, leaving
+a fragment exact redaction can never match. The answer used where Daimon owns
+both ends — retain one whole secret more than is reported — cannot work here,
+because what this window keeps is exactly what it sends: a margin reserved here
+would be sent too. So the fragment is scrubbed where the capabilities are
+known, in `engineBrokerNativeClient.ts` (`scrubCutFragments`), on both sides of
+every marker and at the window's outer ends.
+
+Changing any of the six pinned launcher sources means rebuilding: `node
+--import tsx src/runtime/native/build.ts`, then re-pin
+`artifacts.sourceSha256`/`x64Sha256`/`arm64Sha256` in the contract manifest and
+re-emit it. `artifactsManifest.test.ts` fails by design until that is done. The
+adversarial suite is `docker build -f Dockerfile.integration -t <tag> .` in this
+folder and `docker run --rm --privileged <tag>`; `worker_flood_case` is the
+head-and-tail cover and fails first if the window regresses to a tail.
