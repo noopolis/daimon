@@ -5,17 +5,8 @@ import { renderAgyArgs } from "./cliEngineSpawn.js";
 import {
   DAIMON_MCP_SERVER_NAME,
   renderAgyMcpAddArgs,
-  renderAgyMcpRemoveArgs,
-  renderGrokMcpAddArgs,
-  renderGrokMcpRemoveArgs
+  renderAgyMcpRemoveArgs
 } from "./cliMcpRegistration.js";
-
-test("Grok's registration arguments are unchanged by the AGY generalization", () => {
-  assert.deepEqual(renderGrokMcpAddArgs([], "strict", "http://127.0.0.1:1/mcp"),
-    ["--sandbox", "strict", "mcp", "add", "--transport", "http", "--scope", "project", "daimon", "http://127.0.0.1:1/mcp"]);
-  assert.deepEqual(renderGrokMcpRemoveArgs([], "strict"),
-    ["--sandbox", "strict", "mcp", "remove", "--scope", "project", "daimon"]);
-});
 
 test("AGY registers the per-wake endpoint as an http server, flags before the name", () => {
   const args = renderAgyMcpAddArgs([], "http://127.0.0.1:54321/mcp");

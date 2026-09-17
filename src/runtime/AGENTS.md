@@ -13,11 +13,44 @@ coordinate wakes.
 Every source file stays below 400 lines. Keep tests beside the contract they
 cover.
 
-`grokBrokerProxyRequest.ts` preserves the worker CLI's bounded
-`x-grok-client-version` and supplies its `grok-shell` client identity when
-rebuilding provider headers. Dropping the version makes the subscription
-provider reject an otherwise valid login with HTTP 426; never replace it with
-a fabricated version or pass arbitrary worker headers through.
+`grokBrokerProxyRequest.ts` preserves the worker CLI's `x-grok-client-version`
+and supplies its `grok-shell` client identity when rebuilding provider headers.
+Dropping the version makes the subscription provider reject an otherwise valid
+login with HTTP 426; never replace it with a fabricated version or pass
+arbitrary worker headers through. The version must equal the pinned
+`GROK_ENGINE_BROKER.grokCliVersion` (1.0.34) exactly.
+
+The proxy is also the spend gate for the lean Grok worker. Before a bearer is
+attached it refuses any body whose tool names are not exactly
+`GROK_WORKER_VISIBLE_TOOLS` (Grok 1.0.34 turns an unmappable `--tools` entry
+into its full 19-tool set, and its `session_title` request carries one forced
+tool), and any body whose `model`/`reasoning_effort` differ from the declared
+`grokBrokerModelPolicy.ts` policy (closed lists; default `grok-4.6`/`low`). The
+model override header follows that declaration.
+
+`grokBrokerWorkerConfig.ts` is the only source of worker `config.toml` bytes;
+the manifest pins the sha256 of every model/effort combination and the broker
+refuses a turn whose worker config does not hash to the declared one. Three
+1.0.34 facts shape it, each verified against a loopback stub model:
+`[auth_provider.*]` helpers never run for a custom model, so the turn's proxy
+capability reaches the model through `env_key = "DAIMON_PROVIDER_CAPABILITY"`
+set by the native launcher (as exposed as `DAIMON_MCP_CAPABILITY`); the
+per-turn `session_title` request cannot be disabled by any key, so
+`[models] session_summary` points it at a hidden model on closed loopback port
+9; and effort is only sent when the model declares it, so the declared effort is
+the model's single `reasoning_efforts` entry. HTTP MCP needs CA certificates in
+the image even for a loopback `http://` URL ("Failed to build HTTP client").
+
+Worker `GROK_HOME` layout the deployment must provision (attested before every
+turn by `grokWorkerHomeAttestation.ts`, recorded in `GROK_ENGINE_BROKER.worker.home`):
+`$GROK_HOME` and `$GROK_HOME/sessions` `root:<worker> 1771`; `config.toml`,
+`sandbox.toml`, `trusted_folders.toml` (empty), `managed_config.toml` (empty)
+and `requirements.toml` (empty) `root:root 0444`; and
+`sessions/sandbox-events.jsonl` `<worker>:<broker> 0640`. Grok 1.0.34 writes its
+sandbox events there (the root `sandbox-events.jsonl` stays empty) and runs
+every profile inside bubblewrap, where a non-empty `deny` list is enforced;
+`grokWorkerSandboxProfile.ts` renders those profile bytes. A worker-uid process
+can neither write, rename, nor unlink any of the root-owned files.
 
 `agySubscriptionRealm.ts` owns the one host-level private D-Bus/Secret Service
 realm, durable keyring lease, bounded unlock stdin, and cleanup.
@@ -28,10 +61,13 @@ runtime-writable home without clobbering a newer CLI-refreshed credential.
 `grokSubscriptionRealm.ts` owns the single durable rotating Grok credential,
 the lifetime lease, crash journal, stale fence, and serialized per-turn
 stage/promote cycle while each agent retains private non-auth home state.
-`../pi/grokSandbox.ts` owns the production Grok process boundary: it replaces
-the provider's fail-open built-in profile with an exact custom profile denying
-the realm, bootstrap, and peer roots, and requires a kernel-enforcement event
-before every Grok setup, turn, and cleanup process.
+`../pi/grokSandbox.ts` owns the direct (non-broker) Grok process boundary: it
+replaces the provider's fail-open built-in profile with an exact custom profile
+denying the realm, bootstrap, and peer roots, and requires a kernel-enforcement
+event (read from `$GROK_HOME/sessions/sandbox-events.jsonl`) before every Grok
+turn. The direct path registers its per-wake MCP endpoint in the agent's
+Daimon-owned `GROK_HOME` config (`../pi/grokHomeMcpRegistration.ts`), because
+1.0.34 skips project-scoped MCP servers in untrusted workspaces.
 Strict Codex uses its native permission profile only for model-run local
 commands: the profile denies current `.codex/auth.json`, current
 `.daimon-inbound`, `/proc`, `/run`, shared protected stores, and peer roots

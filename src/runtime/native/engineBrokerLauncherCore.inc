@@ -257,14 +257,19 @@ static __attribute__((noreturn)) void launch_fail(int status_fd,
 static pid_t launch(const struct dbl_registration *r, int executable,
                     int prompt, int capability, int output, uint32_t *failure,
                     uint64_t *observed_start_ticks) {
-  unsigned char mcp[DBL_MAX_TOKEN + 1] = {0};
+  unsigned char provider[DBL_MAX_TOKEN + 1] = {0}, mcp[DBL_MAX_TOKEN + 1] = {0};
   int status_pipe[2];
-  if (capability_bundle(capability, NULL, mcp) || pipe2(status_pipe, O_CLOEXEC))
+  if (capability_bundle(capability, provider, mcp) ||
+      pipe2(status_pipe, O_CLOEXEC)) {
+    erase(provider, sizeof(provider));
+    erase(mcp, sizeof(mcp));
     return -1;
+  }
   pid_t p = fork();
   if (p < 0) {
     close(status_pipe[0]);
     close(status_pipe[1]);
+    erase(provider, sizeof(provider));
     erase(mcp, sizeof(mcp));
     return -1;
   }
@@ -275,6 +280,7 @@ static pid_t launch(const struct dbl_registration *r, int executable,
                   sizeof(*observed_start_ticks)) ||
         !*observed_start_ticks) {
       close(status_pipe[0]);
+      erase(provider, sizeof(provider));
       erase(mcp, sizeof(mcp));
       kill(p, SIGKILL);
       waitpid(p, NULL, 0);
@@ -282,6 +288,7 @@ static pid_t launch(const struct dbl_registration *r, int executable,
     }
     ssize_t got = read(status_pipe[0], &code, sizeof(code));
     close(status_pipe[0]);
+    erase(provider, sizeof(provider));
     erase(mcp, sizeof(mcp));
     if (got == 0)
       return p;
@@ -306,12 +313,30 @@ static pid_t launch(const struct dbl_registration *r, int executable,
   if (prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0) ||
       prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
     launch_fail(status_pipe[1], 3);
-  if (dup2(prompt, 3) < 0 || dup2(capability, 4) < 0 ||
-      dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0)
+  /* Received fds carry MSG_CMSG_CLOEXEC and may already sit on 3-5: dup2 onto
+     itself keeps close-on-exec (the prompt vanished at exec) and an
+     overlapping order clobbers a source. Lift all of them above the targets
+     first so every dup2 below changes the fd number and clears CLOEXEC. */
+  int status_fd = fcntl(status_pipe[1], F_DUPFD_CLOEXEC, 16);
+  if (status_fd < 0)
     launch_fail(status_pipe[1], 4);
-  if (executable != 5 && dup2(executable, 5) < 0)
-    launch_fail(status_pipe[1], 5);
-  close_other_fds(status_pipe[1]);
+  int null_input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+  int high_prompt = fcntl(prompt, F_DUPFD_CLOEXEC, 16),
+      high_capability = fcntl(capability, F_DUPFD_CLOEXEC, 16),
+      high_output = fcntl(output, F_DUPFD_CLOEXEC, 16),
+      high_executable = fcntl(executable, F_DUPFD_CLOEXEC, 16);
+  if (null_input < 0 || high_prompt < 0 || high_capability < 0 ||
+      high_output < 0 || high_executable < 0 ||
+      dup2(null_input, STDIN_FILENO) < 0 || dup2(high_prompt, 3) < 0 ||
+      dup2(high_capability, 4) < 0 || dup2(high_output, STDOUT_FILENO) < 0 ||
+      dup2(high_output, STDERR_FILENO) < 0)
+    launch_fail(status_fd, 4);
+  /* The worker needs fd 5 only to be executed: close-on-exec keeps the Grok
+     image descriptor out of the worker and every tool child (execveat with
+     AT_EMPTY_PATH still works for an ELF; only a #! script would lose it). */
+  if (dup2(high_executable, 5) < 0 || fcntl(5, F_SETFD, FD_CLOEXEC) < 0)
+    launch_fail(status_fd, 5);
+  close_other_fds(status_fd);
   char *const argv[] = {"grok",
                         "--sandbox",
                         "daimon-strict",
@@ -321,6 +346,14 @@ static pid_t launch(const struct dbl_registration *r, int executable,
                         "/proc/self/fd/3",
                         "--no-memory",
                         "--disable-web-search",
+                        "--no-plan",
+                        "--verbatim",
+                        "--system-prompt-override",
+                        DBL_GROK_SYSTEM_PROMPT,
+                        "--tools",
+                        DBL_GROK_TOOLS,
+                        "--max-turns",
+                        DBL_GROK_MAX_TURNS,
                         "--cwd",
                         (char *)r->workspace,
                         "--output-format",
@@ -328,21 +361,30 @@ static pid_t launch(const struct dbl_registration *r, int executable,
                         "--model",
                         "daimon-broker-grok",
                         NULL};
-  char home[300], grok[300], mcp_env[DBL_MAX_TOKEN + 24];
+  char home[300], grok[300], mcp_env[DBL_MAX_TOKEN + 24],
+       provider_env[DBL_MAX_TOKEN + 32];
   snprintf(home, sizeof(home), "HOME=%s", r->home);
   snprintf(grok, sizeof(grok), "GROK_HOME=%s/.grok", r->home);
   snprintf(mcp_env, sizeof(mcp_env), "DAIMON_MCP_CAPABILITY=%s", mcp);
+  /* Grok 1.0.34 never runs `[auth_provider.*]` helpers for a custom model, so
+     the worker's `[model.daimon-broker-grok] env_key` reads the turn-scoped
+     proxy capability from here. It is as exposed as the MCP capability. */
+  snprintf(provider_env, sizeof(provider_env), "DAIMON_PROVIDER_CAPABILITY=%s",
+           provider);
+  erase(provider, sizeof(provider));
   erase(mcp, sizeof(mcp));
   char *const envp[] = {home,
                         grok,
                         mcp_env,
+                        provider_env,
                         "DAIMON_CAPABILITY_FD=4",
                         "PATH=/usr/local/bin:/usr/bin:/bin",
                         "LANG=C.UTF-8",
                         "TZ=UTC",
                         NULL};
   syscall(SYS_execveat, 5, "", argv, envp, AT_EMPTY_PATH);
+  erase(provider_env, sizeof(provider_env));
   erase(mcp_env, sizeof(mcp_env));
-  launch_fail(status_pipe[1], 6);
+  launch_fail(status_fd, 6);
 }
 

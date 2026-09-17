@@ -18,7 +18,6 @@ import type { TurnUsageOutcome } from "../runtime/turnUsageLedger.js";
 import { readChild } from "./cliChildOutput.js";
 import { cliChildEnvironment } from "./cliEnvironment.js";
 import {
-  GROK_STRICT_SANDBOX_PROFILE,
   renderCodexArgs,
   spawnEngine
 } from "./cliEngineSpawn.js";
@@ -26,10 +25,9 @@ import {
   registerCliMcpServer,
   renderAgyMcpAddArgs,
   renderAgyMcpRemoveArgs,
-  renderGrokMcpAddArgs,
-  renderGrokMcpRemoveArgs,
   type CliMcpRegistration
 } from "./cliMcpRegistration.js";
+import { registerGrokHomeMcpServer } from "./grokHomeMcpRegistration.js";
 import { decodeAgyHeadlessTurn, type AgyTurnUsage } from "./agyHeadlessResult.js";
 import { type CodexTurnUsage } from "./codexHeadlessResult.js";
 import { createCliTurnMeter, decodeCodexTurn, failedTurnOutcome, publishTurnRequests, publishTurnUsage } from "./cliTurnMetering.js";
@@ -321,35 +319,33 @@ class CliSession implements PiSessionLike {
         const controller=new AbortController();this.activeBrokerTurn=controller;
         try{output=await this.options.grokBrokerTurn(`${this.options.identityPrompt ?? ""}${text}`,mount.endpoint,controller.signal);}finally{if(this.activeBrokerTurn===controller)this.activeBrokerTurn=undefined;}
       } else {
-      if ((this.options.engine === "grok" || this.options.engine === "agy") && mount !== undefined) {
+      if (this.options.engine === "grok" && mount !== undefined) {
         await this.options.verifyExecutable?.();
-        const profile = this.options.grokSandboxProfile ?? GROK_STRICT_SANDBOX_PROFILE;
-        const grok = this.options.engine === "grok";
+        registration = await registerGrokHomeMcpServer({
+          engineHomePath: this.options.engineHomePath,
+          endpoint: mount.endpoint,
+          ...(this.options.verifyGrokSandbox !== undefined ? { verify: this.options.verifyGrokSandbox } : {})
+        });
+        this.mcpRegistration = registration;
+      } else if (this.options.engine === "agy" && mount !== undefined) {
+        await this.options.verifyExecutable?.();
         registration = await registerCliMcpServer({
-          addArgs: grok
-            ? renderGrokMcpAddArgs(this.options.commandArgs, profile, mount.endpoint)
-            : renderAgyMcpAddArgs(this.options.commandArgs, mount.endpoint),
-          removeArgs: grok
-            ? renderGrokMcpRemoveArgs(this.options.commandArgs, profile)
-            : renderAgyMcpRemoveArgs(this.options.commandArgs),
+          addArgs: renderAgyMcpAddArgs(this.options.commandArgs, mount.endpoint),
+          removeArgs: renderAgyMcpRemoveArgs(this.options.commandArgs),
           command: this.options.command ?? this.options.engine,
           cwd: this.input.cwd,
           env: cliChildEnvironment([
             ...(this.options.redactedEnvironmentNames ?? []),
             ...(this.input.daimonSecretEnvironmentNames ?? [])
           ], this.input.runtimeHomePath, {
-            ...(this.options.engine === "agy" && this.options.dbusSessionBusAddress !== undefined
-              ? { dbusSessionBusAddress: this.options.dbusSessionBusAddress }
-              : {}),
+            ...(this.options.dbusSessionBusAddress !== undefined ? { dbusSessionBusAddress: this.options.dbusSessionBusAddress } : {}),
             engine: this.options.engine,
             executablePath: this.options.command,
             engineHomePath: this.options.engineHomePath
           }),
-          ...(grok ? { failureClassifier: classifyGrokAuthenticationDiagnostic } : {}),
           onChild: (setupChild) => { this.setupChildren.add(setupChild); },
           onChildSettled: (setupChild) => this.setupChildren.delete(setupChild),
-          secretValues,
-          ...(grok && this.options.verifyGrokSandbox !== undefined ? { verify: this.options.verifyGrokSandbox } : {})
+          secretValues
         });
         this.mcpRegistration = registration;
       }
