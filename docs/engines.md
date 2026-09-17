@@ -100,8 +100,9 @@ kills the worker. The broker seals every terminal turn with its usage, request
 count, declared model and limit reason, and writes one usage row (keyed by
 `turn`) plus per-request rows for completed and failed turns alike; a replayed
 turn is never metered twice. `resolveOrganizationGrokBrokerProjection` exposes
-a slot's full declared shape, and `noopolis.daimon.grok-slot-preflight.v1`
-receipts bind a slot's denied-path canaries to that projection's digest.
+a slot's full declared shape, and `noopolis.daimon.grok-slot-preflight.v2`
+receipts bind a slot's denied-path canaries to that projection's digest and to
+one recycle (the caller's nonce and the slot's increasing generation).
 
 AGY uses OS-native secure storage through one private D-Bus and Secret Service
 realm. Enroll it once with:
