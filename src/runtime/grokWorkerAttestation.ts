@@ -12,7 +12,7 @@ import { grokWorkerEventsPathFor } from "./grokWorkerSandboxProfile.js";
  * `size` is pre-turn history and is never read back — a `ProfileApplied` down
  * there is a replay, not evidence about this turn.
  */
-export type GrokWorkerAttestationSnapshot=Readonly<{dev:number;ino:number;size:number;mtimeMs:number;denyPaths:readonly string[]}>;
+export type GrokWorkerAttestationSnapshot=Readonly<{dev:number;ino:number;size:number;denyPaths:readonly string[]}>;
 type Snapshot=GrokWorkerAttestationSnapshot;
 export class GrokWorkerAttestationFailure extends Error { constructor(readonly failureClass:"profile_missing"|"profile_invalid"){super("Grok worker isolation attestation unavailable");} }
 /**
@@ -61,14 +61,65 @@ export function parseGrokWorkerSandboxProfile(bytes:Uint8Array,profileSha256:str
  * 1.0.34), and a root-owned read-only worker home whose `config.toml` hashes to
  * the declared renderer output (`grokWorkerHomeAttestation.ts`).
  */
-export async function prepareGrokWorkerAttestation(input:Readonly<{profilePath:string;eventsPath:string;profileSha256:string;workerUid:number;brokerGid:number;configSha256:string}>):Promise<Snapshot>{
+export async function prepareGrokWorkerAttestation(input:Readonly<{profilePath:string;eventsPath:string;profileSha256:string;workerUid:number;brokerGid:number;configSha256:string}>,profileOwner:Readonly<{uid:number;gid:number}>={uid:0,gid:0}):Promise<Snapshot>{
   if(input.eventsPath!==grokWorkerEventsPathFor(input.profilePath))throw new Error("Grok worker sandbox events must be read from $GROK_HOME/sessions/sandbox-events.jsonl");
-  const profile=await secureOpen(input.profilePath,0,0,0o444,65_536);let bytes:Buffer|undefined;let denyPaths:readonly string[]=[];try{bytes=await profile.readFile();denyPaths=parseGrokWorkerSandboxProfile(bytes,input.profileSha256);}catch{throw new Error("Grok worker isolation attestation unavailable");}finally{bytes?.fill(0);await profile.close();}
+  const profile=await secureOpen(input.profilePath,profileOwner.uid,profileOwner.gid,0o444,65_536);let bytes:Buffer|undefined;let denyPaths:readonly string[]=[];try{bytes=await profile.readFile();denyPaths=parseGrokWorkerSandboxProfile(bytes,input.profileSha256);}catch{throw new Error("Grok worker isolation attestation unavailable");}finally{bytes?.fill(0);await profile.close();}
   await verifyGrokWorkerHome(path.dirname(input.profilePath),input.configSha256);
-  const events=await secureOpen(input.eventsPath,input.workerUid,input.brokerGid,0o640,16*1024*1024);try{const stat=await events.stat();return{dev:Number(stat.dev),ino:Number(stat.ino),size:Number(stat.size),mtimeMs:Number(stat.mtimeMs),denyPaths};}finally{await events.close();}
+  const events=await secureOpen(input.eventsPath,input.workerUid,input.brokerGid,0o640,16*1024*1024);try{const stat=await events.stat();return{dev:Number(stat.dev),ino:Number(stat.ino),size:Number(stat.size),denyPaths};}finally{await events.close();}
 }
-export async function verifyGrokWorkerAttestation(input:Readonly<{eventsPath:string;workerUid:number;brokerGid:number;workspace:string}>,before:Snapshot):Promise<void>{
-  let handle:Awaited<ReturnType<typeof secureOpen>>;try{handle=await secureOpen(input.eventsPath,input.workerUid,input.brokerGid,0o640,16*1024*1024);}catch{throw new GrokWorkerAttestationFailure("profile_invalid");}let bytes:Buffer|undefined;try{const stat=await handle.stat();if(Number(stat.dev)!==before.dev||Number(stat.ino)!==before.ino)throw new GrokWorkerAttestationFailure("profile_invalid");if(Number(stat.size)<=before.size)throw new GrokWorkerAttestationFailure("profile_missing");bytes=Buffer.alloc(Number(stat.size)-before.size);const read=await handle.read(bytes,0,bytes.length,before.size);if(read.bytesRead!==bytes.length)throw new GrokWorkerAttestationFailure("profile_invalid");const after=await handle.stat();if(Number(after.size)!==Number(stat.size)||Number(after.mtimeMs)!==Number(stat.mtimeMs))throw new GrokWorkerAttestationFailure("profile_invalid");parseGrokWorkerProfileApplied(bytes,input.workspace,before.denyPaths);}catch(error){if(error instanceof GrokWorkerAttestationFailure)throw error;throw new GrokWorkerAttestationFailure("profile_invalid");}finally{bytes?.fill(0);await handle.close();}
+/**
+ * The accepted `ProfileApplied` line of one turn, as an absolute byte range of
+ * the events file plus its digest.
+ */
+export type GrokWorkerAttestationLock={accepted?:Readonly<{offset:number;length:number;digest:string}>;refused?:GrokWorkerAttestationFailure["failureClass"]};
+
+/**
+ * The per-turn isolation guard: every model request of a turn, and the
+ * post-turn check, go through the same lock.
+ *
+ * Why the first verification is trustworthy: the proxy awaits this guard before
+ * *every* upstream request, including the first, and the only worker-uid
+ * process that exists before request 1 is the Grok the launcher started under
+ * the pinned profile — tool children are created only after a model response.
+ * So the event accepted at request 1 was written before any tool child could
+ * write to the (worker-owned) events file. Later requests must find that exact
+ * line, byte for byte, at the same offset: a `ProfileApplied` appended later —
+ * which a tool child could forge — is never a substitute, and once a turn has
+ * been refused it stays refused.
+ */
+export function createGrokWorkerIsolationGuard(input:Parameters<typeof verifyGrokWorkerAttestation>[0],before:Snapshot):()=>Promise<void>{
+  const lock:GrokWorkerAttestationLock={};
+  return async()=>{
+    if(lock.refused!==undefined)throw new GrokWorkerAttestationFailure(lock.refused);
+    try{await verifyGrokWorkerAttestation(input,before,lock);}
+    catch(error){const failure=error instanceof GrokWorkerAttestationFailure?error:new GrokWorkerAttestationFailure("profile_invalid");lock.refused=failure.failureClass;throw failure;}
+  };
+}
+export async function verifyGrokWorkerAttestation(input:Readonly<{eventsPath:string;workerUid:number;brokerGid:number;workspace:string}>,before:Snapshot,lock?:GrokWorkerAttestationLock):Promise<void>{
+  let handle:Awaited<ReturnType<typeof secureOpen>>;try{handle=await secureOpen(input.eventsPath,input.workerUid,input.brokerGid,0o640,16*1024*1024);}catch{throw new GrokWorkerAttestationFailure("profile_invalid");}
+  let bytes:Buffer|undefined;
+  try{
+    const stat=await handle.stat();
+    if(Number(stat.dev)!==before.dev||Number(stat.ino)!==before.ino)throw new GrokWorkerAttestationFailure("profile_invalid");
+    if(Number(stat.size)<=before.size)throw new GrokWorkerAttestationFailure("profile_missing");
+    const accepted=lock?.accepted;
+    const start=accepted===undefined?before.size:before.size+accepted.offset;
+    const length=accepted===undefined?Number(stat.size)-before.size:accepted.length;
+    if(start+length>Number(stat.size))throw new GrokWorkerAttestationFailure("profile_invalid");
+    bytes=Buffer.alloc(length);
+    const read=await handle.read(bytes,0,bytes.length,start);
+    if(read.bytesRead!==bytes.length)throw new GrokWorkerAttestationFailure("profile_invalid");
+    // The file must not change while it is read: a concurrent writer could
+    // otherwise show this check bytes that no single state of the file held.
+    const after=await handle.stat();
+    if(Number(after.size)!==Number(stat.size)||Number(after.mtimeMs)!==Number(stat.mtimeMs))throw new GrokWorkerAttestationFailure("profile_invalid");
+    if(accepted!==undefined){
+      if(createHash("sha256").update(bytes).digest("hex")!==accepted.digest)throw new GrokWorkerAttestationFailure("profile_invalid");
+      return;
+    }
+    const event=locateGrokWorkerProfileApplied(bytes,input.workspace,before.denyPaths);
+    if(lock!==undefined)lock.accepted={offset:event.offset,length:event.length,digest:createHash("sha256").update(bytes.subarray(event.offset,event.offset+event.length)).digest("hex")};
+  }catch(error){if(error instanceof GrokWorkerAttestationFailure)throw error;throw new GrokWorkerAttestationFailure("profile_invalid");}finally{bytes?.fill(0);await handle.close();}
 }
 /**
  * Requires one fully-conforming `ProfileApplied` event *somewhere* in the
@@ -101,15 +152,19 @@ export async function verifyGrokWorkerAttestation(input:Readonly<{eventsPath:str
  * guard exists for: a Grok that came up without kernel enforcement, which
  * emits no conforming `ProfileApplied` at all.
  */
-export function parseGrokWorkerProfileApplied(bytes:Uint8Array,workspace:string,denyPaths:readonly string[]=[]):void{
+export function parseGrokWorkerProfileApplied(bytes:Uint8Array,workspace:string,denyPaths:readonly string[]=[]):void{locateGrokWorkerProfileApplied(bytes,workspace,denyPaths);}
+/** Byte range (within `bytes`) of the first fully-conforming `ProfileApplied` line. */
+export function locateGrokWorkerProfileApplied(bytes:Uint8Array,workspace:string,denyPaths:readonly string[]=[]):Readonly<{offset:number;length:number}>{
   const expected=JSON.stringify([...denyPaths].sort());
-  for(const line of Buffer.from(bytes).toString("utf8").split("\n")){
+  const buffer=Buffer.from(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  for(let offset=0;offset<buffer.length;){
+    const newline=buffer.indexOf(0x0a,offset);const end=newline===-1?buffer.length:newline;const line=buffer.subarray(offset,end).toString("utf8");const lineOffset=offset;offset=end+1;
     if(line.trim()==="")continue;
     let event:Record<string,unknown>;
     try{const parsed=JSON.parse(line) as unknown;if(parsed===null||typeof parsed!=="object"||Array.isArray(parsed))continue;event=parsed as Record<string,unknown>;}catch{continue;}
     if(event.event_type!=="ProfileApplied")continue;
     const observed=Array.isArray(event.deny_paths)?event.deny_paths.filter((entry):entry is string=>typeof entry==="string").sort():[];
-    if(event.profile==="daimon-strict"&&event.enforced===true&&event.restrict_network===true&&event.platform==="linux/landlock"&&event.workspace===workspace&&JSON.stringify(observed)===expected)return;
+    if(event.profile==="daimon-strict"&&event.enforced===true&&event.restrict_network===true&&event.platform==="linux/landlock"&&event.workspace===workspace&&JSON.stringify(observed)===expected)return{offset:lineOffset,length:end-lineOffset};
   }
   throw new Error("Grok worker isolation attestation unavailable");
 }

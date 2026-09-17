@@ -102,7 +102,7 @@ const eventsFile = async (dir: string, initial = ""): Promise<string> => {
 };
 const watermark = async (file: string, denyPaths: readonly string[] = []): Promise<GrokWorkerAttestationSnapshot> => {
   const info = await stat(file);
-  return { dev: Number(info.dev), ino: Number(info.ino), size: Number(info.size), mtimeMs: Number(info.mtimeMs), denyPaths };
+  return { dev: Number(info.dev), ino: Number(info.ino), size: Number(info.size), denyPaths };
 };
 const verify = (eventsPath: string, before: GrokWorkerAttestationSnapshot, brokerGid = self.gid): Promise<void> =>
   verifyGrokWorkerAttestation({ eventsPath, workerUid: self.uid, brokerGid, workspace }, before);
