@@ -243,9 +243,14 @@ test("production Grok dispatcher routes every wake through the broker without ag
     process.env.PATH = `${root}${path.delimiter}${priorPath ?? ""}`;
     process.env.NOOPOLIS_RUN_ID = "dispatcher-grok-realm-test";
     const broker: EngineBrokerTurnClient = {
-      async turn(agentId,wakeId,prompt,endpoint,signal) { turns += 1;assert.equal(agentId,config.id);assert.match(wakeId,/^(first|second)$/u);assert.match(prompt,/work/u);assert.match(endpoint,/^http:\/\/127\.0\.0\.1:\d+\/mcp$/u);assert.equal(signal?.aborted,false);return "brokered"; }
+      async turn(agentId,wakeId,prompt,endpoint,signal,options) { turns += 1;assert.equal(agentId,config.id);assert.match(wakeId,/^(first|second)$/u);assert.match(prompt,/work/u);assert.match(endpoint,/^http:\/\/127\.0\.0\.1:\d+\/mcp$/u);assert.equal(signal?.aborted,false);
+        // The engine-neutral wake bound reaches the broker as a lowering limit.
+        assert.deepEqual(options,{limits:{maxTokens:123_456}});return "brokered"; }
     };
-    const handle = await startOrganizationRuntimeEngine(config, "DAIMON_UNUSED_CONTROL", undefined, undefined, broker);
+    const priorCeiling = process.env.DAIMON_ENGINE_WAKE_TOKEN_CEILING; process.env.DAIMON_ENGINE_WAKE_TOKEN_CEILING = "123456";
+    let handle: Awaited<ReturnType<typeof startOrganizationRuntimeEngine>>;
+    try { handle = await startOrganizationRuntimeEngine(config, "DAIMON_UNUSED_CONTROL", undefined, undefined, broker); }
+    finally { if (priorCeiling === undefined) delete process.env.DAIMON_ENGINE_WAKE_TOKEN_CEILING; else process.env.DAIMON_ENGINE_WAKE_TOKEN_CEILING = priorCeiling; }
     assert.equal((await handle.wake({ id: "first", kind: "manual", text: "work" })).text, "brokered");
     assert.equal((await handle.wake({ id: "second", kind: "manual", text: "work" })).text, "brokered");
     assert.equal(turns, 2);

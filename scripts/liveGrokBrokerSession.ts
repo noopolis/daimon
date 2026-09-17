@@ -8,7 +8,9 @@ import { readChild } from "../src/pi/cliChildOutput.ts";
 import { terminateChild, trackCliChild } from "../src/pi/cliProcess.ts";
 import { decodeGrokHeadlessTurn } from "../src/pi/grokHeadlessResult.ts";
 import { readGrokBrokerCredential } from "../src/runtime/grokBrokerCredentialReader.ts";
+import { DEFAULT_GROK_BROKER_TURN_LIMITS } from "../src/runtime/engineBrokerTurnAccounting.ts";
 import { startGrokBrokerProxy } from "../src/runtime/grokBrokerProxy.ts";
+import { GrokBrokerTurnMeter } from "../src/runtime/grokBrokerTurnMeter.ts";
 import { DEFAULT_GROK_BROKER_MODEL_POLICY } from "../src/runtime/grokBrokerModelPolicy.ts";
 import { GROK_BROKER_PROVIDER_CAPABILITY_ENV, renderGrokBrokerWorkerArgs, renderGrokBrokerWorkerConfigWith } from "../src/runtime/grokBrokerWorkerConfig.ts";
 
@@ -38,6 +40,8 @@ try {
       const capability = proxy.capabilities.issue("local-auth-probe", turnId);
       // This local transport probe deliberately does not attest a native worker.
       proxy.registerIsolationGuard(turnId, async () => undefined);
+      // The proxy forwards nothing unmetered; the probe runs under the default v1 limits.
+      proxy.registerTurn(turnId, { policy: DEFAULT_GROK_BROKER_MODEL_POLICY, meter: new GrokBrokerTurnMeter(DEFAULT_GROK_BROKER_TURN_LIMITS) });
       // No MCP tools are needed for this exact-reply authentication probe.
       await writeFile(path.join(home, "config.toml"), renderGrokBrokerWorkerConfigWith(DEFAULT_GROK_BROKER_MODEL_POLICY, { proxyPort: proxy.port, mcpUrl: "http://127.0.0.1:43124/mcp" }).split("[mcp_servers.daimon]")[0]);
       const prompt = path.join(home, "prompt.txt");
