@@ -49,3 +49,25 @@ test("proxy refuses a reasoning effort or model other than the declared policy",
   const other = request(leanBody());
   assert.throws(() => authorizeGrokBrokerProxyRequest(other.input, other.caps, "real-bearer", { model: "grok-3" as never, reasoningEffort: "low" }), /model policy/);
 });
+
+test("proxy forwards exactly the validated object, so duplicate members cannot smuggle a different tool set upstream", () => {
+  const full = [...leanTools, "search_replace", "kill_command_or_subagent", "todo_write", "get_command_or_subagent_output", "spawn_subagent", "scheduler_create", "scheduler_delete", "scheduler_list", "monitor", "workflow", "enter_plan_mode", "exit_plan_mode", "write"];
+  const lean = leanTools.map(tool);
+  // First `tools`/`reasoning_effort`/`model` are the fail-open values; JSON.parse keeps the last (lean) ones.
+  const smuggled = `{"model":"grok-build","reasoning_effort":"high","tools":${JSON.stringify(full.map(tool))},"model":"grok-4.6","reasoning_effort":"low","stream":true,"messages":[],"stream_options":{"include_usage":true},"tools":${JSON.stringify(lean)}}`;
+  const { caps, input } = request(Buffer.from(smuggled));
+  const upstream = authorizeGrokBrokerProxyRequest(input, caps, "real-bearer");
+  const canonical = JSON.stringify({ model: "grok-4.6", reasoning_effort: "low", tools: lean, stream: true, messages: [], stream_options: { include_usage: true } });
+  assert.equal(Buffer.from(upstream.body).toString("utf8"), canonical);
+  assert.equal(Buffer.from(upstream.body).toString("utf8").split('"tools"').length, 2);
+  assert.doesNotMatch(Buffer.from(upstream.body).toString("utf8"), /search_replace|grok-build|"high"/u);
+});
+
+test("proxy refuses top-level members a lean Grok 1.0.34 worker never sends", () => {
+  for (const overrides of [{ functions: [{ name: "write" }] }, { n: 2 }, { tool_choice: "required" }, { max_tokens: 100 }, { temperature: 0 }, { stream_options: { include_usage: true, extra: 1 } }, { stream_options: "yes" }]) {
+    const { caps, input } = request(leanBody(overrides));
+    assert.throws(() => authorizeGrokBrokerProxyRequest(input, caps, "real-bearer"), /rejected/, JSON.stringify(overrides));
+  }
+  const { caps, input } = request(leanBody({ stream_options: { include_usage: true } }));
+  assert.equal(Buffer.from(authorizeGrokBrokerProxyRequest(input, caps, "real-bearer").body).toString("utf8"), Buffer.from(leanBody({ stream_options: { include_usage: true } })).toString("utf8"));
+});

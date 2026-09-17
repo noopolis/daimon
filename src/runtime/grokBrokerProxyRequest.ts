@@ -34,8 +34,17 @@ export function authorizeGrokBrokerProxyRequest(input: GrokBrokerProxyInput, cap
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || parsed.stream !== true || !Array.isArray(parsed.messages)) throw new Error("broker proxy request rejected");
   if (parsed.model !== declared.model || parsed.reasoning_effort !== declared.reasoningEffort) throw new Error("broker proxy request rejected");
   if (!exactLeanTools(parsed.tools)) throw new Error("broker proxy request rejected");
-  return { url: "https://cli-chat-proxy.grok.com/v1/chat/completions", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", "x-xai-token-auth": "xai-grok-cli", "x-grok-model-override": declared.model, "x-grok-client-version": clientVersion, "x-grok-client-identifier": "grok-shell" }, body: input.body };
+  if (Object.keys(parsed).some((key) => !LEAN_BODY_MEMBERS.has(key)) || !validStreamOptions(parsed.stream_options)) throw new Error("broker proxy request rejected");
+  // Forward what was validated, never the worker's bytes: JSON.parse keeps the
+  // last of duplicate keys, and an upstream that keeps the first would
+  // otherwise see a different `tools`/`model`/`reasoning_effort` than the gate.
+  return { url: "https://cli-chat-proxy.grok.com/v1/chat/completions", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", "x-xai-token-auth": "xai-grok-cli", "x-grok-model-override": declared.model, "x-grok-client-version": clientVersion, "x-grok-client-identifier": "grok-shell" }, body: Buffer.from(JSON.stringify(parsed)) };
 }
+
+/** Top-level members of a Grok 1.0.34 lean worker chat-completions body (live stub capture). */
+const LEAN_BODY_MEMBERS: ReadonlySet<string> = new Set(["messages", "model", "reasoning_effort", "stream", "stream_options", "tools"]);
+const validStreamOptions = (value: unknown): boolean => value === undefined
+  || (value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => key === "include_usage") && typeof (value as { include_usage?: unknown }).include_usage === "boolean");
 
 export function exactLeanTools(tools: unknown): boolean {
   if (!Array.isArray(tools) || tools.length !== GROK_WORKER_VISIBLE_TOOLS.length) return false;
