@@ -25,6 +25,9 @@ environment: `DAIMON_MCP_CAPABILITY` and `DAIMON_PROVIDER_CAPABILITY` (Grok
 config reads the proxy capability through `env_key`). `--auth-provider` mode
 remains for callers of the older contract.
 
+It also exports `TMPDIR=<registered home>/tmp`, the worker's private temp
+directory, derived only from the root-owned registration.
+
 Received descriptors carry `MSG_CMSG_CLOEXEC` and can already occupy fds 3-5,
 so `launch()` lifts prompt, capability, output, executable and status fds above
 16 before `dup2`-ing them into place; a `dup2` onto itself keeps close-on-exec

@@ -160,6 +160,25 @@ every profile inside bubblewrap, where a non-empty `deny` list is enforced;
 `grokWorkerSandboxProfile.ts` renders those profile bytes. A worker-uid process
 can neither write, rename, nor unlink any of the root-owned files.
 
+Temp and spill isolation (`grokWorkerTmpAttestation.ts`, checked before every
+turn; `GROK_ENGINE_BROKER.worker.home.{privateTmp,sharedTmp,spillDirectory}`).
+Grok 1.0.34's strict profile grants shared `/tmp` and `/var/tmp` read-write
+and refuses to start if either, or any path equal to or above a base grant, is
+in `deny` (verified: `/tmp`, `/var/tmp`, `/run`, `/etc`, `sessions` all fail;
+`/tmp/sub` works), so the profile cannot hide evaluator temp files. Instead:
+- the launcher exports `TMPDIR=<worker home>/tmp` (strict adds TMPDIR to its
+  read-write grants; Python, Node and `mktemp` use it); provision it
+  `<worker>:<worker> 0700`;
+- `/tmp` and `/var/tmp` must be `root:<non-worker group, e.g. org 2000> 1774`:
+  Grok needs to open the directory, but without search or write a worker can
+  only list names — `cat`/`read_file` get EACCES and it cannot create files.
+  `1770`/`1771` make Grok refuse the profile; `1775`/`1777` leak. Any non-root
+  process outside that group that needs temp space must get its own `TMPDIR`;
+- spills (`toolResultSpill.ts`) are written `0640`; provision
+  `<runtimeHome>/tool-output` as `2000:<worker gid> 2750` (setgid) under a
+  runtime home the worker can traverse, so each spill carries that agent's
+  worker group and no other worker can read it.
+
 `agySubscriptionRealm.ts` owns the one host-level private D-Bus/Secret Service
 realm, durable keyring lease, bounded unlock stdin, and cleanup.
 `agySubscriptionBootstrap.ts` owns only the interactive first-enrollment AGY
