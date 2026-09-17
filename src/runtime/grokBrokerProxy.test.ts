@@ -112,3 +112,28 @@ test("the two requests every healthy turn makes are not named as refusals", asyn
     assert.deepEqual(lines, ["[grok-proxy] refused: unknown_capability\n"], "a genuine policy miss is still named with its reason code");
   } finally { process.stderr.write = original; await proxy.close(); }
 });
+
+test("a non-refusal fault names its own class and message on one bounded line, credentials withheld", async () => {
+  const lines: string[] = []; const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  const provider = "provider-vqmxdfhlzptgnbwc"; let capability = "";
+  // The fault's own words carry both credentials verbatim — the worker's turn
+  // capability and the broker's provider bearer, neither in a shape any generic
+  // pattern recognises — plus a newline, a control character, and far more text
+  // than the bound admits.
+  const proxy = await startGrokBrokerProxy(
+    { accessToken: async () => provider, markRejected: async () => undefined },
+    async () => { throw new RangeError(`socket hang up forwarding ${capability}\nwith ${provider} ${"pad ".repeat(400)}`); });
+  try {
+    capability = proxy.capabilities.issue("agent", "turn"); arm(proxy, async () => undefined);
+    assert.equal(await post(proxy.port, capability, leanBody()), 503, "a genuine transient fault keeps its 503");
+    assert.equal(lines.length, 1, "one line per fault");
+    const line = lines[0]!;
+    assert.match(line, /^\[grok-proxy\] refused: broker_unavailable \(RangeError: socket hang up forwarding /u, "the fault names its own class and message");
+    assert.ok(!line.includes(capability), `the worker's own capability is withheld: ${line}`);
+    assert.ok(!line.includes(provider), `the broker's provider bearer is withheld: ${line}`);
+    assert.match(line, /\[REDACTED\]/u, "the withheld values are marked, not silently dropped");
+    assert.match(line, /^[^\n]+\n$/u, "one line: newlines and control characters are flattened");
+    assert.ok(Buffer.byteLength(line, "utf8") <= 900, `the line stays bounded: ${Buffer.byteLength(line, "utf8")} bytes`);
+  } finally { process.stderr.write = original; await proxy.close(); }
+});

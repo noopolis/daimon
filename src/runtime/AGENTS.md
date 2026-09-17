@@ -171,7 +171,19 @@ any capability lookup, isolation guard, credential read or upstream call, and
 Grok falls back to the truncated prompt as the title. That refusal and a bare
 unauthenticated `GET /` probe are the two requests a healthy turn always makes
 and the proxy never forwards; neither prints a `refused:` line, because for as
-long as they did, every healthy turn read as broken. The sink keeps its 503
+long as they did, every healthy turn read as broken. Every *other* refused
+request does name itself on the broker's stderr, and a fault that is not a
+`GrokBrokerProxyRefusal` names its own class and message beside
+`broker_unavailable` — `[grok-proxy] refused: broker_unavailable (TypeError:
+…)` — because the bare word carries no diagnostic content and is answered 503,
+which Grok blind-retries: one live turn emitted it fifteen times over five
+minutes, spent $0, and died with no account of why. That cause is the error's
+class and message only (never a body, bearer, capability, session id or
+header), redacted through `redactCredentialText` with that request's own
+capabilities as exact secrets and the `CLI_ENGINE_MAX_DIAGNOSTIC_BYTES` bound,
+flattened to one line, exactly as the failed CLI child and the launcher's
+worker diagnostic are. It is a log line only: the 503 is unchanged, because a
+genuinely transient fault is still transient. The sink keeps its 503
 shape because every live capture was taken with it: forcing 400 and 503 there
 were both observed to end the turn `exit=0, result: success`, so a hard 4xx on
 that request does *not* end Grok's session. And effort is only sent when the

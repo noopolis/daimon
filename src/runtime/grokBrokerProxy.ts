@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { redactCredentialText } from "../core/credentialRedaction.js";
+import { CLI_ENGINE_MAX_DIAGNOSTIC_BYTES } from "../pi/cliChildOutput.js";
 import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
 import { DEFAULT_GROK_BROKER_MODEL_POLICY, parseGrokBrokerModelPolicy, type GrokBrokerModelPolicy } from "./grokBrokerModelPolicy.js";
 import { authorizeGrokBrokerProxyRequest } from "./grokBrokerProxyRequest.js";
@@ -51,14 +53,19 @@ export class GrokBrokerProxyRefusal extends Error {
 async function serve(request: IncomingMessage, response: ServerResponse, authority: GrokBrokerCredentialAuthority, upstream: GrokBrokerUpstream, capabilities: EngineBrokerCapabilities,guards:Map<string,()=>Promise<void>>,turns:Map<string,GrokBrokerProxyTurn>,fallback:GrokBrokerModelPolicy,grants?:GrokInferenceGrants): Promise<void> {
   let settle:((usage:ReturnType<typeof parseGrokUpstreamUsage>,toolCalls?:readonly string[])=>void)|undefined;
   let titleSink = false;
+  // Every credential this request holds, kept only for this request and only so
+  // that a fault's own words can be redacted against them exactly as the CLI
+  // child and launcher diagnostics are. Nothing reads them but {@link brokerFaultCause}.
+  const secrets: string[] = [];
   try {
     const body = await readBody(request); const headers = Object.fromEntries(Object.entries(request.headers).map(([key, value]) => [key, Array.isArray(value) ? value[0] : value]));
     titleSink = headers.authorization === `Bearer ${GROK_SESSION_TITLE_SINK_KEY}`;
     const match=headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]{40,})$/u);
+    if(match)secrets.push(match[1]!);
     if(match&&match[1]!.startsWith(GROK_ENGINE_BROKER.inferenceGrants.tokenPrefix)){if(!grants)throw new GrokBrokerProxyRefusal("inference_grants_unavailable");return await serveGrokInferenceGrant({method:request.method??"",pathname:new URL(request.url??"/","http://127.0.0.1").pathname,headers,body,token:match[1]!},response,grants,authority,upstream);}
     const scope=match?capabilities.inspectToken(match[1]!):undefined;if(!scope)throw new GrokBrokerProxyRefusal("unknown_capability");const guard=guards.get(scope.turnId),turn=turns.get(scope.turnId);if(!guard||!turn)throw new GrokBrokerProxyRefusal("no_active_turn");
     try { await guard(); } catch (error) { throw new GrokBrokerProxyRefusal("worker_isolation_unverified"); }
-    let token = await authority.accessToken(false);const rejectedDigest=createHash("sha256").update(token).digest("hex"); let prepared = authorizeRequestOrRefuse({ method: request.method ?? "", pathname: new URL(request.url ?? "/", "http://127.0.0.1").pathname, headers, body }, capabilities, token, turn.policy ?? fallback); token = "";
+    let token = await authority.accessToken(false);secrets.push(token);const rejectedDigest=createHash("sha256").update(token).digest("hex"); let prepared = authorizeRequestOrRefuse({ method: request.method ?? "", pathname: new URL(request.url ?? "/", "http://127.0.0.1").pathname, headers, body }, capabilities, token, turn.policy ?? fallback); token = "";
     // The spend gate runs after the body is proven a real lean worker request
     // (a refused session-title body never counts) and before any upstream call.
     const admission=turn.meter.admit();
@@ -66,7 +73,7 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     if("busy" in admission){response.writeHead(429,{"content-type":"application/json","cache-control":"no-store"});response.end('{"error":"turn request in flight"}');return;}
     settle=(usage,toolCalls)=>{turn.meter.settle(admission.index,usage,body.byteLength,toolCalls);settle=undefined;};
     let result = await upstream(prepared,admission.signal);
-    if (result.status === 401) { token = authority.refreshAfterRejection?await authority.refreshAfterRejection(rejectedDigest):await authority.accessToken(true);const refreshedDigest=createHash("sha256").update(token).digest("hex"); prepared = { ...prepared, headers: { ...prepared.headers, authorization: `Bearer ${token}` } }; token = ""; result = await upstream(prepared,admission.signal);if(result.status===401)await authority.markRejected(refreshedDigest); }
+    if (result.status === 401) { token = authority.refreshAfterRejection?await authority.refreshAfterRejection(rejectedDigest):await authority.accessToken(true);secrets.push(token);const refreshedDigest=createHash("sha256").update(token).digest("hex"); prepared = { ...prepared, headers: { ...prepared.headers, authorization: `Bearer ${token}` } }; token = ""; result = await upstream(prepared,admission.signal);if(result.status===401)await authority.markRejected(refreshedDigest); }
     // Names only, bounded, and never a reason to fail the request: the response
     // is already buffered here for its usage block, so what the model tried to
     // call is in hand. A decoder fault records no attempt rather than a false
@@ -79,7 +86,11 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     // or a token) so a failing turn is diagnosable without a stub harness —
     // except for the two requests every healthy turn makes anyway.
     const refusal = error instanceof GrokBrokerProxyRefusal ? error.reason : "broker_unavailable";
-    if (!titleSink && !expectedWorkerProbe(request)) process.stderr.write(`[grok-proxy] refused: ${refusal}\n`);
+    // A named refusal is its own account; anything else used to reach the log as
+    // the bare word `broker_unavailable`, which names nothing — so it carries the
+    // fault's own class and message, and nothing else, beside it.
+    const named = error instanceof GrokBrokerProxyRefusal ? refusal : `${refusal} (${brokerFaultCause(error, secrets)})`;
+    if (!titleSink && !expectedWorkerProbe(request)) process.stderr.write(`[grok-proxy] refused: ${named}\n`);
     // Grok's own session-title call is refused by design, and keeps the transient
     // 503 shape it has always had. Forcing 400 and 503 on it were both observed
     // to end the turn `exit=0, result: success`, so the shape is kept because it
@@ -97,8 +108,34 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     }
     response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
     response.end('{"error":"broker unavailable"}');
-  }
+  } finally { secrets.length = 0; }
 }
+
+/**
+ * A non-refusal fault, named on one bounded line.
+ *
+ * `broker_unavailable` on its own carries no diagnostic content at all, and it
+ * is answered 503, which Grok blind-retries: one live turn emitted it fifteen
+ * times over five minutes, spent $0 — so no upstream call ever succeeded — and
+ * died with no account of why. The error's own class and message are the whole
+ * of what is logged: never a request body, bearer, capability, session id or
+ * header. It is redacted exactly as the failed CLI child and the launcher's
+ * worker diagnostic are — `redactCredentialText` with this request's own
+ * capabilities as exact secrets and the same `CLI_ENGINE_MAX_DIAGNOSTIC_BYTES`
+ * bound — and flattened to one line, because it travels on a log line. Naming
+ * a fault must never be able to fail the response that reports it, so a value
+ * that cannot even be described degrades to a marker.
+ */
+const brokerFaultCause = (error: unknown, secrets: readonly string[]): string => {
+  try {
+    const described = error instanceof Error
+      ? `${error.constructor?.name ?? error.name}: ${error.message}`
+      : `${typeof error}: ${String(error)}`;
+    const flattened = described.replace(/[ -]+/gu, " ").replace(/\s+/gu, " ").trim();
+    const named = redactCredentialText(flattened, secrets, CLI_ENGINE_MAX_DIAGNOSTIC_BYTES).trim();
+    return named.length === 0 ? "unnamed" : named;
+  } catch { return "unnameable"; }
+};
 
 /**
  * The unauthenticated connectivity probe Grok sends before its own requests: a
