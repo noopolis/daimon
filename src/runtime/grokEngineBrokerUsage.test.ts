@@ -46,7 +46,7 @@ const untilAborted = (signal: AbortSignal): Promise<never> => new Promise((_reso
  * talks to the proxy exactly as the native worker does (capability bearer,
  * pinned client version, lean body). Only the launcher and attestation are fakes.
  */
-const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId: string, worker: Worker, overrides?: Parameters<typeof runGrokEngineBrokerTurn>[6], limits?: EngineBrokerServiceRegistration["limits"], turnStore?: string) => ReturnType<typeof runGrokEngineBrokerTurn>; usageRows: () => Promise<Record<string, unknown>[]>; requestRows: () => Promise<Record<string, unknown>[]>; upstreamCalls: () => number; upstreamAborts: () => number }>) => Promise<void>, usageLedgerPath?: string, upstreamDelayMs: (call: number) => number = () => 15): Promise<void> => {
+const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId: string, worker: Worker, overrides?: Parameters<typeof runGrokEngineBrokerTurn>[6], limits?: EngineBrokerServiceRegistration["limits"], turnStore?: string, syncDirectory?: (directory: string) => Promise<void>) => ReturnType<typeof runGrokEngineBrokerTurn>; usageRows: () => Promise<Record<string, unknown>[]>; requestRows: () => Promise<Record<string, unknown>[]>; upstreamCalls: () => number; upstreamAborts: () => number }>) => Promise<void>, usageLedgerPath?: string, upstreamDelayMs: (call: number) => number = () => 15): Promise<void> => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-broker-usage-"));
   let calls = 0, aborted = 0;
   const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async (_request, signal) => { calls++; await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, upstreamDelayMs(calls)); signal?.addEventListener("abort", () => { clearTimeout(timer); aborted++; reject(new Error("aborted")); }, { once: true }); }); return { status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from(`data: ${JSON.stringify({ choices: [], usage: upstreamUsage })}\n\ndata: [DONE]\n\n`) }; }, undefined, 0);
@@ -55,10 +55,10 @@ const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId
   try {
     await body({
       root,
-      turn: (wakeId, worker, overrides, limits = { maxRequests: 32, maxTokens: 300_000, timeoutMs: 240_000 }, turnStore = path.join(root, "turns")) => {
+      turn: (wakeId, worker, overrides, limits = { maxRequests: 32, maxTokens: 300_000, timeoutMs: 240_000 }, turnStore = path.join(root, "turns"), syncDirectory = undefined) => {
         const registration: EngineBrokerServiceRegistration = { agentId: "foreman", slot: 0, workerUid: 2_200, workspace: "/workspace", profilePath: "/workers/0/.grok/sandbox.toml", eventsPath: "/workers/0/.grok/sessions/sandbox-events.jsonl", profileSha256: "a".repeat(64), usageLedgerPath: ledger, limits, model: { model: "grok-4.6", reasoningEffort: "low" } };
         const deps: GrokEngineBrokerTurnDependencies = {
-          turns: new EngineBrokerTurnRegistry(turnStore), proxy, credentialStale: () => false,
+          turns: syncDirectory === undefined ? new EngineBrokerTurnRegistry(turnStore) : new EngineBrokerTurnRegistry(turnStore, undefined, syncDirectory), proxy, credentialStale: () => false,
           mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => undefined },
           prepareIsolation: async () => async () => undefined,
           runNative: async (input: NativeBrokerTurn, signal: AbortSignal) => nativeResult(await worker(() => post(proxy.port, input.providerCapability), signal))
@@ -183,6 +183,23 @@ test("a ledger append that fails after the turn was sealed leaves it completed a
     assert.equal((await turn("wake-9", twoRequests)).outcome, "completed");
     assert.deepEqual((await usageRows()).map((row) => [row.outcome, row.turn]), [["completed", turnIdFor("foreman", "wake-9")]]);
     assert.equal((await turn("wake-9", twoRequests, undefined, undefined, path.join(root, "turns"))).outcome, "completed", "the sealed record was never rewritten as failed");
+    assert.equal((await usageRows()).length, 1);
+  });
+});
+
+test("a directory-sync failure after the completed record is published never re-seals the turn as failed", async () => {
+  await withBroker(async ({ root, turn, usageRows, requestRows }) => {
+    let syncs = 0;
+    // Sync 1 is begin()'s active record; sync 2 follows the completed record's rename.
+    const failAfterPublish = async (): Promise<void> => { syncs += 1; if (syncs === 2) throw new Error("EIO"); };
+    // Mutation guard: letting the post-rename failure reject makes the turn's catch write `failed` over the published record.
+    const result = await turn("wake-10", twoRequests, undefined, undefined, path.join(root, "turns"), failAfterPublish);
+    assert.equal(result.outcome, "completed");
+    assert.equal(syncs, 2);
+    assert.deepEqual((await usageRows()).map((row) => [row.outcome, row.turn]), [["completed", turnIdFor("foreman", "wake-10")]]);
+    assert.equal((await requestRows()).length, 2);
+    const replayed = await turn("wake-10", async () => { throw new Error("a replay runs no worker"); });
+    assert.deepEqual(replayed, result);
     assert.equal((await usageRows()).length, 1);
   });
 });
