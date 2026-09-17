@@ -182,6 +182,19 @@ const notice = (input: Readonly<{
 };
 
 /**
+ * Spilled files are group-readable and never other-readable.
+ *
+ * A brokered Grok worker runs as its own uid and reads a spill with
+ * `read_file`, so a 0600 file owned by the runtime (uid 2000) was unreadable to
+ * the very agent the notice sends there. The group grant reaches exactly that
+ * agent's worker only when the deployment provisions `tool-output` as
+ * `<runtime uid>:<worker gid> 2750` (setgid, so each file inherits the worker
+ * group; `GROK_ENGINE_BROKER.worker.home.spillDirectory`). A directory Daimon
+ * creates itself stays 0700, so for every other engine nothing new is exposed.
+ */
+export const SPILL_FILE_MODE = 0o640;
+
+/**
  * Write the full payload where the agent can read it, atomically.
  *
  * Staged to a sibling and renamed, so a half-written file is never addressable:
@@ -192,8 +205,9 @@ const writeSpill = async (directory: string, name: string, text: string): Promis
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const file = path.join(directory, name);
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
-  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(text, "utf8"); await handle.sync(); } finally { await handle.close(); }
+  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, SPILL_FILE_MODE);
+  // Explicit, so a restrictive umask cannot strip the group read an agent's sandboxed worker needs.
+  try { await handle.chmod(SPILL_FILE_MODE); await handle.writeFile(text, "utf8"); await handle.sync(); } finally { await handle.close(); }
   try { await rename(temporary, file); } catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
   return file;
 };

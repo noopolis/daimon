@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -149,4 +149,20 @@ test("the bound and the exemption list come from the environment, and a nonsense
   assert.throws(() => resolveToolResultMaxBytes({ [TOOL_RESULT_MAX_BYTES_ENV]: "lots" }), /must be an integer/u);
   assert.deepEqual([...resolveExemptToolNames({})], []);
   assert.deepEqual([...resolveExemptToolNames({ [TOOL_RESULT_EXEMPT_ENV]: " mcp_a_b , mcp_c_d ," })], ["mcp_a_b", "mcp_c_d"]);
+});
+
+test("spilled files are readable by the directory's (worker) group and never by other users", async () => {
+  await withDirectory(async (directory) => {
+    // What a deployment provisions for a brokered worker: setgid tool-output in the worker's group.
+    const groups = (process.getgroups?.() ?? []).filter((gid) => gid !== process.getgid?.());
+    const workerGroup = groups[0];
+    if (workerGroup !== undefined) await chown(directory, process.getuid?.() ?? -1, workerGroup).catch(() => undefined);
+    await chmod(directory, 0o2750);
+    const previous = process.umask(0o077);
+    let capped;
+    try { capped = await cap({ content: [{ type: "text", text: "x".repeat(200_000) }] }, { spillDirectory: directory }); } finally { process.umask(previous); }
+    const file = await stat(capped.spillPath!);
+    assert.equal(file.mode & 0o777, 0o640, "group-readable even under a restrictive umask, never other-readable");
+    assert.equal(file.gid, (await stat(directory)).gid, "the file carries the directory's group");
+  });
 });
