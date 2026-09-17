@@ -111,9 +111,9 @@ export const GROK_ENGINE_BROKER = {
       envKey: "DAIMON_INFERENCE_GRANT",
       // sha256 of `renderGrokInferenceClientConfig` for the production proxy base URL and this env key.
       configSha256: {
-        "grok-4.6": { low: "", medium: "", high: "" },
-        "grok-4.5": { low: "", medium: "", high: "" },
-        "grok-build": { low: "", medium: "", high: "" }
+        "grok-4.6": { low: "f52819340ec27180e75e0744f1cff9608bd8155a7e03881e24f2add77aaab311", medium: "c7fceb6d10d3c9848a282f80b0cf617172f598489092d5b98cbca098b7335605", high: "d612e5f6595ff76a15c2e33b03a7597086ea3556d760eacbb8eefb234d089fd9" },
+        "grok-4.5": { low: "93f3c55b45843862782891cf9fd4e477532e43a4da9e9a09a003f49dc67bb9b3", medium: "b8213c439be60dc0268f5a62242cccd12922ab6e8e8d9212f8325848be76b1f2", high: "5ad93821eac55816afabfd1240b8b78508a707299ff903072c6984f24e2ee334" },
+        "grok-build": { low: "1a26f5482aad0b872b6442c2fa026eb47c2113bbc3fdc1c580d5b2671695e3c6", medium: "fcb6f8b673e4179b086aa6cc009b43fda418e353927dd225a5f63facd8b4479a", high: "4bc5c6118612ecb32d8f79ad871ddc69e1b33d63ee3abef6b1b0618709d0cf21" }
       }
     }
   },
