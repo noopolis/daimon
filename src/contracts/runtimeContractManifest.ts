@@ -87,8 +87,38 @@ export const GROK_ENGINE_BROKER = {
     missingUsageEstimate: { inputBytesPerToken: 2, outputTokens: 4_096 }
   },
   wakeLimitEnvironment: { timeoutMs: "DAIMON_ENGINE_WAKE_TIMEOUT_MS", maxTokens: "DAIMON_ENGINE_WAKE_TOKEN_CEILING" },
+  // Evaluator inference grants (P2c). Judges and the optimizer (organization uid
+  // only, over the control socket) borrow the broker's Grok credential through
+  // the provider proxy; they never hold it, and their spend never reaches the
+  // subject usage ledger or wake fuse.
+  inferenceGrants: {
+    requestKinds: ["request_inference_grant", "release_inference_grant"],
+    purposes: ["judge", "optimizer"],
+    tokenPrefix: "inference_",
+    ttlMs: 600_000,
+    limits: { maxRequests: 64, maxTokens: 2_000_000 },
+    maxLiveGrants: 8,
+    maxInFlightRequestsPerGrant: 1,
+    // Top-level request members Grok 1.0.34 sends for a Paideia judge/optimizer call
+    // (live stub capture); `tools` and `tool_choice` are refused outright.
+    bodyMembers: ["messages", "model", "reasoning_effort", "response_format", "stream", "stream_options"],
+    messageRoles: ["system", "user", "assistant"],
+    failureCodes: ["auth_stale", "grant_limit", "invalid_request", "unavailable"],
+    ledgerVersion: "noopolis.daimon.inference-usage.v1",
+    ledgerDedupeKey: ["grant", "request"],
+    client: {
+      modelId: "daimon-inference-grok",
+      envKey: "DAIMON_INFERENCE_GRANT",
+      // sha256 of `renderGrokInferenceClientConfig` for the production proxy base URL and this env key.
+      configSha256: {
+        "grok-4.6": { low: "79314d039f787e4ebfec7dacf57adc969086b948f564dec008f0ed6367e6062f", medium: "6f538de0547c0c4e6a3f04ae08595ceadadabb06b75f6b6ee4c428744bb95cd8", high: "5652656effa82f0c4f09cf8226b16e6140332a5a358b571194bb5563312367ac" },
+        "grok-4.5": { low: "a07f7436f1268bb399ec233c65d3b3d8fb99a11a1f175f8da1ca133c9367bc74", medium: "1f4c0d4dad1f3b09419b5739db6423a09e0049abc091594c64123a75dd53dfb9", high: "ffbc33728b821e9854fbc7c93601e599225da421ecfd6ebf10d314afcc28d6f2" },
+        "grok-build": { low: "ca15c6a562a008227d39c51d3a3a83715663089b3784e8b46debb1fb67b3c4a1", medium: "01783fb6beadcf6f8486fff0836820ad43fab5662b812a907fe9cfdb83e9804d", high: "98d16f2b7d12f4eb540d625c853e51d227933e204923e43e8b9b4176f10aca2c" }
+      }
+    }
+  },
   projectionVersion: "noopolis.daimon.grok-broker-projection.v1",
-  slotPreflightVersion: "noopolis.daimon.grok-slot-preflight.v1",
+  slotPreflightVersion: "noopolis.daimon.grok-slot-preflight.v2",
   artifacts: {
     sourceSha256: "36f60689f0a8af0e3108f5f53d78ed52b7d4b6f934c75b6184606dfa82bc741e",
     x64Sha256: "36dc76b134eb59cf5a6720b6f94228eb279108e20ea3343fa6efd9ffcb60a4d3",

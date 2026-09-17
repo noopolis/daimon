@@ -100,8 +100,18 @@ kills the worker. The broker seals every terminal turn with its usage, request
 count, declared model and limit reason, and writes one usage row (keyed by
 `turn`) plus per-request rows for completed and failed turns alike; a replayed
 turn is never metered twice. `resolveOrganizationGrokBrokerProjection` exposes
-a slot's full declared shape, and `noopolis.daimon.grok-slot-preflight.v1`
-receipts bind a slot's denied-path canaries to that projection's digest.
+a slot's full declared shape, and `noopolis.daimon.grok-slot-preflight.v2`
+receipts bind a slot's denied-path canaries to that projection's digest and to
+one recycle (the caller's nonce and the slot's increasing generation).
+
+Evaluators (Paideia judges and the optimizer, organization uid only) borrow the
+same credential through inference grants: `request_inference_grant` over the
+control socket returns a ten-minute token for one declared model and effort,
+which the evaluator's Grok CLI presents to the provider proxy through
+`env_key` in a config rendered by `renderGrokInferenceClientConfig`. Grant
+requests must carry no tools, are metered like a turn, and are written only to
+the broker's separate `inferenceLedgerPath` (`kind: "inference"` rows), never
+to a subject usage ledger or the wake fuse.
 
 AGY uses OS-native secure storage through one private D-Bus and Secret Service
 realm. Enroll it once with:

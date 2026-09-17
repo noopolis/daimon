@@ -77,6 +77,46 @@ model (`grok-4.6-build` → `grok-4.6`), otherwise the turn fails as rejected an
 is still metered. Control protocol v2 is refused-v1 on the wire because both
 ends ship in this package.
 
+Evaluator inference grants (`grokInferenceGrants.ts`) let Paideia judges and
+the DSPy optimizer — uid 2000, the trusted evaluator side — spend the broker's
+Grok credential without holding it. `request_inference_grant {model,
+reasoningEffort, purpose: judge|optimizer}` is an additive control protocol v2
+verb (`engineBrokerInferenceProtocol.ts`); only the organization uid reaches it,
+because the native relay admits only that `SO_PEERCRED` uid on `control.sock`
+(the TS backend sees only the relay). The answer is a token
+(`inference_` + 32 random bytes), the proxy base URL, an expiry (TTL ten
+minutes) and the manifest limits; `release_inference_grant` frees one of the
+eight live-grant slots early. Grants are their own kind: their own map keyed by
+a random grant id, never the turn capability or turn meter maps, and the proxy
+routes a bearer by its prefix to exactly one of the two lookups. A grant has no
+worker isolation guard but the same spend gate as a turn (one request in
+flight, request ceiling, between-requests token ceiling, estimate on missing
+usage), so one grant is one sequential lane — parallel judges each hold one.
+`grokInferenceProxyRequest.ts` accepts exactly what Grok 1.0.34 sends for the
+Paideia judge argv (live stub capture): `stream: true` with
+`stream_options.include_usage`, the declared `model`/`reasoning_effort`, plain
+`{role, content}` messages, optional `response_format` json_schema, and **no
+`tools` or `tool_choice` member at all** — the CLI's per-call `session_title`
+request carries both and is refused locally. Every settled request appends one
+`kind: "inference"` row (`purpose`, `grant`, `request`, model, usage,
+`usage_source`) to `service.json` v2's optional `inferenceLedgerPath`, which
+may never be a subject ledger; readers dedupe on `(grant, request)`
+(`dedupeInferenceUsageRows`), and `wakeFuse.ts` skips inference rows. Without
+that path every grant request is refused `unavailable`. Grants share the
+subject's credential authority, so a stale realm fails both (accepted shared
+fate): the grant request is refused `auth_stale`, and a proxied grant request
+that meets a stale realm gets HTTP 401 `{"error":"auth_stale"}`, which the CLI
+surfaces immediately as `Internal error: "Unauthorized (401) from …:
+auth_stale …"`. `grokInferenceClientConfig.ts` renders the evaluator's private
+`GROK_HOME` `config.toml` (pinned per model/effort in the manifest): the grant
+token through `env_key = "DAIMON_INFERENCE_GRANT"`, the worker's lean settings,
+no MCP, and `max_retries = 0` — with the default, Grok retries a refused (503)
+request with backoff past 45 s instead of failing in ~0.35 s. Its init frame
+reports `apiKeySource: "user"`, `tools: []`, `mcp_servers: []`, and the CLI
+must be run with `--model daimon-inference-grok`. The inference ledger
+directory must be provisioned setgid to the organization group (e.g.
+`2100:2000 2750`) for uid 2000 to read rows the broker creates `0640`.
+
 `grokBrokerProjection.ts` is the public, I/O-free projection of one brokered
 Grok agent's slot (`noopolis.daimon.grok-broker-projection.v1`): Daimon's own
 deny collectors plus the caller's evaluator paths, profile/config/prompt
@@ -87,9 +127,14 @@ must supply canonical non-symlink paths (its fixed tmpfs and workspace roots)
 and verify that during provisioning. The projection also carries the seccomp
 profile digest and the `bubblewrap` sandbox runtime a receipt must match. `grokSlotPreflightReceipt.ts` is the
 zod schema a root slot supervisor's receipt must satisfy
-(`noopolis.daimon.grok-slot-preflight.v1`, fixtures under
+(`noopolis.daimon.grok-slot-preflight.v2`, fixtures under
 `fixtures/grok-slot-preflight/`); `verifyGrokSlotPreflightReceipt` binds it to
 the projection digest and requires a denied canary for exactly every deny path.
+The projection digest does not change across recycles, so the receipt also
+carries freshness: a supervisor-owned per-slot `generation` (strictly
+increasing) and the caller's recycle `nonce` (32 random bytes, hex). The
+verifier requires `{expectedNonce, minGeneration}` and refuses another nonce, a
+lower generation, and any v1 receipt.
 
 `grokBrokerWorkerConfig.ts` is the only source of worker `config.toml` bytes;
 the manifest pins the sha256 of every model/effort combination and the broker

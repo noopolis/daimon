@@ -3,6 +3,7 @@ import path from "node:path";
 import { DEFAULT_GROK_BROKER_TURN_LIMITS, parseEngineBrokerTurnLimits, type EngineBrokerTurnLimits } from "./engineBrokerTurnAccounting.js";
 import { DEFAULT_GROK_BROKER_MODEL_POLICY, GROK_BROKER_MODELS, GROK_BROKER_REASONING_EFFORTS, type GrokBrokerModelPolicy } from "./grokBrokerModelPolicy.js";
 import { grokWorkerEventsPathFor } from "./grokWorkerSandboxProfile.js";
+import { TURN_REQUEST_LEDGER } from "./turnRequestLedger.js";
 import { TURN_USAGE_LEDGER } from "./turnUsageLedger.js";
 
 export const ENGINE_BROKER_SERVICE_V1 = "noopolis.daimon.engine-broker-service.v1" as const;
@@ -16,7 +17,14 @@ export type EngineBrokerServiceRegistration = Readonly<{
   limits: EngineBrokerTurnLimits;
   model: GrokBrokerModelPolicy;
 }>;
-export type EngineBrokerServiceConfig = Readonly<{ credentialHome: string; turnStore: string; registrations: readonly EngineBrokerServiceRegistration[] }>;
+/**
+ * `inferenceLedgerPath` (v2, optional) is where evaluator inference grants
+ * append their rows (`inferenceUsageLedger.ts`). Without it the broker refuses
+ * every grant request. It can never be a subject ledger: not any
+ * registration's usage ledger or its `requests.jsonl`, and not the container
+ * ledger the wake fuse sums.
+ */
+export type EngineBrokerServiceConfig = Readonly<{ credentialHome: string; turnStore: string; registrations: readonly EngineBrokerServiceRegistration[]; inferenceLedgerPath?: string }>;
 
 const V1_REGISTRATION = ["agentId", "slot", "workerUid", "workspace", "profilePath", "eventsPath", "profileSha256"] as const;
 const V2_REGISTRATION = [...V1_REGISTRATION, "usageLedgerPath", "limits", "model"] as const;
@@ -41,7 +49,8 @@ export function parseEngineBrokerServiceConfig(value: unknown): EngineBrokerServ
   if (!plain(value)) throw invalid();
   const v2 = value.version === ENGINE_BROKER_SERVICE_V2;
   if (!v2 && value.version !== ENGINE_BROKER_SERVICE_V1) throw invalid();
-  exact(value, ["version", "credentialHome", "turnStore", "registrations"]);
+  const top = ["version", "credentialHome", "turnStore", "registrations"];
+  exact(value, v2 && Object.hasOwn(value, "inferenceLedgerPath") ? [...top, "inferenceLedgerPath"] : top);
   if (!absolute(value.credentialHome) || !absolute(value.turnStore) || !Array.isArray(value.registrations) || value.registrations.length === 0) throw invalid();
   const seen = new Set<string>(), slots = new Set<number>();
   const registrations = value.registrations.map((entry: unknown): EngineBrokerServiceRegistration => {
@@ -53,13 +62,21 @@ export function parseEngineBrokerServiceConfig(value: unknown): EngineBrokerServ
     const base = { agentId, slot: slot as number, workerUid: workerUid as number, workspace, profilePath, eventsPath, profileSha256 };
     if (!v2) return { ...base, usageLedgerPath: TURN_USAGE_LEDGER.filePath, limits: DEFAULT_GROK_BROKER_TURN_LIMITS, model: DEFAULT_GROK_BROKER_MODEL_POLICY };
     const usageLedgerPath = entry.usageLedgerPath;
-    if (!absolute(usageLedgerPath) || !usageLedgerPath.endsWith(".jsonl") || usageLedgerPath === engineBrokerRequestLedgerPathFor(usageLedgerPath) || path.posix.normalize(usageLedgerPath) !== usageLedgerPath) throw invalid();
+    if (!ledgerPath(usageLedgerPath) || usageLedgerPath === engineBrokerRequestLedgerPathFor(usageLedgerPath)) throw invalid();
     let limits: EngineBrokerTurnLimits;
     try { limits = parseEngineBrokerTurnLimits(entry.limits); } catch { throw invalid(); }
     return { ...base, usageLedgerPath, limits, model: parseServiceModel(entry.model) };
   });
-  return { credentialHome: value.credentialHome, turnStore: value.turnStore, registrations };
+  const base = { credentialHome: value.credentialHome, turnStore: value.turnStore, registrations };
+  if (!Object.hasOwn(value, "inferenceLedgerPath")) return base;
+  const inferenceLedgerPath = value.inferenceLedgerPath;
+  if (!ledgerPath(inferenceLedgerPath)) throw invalid();
+  const subject = new Set<string>([TURN_USAGE_LEDGER.filePath, TURN_REQUEST_LEDGER.filePath, ...registrations.flatMap((entry) => [entry.usageLedgerPath, engineBrokerRequestLedgerPathFor(entry.usageLedgerPath)])]);
+  if (subject.has(inferenceLedgerPath)) throw invalid();
+  return { ...base, inferenceLedgerPath };
 }
+
+const ledgerPath = (item: unknown): item is string => absolute(item) && item.endsWith(".jsonl") && path.posix.normalize(item) === item;
 
 function parseServiceModel(value: unknown): GrokBrokerModelPolicy {
   if (!plain(value)) throw invalid();
