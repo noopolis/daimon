@@ -64,7 +64,16 @@ export const GROK_ENGINE_BROKER = {
       directory: { uid: 0, group: "worker", mode: 0o1771 },
       sessionsDirectory: { relativePath: "sessions", uid: 0, group: "worker", mode: 0o1771 },
       readOnlyFiles: { names: ["config.toml", "managed_config.toml", "requirements.toml", "sandbox.toml", "trusted_folders.toml"], uid: 0, gid: 0, mode: 0o444 },
-      sandboxEvents: { relativePath: "sessions/sandbox-events.jsonl", owner: "worker", group: "broker", mode: 0o640 }
+      sandboxEvents: { relativePath: "sessions/sandbox-events.jsonl", owner: "worker", group: "broker", mode: 0o640 },
+      // The launcher exports TMPDIR=<worker home>/tmp; Grok's strict profile grants TMPDIR read-write.
+      privateTmp: { relativeToWorkerHome: "tmp", owner: "worker", mode: 0o700 },
+      // Strict also grants shared /tmp and /var/tmp read-write and refuses to start if either is
+      // denied, so the deployment keeps them from every worker by mode: root-owned, a non-worker
+      // group (< 2200), others read-only (Grok needs to open the directory) and no search/write.
+      sharedTmp: { paths: ["/tmp", "/var/tmp"], uid: 0, maxGroupExclusive: 2_200, otherMode: 0o4, mode: 0o1774 },
+      // Spilled tool output the worker reads with read_file: setgid directory in the worker's group,
+      // files written 0640 by the runtime, never other-readable.
+      spillDirectory: { relativeToRuntimeHome: "tool-output", owner: "organization", group: "worker", mode: 0o2750, fileMode: 0o640 }
     }
   },
   bounds: { promptBytes: 65_536, capabilityBytes: 4_096, capabilityBundleBytes: 8_196, outputBytes: 65_536 },

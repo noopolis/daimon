@@ -361,10 +361,13 @@ static pid_t launch(const struct dbl_registration *r, int executable,
                         "--model",
                         "daimon-broker-grok",
                         NULL};
-  char home[300], grok[300], mcp_env[DBL_MAX_TOKEN + 24],
+  char home[300], grok[300], tmp[300], mcp_env[DBL_MAX_TOKEN + 24],
        provider_env[DBL_MAX_TOKEN + 32];
   snprintf(home, sizeof(home), "HOME=%s", r->home);
   snprintf(grok, sizeof(grok), "GROK_HOME=%s/.grok", r->home);
+  /* Worker-private temp: strict grants TMPDIR read-write, and shared /tmp is
+     kept from the worker by the deployment's modes (attested by the broker). */
+  snprintf(tmp, sizeof(tmp), "TMPDIR=%s/tmp", r->home);
   snprintf(mcp_env, sizeof(mcp_env), "DAIMON_MCP_CAPABILITY=%s", mcp);
   /* Grok 1.0.34 never runs `[auth_provider.*]` helpers for a custom model, so
      the worker's `[model.daimon-broker-grok] env_key` reads the turn-scoped
@@ -375,6 +378,7 @@ static pid_t launch(const struct dbl_registration *r, int executable,
   erase(mcp, sizeof(mcp));
   char *const envp[] = {home,
                         grok,
+                        tmp,
                         mcp_env,
                         provider_env,
                         "DAIMON_CAPABILITY_FD=4",

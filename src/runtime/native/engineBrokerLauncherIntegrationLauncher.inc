@@ -110,7 +110,7 @@ static void org_cases(void) {
   char *out = calloc(1, r.output_length + 1);
   check(read(s, out, r.output_length) == (ssize_t)r.output_length &&
             strstr(out, "uid=2200") && strstr(out, "--always-approve") &&
-            strstr(out, " prompt=prompt fds=0,1,2,3,4 stdin=/dev/null\n") &&
+            strstr(out, " prompt=prompt fds=0,1,2,3,4 stdin=/dev/null tmpdir=/tmp/worker-home/tmp\n") &&
             !strstr(out, "EVIL"),
         "fixed worker boundary");
   check(strstr(out, "=--verbatim\n") && strstr(out, "=--no-plan\n") &&
