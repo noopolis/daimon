@@ -401,3 +401,8 @@ async function seedAuth(root: string, kind: "codex" | "grok" | "agy"): Promise<v
   await writeFile(file, JSON.stringify(credential), { mode: 0o600 });
   await chmod(file, 0o600);
 }
+
+test("a declared Grok model is refused on the direct path that cannot enforce it", async () => {
+  const config = { ...rootConfig("/tmp/daimon-unused-direct-grok", "grok"), engine: { kind: "grok", model: "grok-4.6", reasoningEffort: "low" } } as OrganizationRuntimeAgentConfig;
+  await assert.rejects(startOrganizationRuntimeEngine(config, "DAIMON_UNUSED_CONTROL"), /requires the engine broker/u);
+});

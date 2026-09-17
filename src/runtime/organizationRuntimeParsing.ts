@@ -1,3 +1,4 @@
+import { GROK_BROKER_MODELS, GROK_BROKER_REASONING_EFFORTS } from "../contracts/grokWorkerContract.js";
 import { parseAttention } from "./attention.js";
 import {
   ORGANIZATION_RUNTIME_CODEX_REASONING_EFFORTS,
@@ -187,24 +188,41 @@ function cronValues(field: string, [minimum, maximum]: readonly [number, number]
 function engine(value: unknown, label: string): OrganizationRuntimeEngineIntent {
   const input = object(value, label); const kind = string(input.kind, `${label}.kind`);
   if (!ENGINE_KINDS.has(kind)) throw new TypeError(`${label}.kind is not a supported engine`);
-  // `model`/`reasoningEffort` are codex-only: grok and agy own their own model
-  // selection, so either field on a non-codex engine is rejected explicitly
-  // here (a clear, named error) rather than falling through to the generic
-  // "must contain exactly" rejection every other unexpected key gets below.
-  const allowed = kind === "codex" ? ["kind", "model", "reasoningEffort", "codexSandbox"] : ["kind"];
+  // `codexSandbox` is codex-only; `model`/`reasoningEffort` are accepted for
+  // codex (open model name, Codex effort list) and for grok (closed broker
+  // lists, declared together or not at all). agy owns its own model selection.
+  const allowed = kind === "codex" ? ["kind", "model", "reasoningEffort", "codexSandbox"] : kind === "grok" ? ["kind", "model", "reasoningEffort"] : ["kind"];
   const extras = Object.keys(input).filter((key) => !allowed.includes(key));
   if (extras.length > 0) {
-    if (kind !== "codex" && (extras.includes("model") || extras.includes("reasoningEffort") || extras.includes("codexSandbox"))) {
-      throw new TypeError(`${label}.model, ${label}.reasoningEffort, and ${label}.codexSandbox are codex-only; their subscription auth, model selection, and sandbox policy are Daimon-owned`);
+    if (kind === "agy" && (extras.includes("model") || extras.includes("reasoningEffort") || extras.includes("codexSandbox"))) {
+      throw new TypeError(`${label}.model, ${label}.reasoningEffort, and ${label}.codexSandbox are codex-only for agy; its subscription auth, model selection, and sandbox policy are Daimon-owned`);
     }
+    if (kind === "grok" && extras.includes("codexSandbox")) throw new TypeError(`${label}.codexSandbox is codex-only; the Grok worker sandbox is Daimon-owned`);
     throw new TypeError(`${label} must contain exactly ${allowed.join(", ")}`);
   }
+  if (kind === "grok") return grokEngine(input, label);
   return {
     kind: kind as OrganizationRuntimeEngineKind,
     ...(input.model === undefined ? {} : { model: nonEmpty(input.model, `${label}.model`) }),
     ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: reasoningEffort(input.reasoningEffort, `${label}.reasoningEffort`) }),
     ...(input.codexSandbox === undefined ? {} : { codexSandbox: codexSandbox(input.codexSandbox, `${label}.codexSandbox`) })
   };
+}
+
+/**
+ * A Grok model is declared explicitly or not at all: both members from the
+ * closed broker lists, never one of them with the other inherited. Omitting
+ * both keeps a config parseable by pre-declaration producers; the brokered
+ * paths that need a model (`grokBrokerProjection.ts`, `service.json` v2)
+ * require it there instead of defaulting it here.
+ */
+function grokEngine(input: RecordValue, label: string): OrganizationRuntimeEngineIntent {
+  if ((input.model === undefined) !== (input.reasoningEffort === undefined)) throw new TypeError(`${label}.model and ${label}.reasoningEffort must be declared together for grok`);
+  if (input.model === undefined) return { kind: "grok" };
+  const model = string(input.model, `${label}.model`), effort = string(input.reasoningEffort, `${label}.reasoningEffort`);
+  if (!(GROK_BROKER_MODELS as readonly string[]).includes(model)) throw new TypeError(`${label}.model must be one of ${GROK_BROKER_MODELS.join(", ")}`);
+  if (!(GROK_BROKER_REASONING_EFFORTS as readonly string[]).includes(effort)) throw new TypeError(`${label}.reasoningEffort must be one of ${GROK_BROKER_REASONING_EFFORTS.join(", ")}`);
+  return { kind: "grok", model, reasoningEffort: effort };
 }
 
 function codexSandbox(value: unknown, label: string): OrganizationRuntimeEngineIntent["codexSandbox"] {

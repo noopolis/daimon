@@ -1,4 +1,5 @@
-import { GROK_BROKER_MODELS, GROK_WORKER_MAX_TURNS } from "../contracts/grokWorkerContract.js";
+import { GROK_BROKER_MODELS } from "../contracts/grokWorkerContract.js";
+import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
 import type { GrokBrokerModel } from "./grokBrokerModelPolicy.js";
 
 /**
@@ -15,7 +16,7 @@ import type { GrokBrokerModel } from "./grokBrokerModelPolicy.js";
  * inside `output` and never added to `total`.
  */
 export type EngineBrokerTurnUsage = Readonly<{ input: number; cacheRead: number; cacheWrite: number; output: number; total: number; reasoning?: number }>;
-export const ENGINE_BROKER_LIMIT_REASONS = ["tokens", "requests", "timeout", "none"] as const;
+export const ENGINE_BROKER_LIMIT_REASONS = GROK_ENGINE_BROKER.turnLimits.limitReasons;
 export type EngineBrokerLimitReason = (typeof ENGINE_BROKER_LIMIT_REASONS)[number];
 export type EngineBrokerTurnLimits = Readonly<{ maxRequests: number; maxTokens: number; timeoutMs: number }>;
 export type EngineBrokerTurnLimitOverrides = Readonly<Partial<EngineBrokerTurnLimits>>;
@@ -28,18 +29,15 @@ export type EngineBrokerTurnAccounting = Readonly<{
 }>;
 
 /**
- * Bounds every declared limit must sit inside. `maxRequests` stays at or below
- * the launcher's compiled `--max-turns` backstop, so the broker ceiling is the
- * one that fires first.
+ * Bounds every declared limit must sit inside, and the v1 defaults, both from
+ * the runtime contract manifest. `maxRequests` stays at or below the
+ * launcher's compiled `--max-turns` backstop, so the broker ceiling is the one
+ * that fires first.
  */
-export const ENGINE_BROKER_LIMIT_BOUNDS = Object.freeze({
-  maxRequests: [1, GROK_WORKER_MAX_TURNS],
-  maxTokens: [1, 10_000_000],
-  timeoutMs: [1_000, 3_600_000]
-} as const);
+export const ENGINE_BROKER_LIMIT_BOUNDS = GROK_ENGINE_BROKER.turnLimits.bounds;
 
 /** What a v1 `service.json` registration gets; equal to the Codex per-wake defaults. */
-export const DEFAULT_GROK_BROKER_TURN_LIMITS: EngineBrokerTurnLimits = Object.freeze({ maxRequests: 32, maxTokens: 300_000, timeoutMs: 240_000 });
+export const DEFAULT_GROK_BROKER_TURN_LIMITS: EngineBrokerTurnLimits = Object.freeze({ ...GROK_ENGINE_BROKER.turnLimits.v1Defaults });
 
 const LIMIT_KEYS = ["maxRequests", "maxTokens", "timeoutMs"] as const;
 type JsonRecord = Record<string, unknown>;

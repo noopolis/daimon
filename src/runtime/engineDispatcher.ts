@@ -32,6 +32,9 @@ export async function startOrganizationRuntimeEngine(
   sharedProtectedPaths: readonly string[] = [],
   attention?: AttentionRegistry
 ): Promise<AgentHandle> {
+  // A declared Grok model is enforced by the broker proxy and worker config;
+  // the direct path has neither, so it refuses rather than silently ignoring it.
+  if (agent.engine.kind === "grok" && agent.engine.model !== undefined && grokBroker === undefined) throw new Error(`Agent ${agent.id} declares a Grok model, which requires the engine broker`);
   await paths?.verify();
   const canonicalAgent = paths === undefined ? agent : { ...agent, workspacePath: paths.workspacePath, runtimeHomePath: paths.runtimeHomePath };
   const readiness = canonicalAgent.engine.kind === "grok" && grokBroker !== undefined
