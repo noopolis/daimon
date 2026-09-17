@@ -43,8 +43,13 @@ int main(void) {
   auth_adversarial_cases();
   puts("native-stage auth complete");
   pid_t broker = fork();
-  if (!broker)
+  if (!broker) {
+    /* A real launcher stdin, so a worker inheriting it is visible. */
+    int launcher_stdin = open("/etc/hostname", O_RDONLY);
+    if (launcher_stdin < 0 || dup2(launcher_stdin, STDIN_FILENO) < 0)
+      _exit(1);
     execl("/opt/daimon/bin/daimon-engine-broker", "daimon-engine-broker", NULL);
+  }
   check(broker > 0, "broker fork");
   wait_launcher_ready(broker);
   root_peer_rejects();

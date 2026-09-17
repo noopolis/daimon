@@ -320,16 +320,21 @@ static pid_t launch(const struct dbl_registration *r, int executable,
   int status_fd = fcntl(status_pipe[1], F_DUPFD_CLOEXEC, 16);
   if (status_fd < 0)
     launch_fail(status_pipe[1], 4);
+  int null_input = open("/dev/null", O_RDONLY | O_CLOEXEC);
   int high_prompt = fcntl(prompt, F_DUPFD_CLOEXEC, 16),
       high_capability = fcntl(capability, F_DUPFD_CLOEXEC, 16),
       high_output = fcntl(output, F_DUPFD_CLOEXEC, 16),
       high_executable = fcntl(executable, F_DUPFD_CLOEXEC, 16);
-  if (high_prompt < 0 || high_capability < 0 || high_output < 0 ||
-      high_executable < 0 || dup2(high_prompt, 3) < 0 ||
+  if (null_input < 0 || high_prompt < 0 || high_capability < 0 ||
+      high_output < 0 || high_executable < 0 ||
+      dup2(null_input, STDIN_FILENO) < 0 || dup2(high_prompt, 3) < 0 ||
       dup2(high_capability, 4) < 0 || dup2(high_output, STDOUT_FILENO) < 0 ||
       dup2(high_output, STDERR_FILENO) < 0)
     launch_fail(status_fd, 4);
-  if (dup2(high_executable, 5) < 0)
+  /* The worker needs fd 5 only to be executed: close-on-exec keeps the Grok
+     image descriptor out of the worker and every tool child (execveat with
+     AT_EMPTY_PATH still works for an ELF; only a #! script would lose it). */
+  if (dup2(high_executable, 5) < 0 || fcntl(5, F_SETFD, FD_CLOEXEC) < 0)
     launch_fail(status_fd, 5);
   close_other_fds(status_fd);
   char *const argv[] = {"grok",
