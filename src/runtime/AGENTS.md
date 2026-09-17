@@ -198,7 +198,9 @@ login expired at 22:28Z and the 22:48Z run spent five minutes and $0 learning
 nothing. `ENGINE_BROKER_AUTH_STALE` (`engineBrokerProtocol.ts`) is the single
 name behind the turn failure code, this refusal reason and the grant path's
 401 `GROK_INFERENCE_AUTH_STALE_BODY`; the grant path keeps its own 401 shape,
-and the title sink keeps its 503 on a fenced realm like everywhere else. The sink keeps its 503
+and the title sink keeps its 503 on a fenced realm like everywhere else.
+
+The sink keeps that 503
 shape because every live capture was taken with it: forcing 400 and 503 there
 were both observed to end the turn `exit=0, result: success`, so a hard 4xx on
 that request does *not* end Grok's session. And effort is only sent when the
