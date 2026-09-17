@@ -67,3 +67,21 @@ test("the session-title sink is refused before capability, guard, credential, or
     assert.equal(calls, 1);
   } finally { await proxy.close(); }
 });
+
+test("the isolation guard is awaited before the first upstream call, and a failing guard makes no upstream call", async () => {
+  const order: string[] = []; let upstreamCalls = 0; let fail = true;
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => { order.push("credential"); return "provider-token"; }, markRejected: async () => undefined }, async () => { upstreamCalls++; order.push("upstream"); return { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from("{}") }; });
+  try {
+    const token = proxy.capabilities.issue("agent", "turn");
+    proxy.registerIsolationGuard("turn", async () => {
+      order.push("guard-start"); await new Promise((resolve) => setTimeout(resolve, 30)); order.push("guard-end");
+      if (fail) throw new Error("no enforcement evidence");
+    });
+    assert.equal(await post(proxy.port, token, leanBody()), 503);
+    assert.equal(upstreamCalls, 0);
+    assert.deepEqual(order, ["guard-start", "guard-end"]);
+    fail = false; order.length = 0;
+    assert.equal(await post(proxy.port, token, leanBody()), 200);
+    assert.deepEqual(order, ["guard-start", "guard-end", "credential", "upstream"]);
+  } finally { await proxy.close(); }
+});
