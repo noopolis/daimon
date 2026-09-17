@@ -1,5 +1,5 @@
 import { attentionTools, type AttentionRegistry } from "./attention.js";
-import { grokMountedToolNamingRule } from "../contracts/grokWorkerContract.js";
+import { grokDaimonToolName, grokMountedToolNamingRule } from "../contracts/grokWorkerContract.js";
 import path from "node:path";
 
 import type { AgentHandle } from "../core/types.js";
@@ -207,11 +207,25 @@ export function identityEnvelope(agent: OrganizationRuntimeAgentConfig, mountedT
           + "your instructions may spell them differently.")
         + " No other tool reaches the newsroom."
     ]),
-    "Colleagues only hear you when you call moltnet_send; your terminal response is a private note to the runtime, not a message to anyone — keep it to one line or leave it empty. "
+    // The one tool that reaches colleagues is named the way this engine can
+    // call it. Meaning and prohibition are unchanged; only the spelling is.
+    `Colleagues only hear you when you call ${engineToolName(agent, "moltnet_send")}; your terminal response is a private note to the runtime, not a message to anyone — keep it to one line or leave it empty. `
       + "Do not seek transport credentials or invoke a transport CLI unless the caller explicitly mounted an authenticated transport tool.",
     "The following is the current wake event."
   ].join("\n") + "\n";
 }
+
+/**
+ * One Daimon tool name, spelled the way this agent's engine accepts it.
+ *
+ * On Grok the bare form is refused as an invalid MCP tool name, so any
+ * engine-facing sentence that *names* a tool renders it through the contract's
+ * `grokDaimonToolName`; every other engine keeps the bare name byte for byte.
+ * Grok's own native tools (`read_file`, `search_tool`, `use_tool`) are not
+ * Daimon tools and never take the prefix.
+ */
+const engineToolName = (agent: OrganizationRuntimeAgentConfig, tool: string): string =>
+  agent.engine.kind === "grok" ? grokDaimonToolName(tool) : tool;
 
 function cliHarness(
   agent: OrganizationRuntimeAgentConfig,

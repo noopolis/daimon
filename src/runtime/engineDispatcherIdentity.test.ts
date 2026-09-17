@@ -56,10 +56,39 @@ test("the Grok envelope and the pinned worker system prompt state the same route
   }
 });
 
+/**
+ * The transport sentence names the one tool an agent needs to reach its
+ * colleagues. A bare `moltnet_send` one line under "a bare name is not a valid
+ * MCP tool name and reaches nothing" is the same self-contradiction, on the
+ * tool that matters most.
+ */
+test("the transport sentence names the send tool the way Grok can call it, prohibition unchanged", () => {
+  const grok = identityEnvelope(rootConfig("/private/org", "grok"), mounted);
+  const transport = grok.split("\n").find((line) => line.startsWith("Colleagues only hear you"))!;
+  // Mutation guard: un-prefixing this name leaves the bare form the line above declares invalid.
+  assert.ok(transport.includes(`you call ${grokDaimonToolName("moltnet_send")};`), transport);
+  assert.equal(new RegExp(`(?<!${DAIMON_GROK_TOOL_PREFIX})moltnet_send`, "u").test(transport), false, "no bare spelling survives");
+  // Meaning and prohibition are unchanged, word for word.
+  assert.match(transport, /your terminal response is a private note to the runtime, not a message to anyone — keep it to one line or leave it empty\. Do not seek transport credentials or invoke a transport CLI unless the caller explicitly mounted an authenticated transport tool\.$/u);
+  // Past the one bare catalogue, no sentence that tells the model to call a
+  // tool may name it bare. The catalogue itself is the tools' bare identity and
+  // is exactly where the prefix rule is stated, so it stays as it is.
+  const afterCatalogue = grok.slice(grok.indexOf(transport));
+  for (const tool of [...mounted, "moltnet_send", "daimon_inbox", "daimon_inbox_disposition"]) {
+    assert.equal(new RegExp(`(?<!${DAIMON_GROK_TOOL_PREFIX})${tool}\\b`, "u").test(afterCatalogue), false, tool);
+  }
+});
+
 test("only Grok gains the prefix rule: every other engine's envelope stays byte-identical", () => {
   const unchanged = `Your mounted tools are exactly: ${mounted.join(", ")}. Call them by these names; your instructions may spell them differently. No other tool reaches the newsroom.`;
   for (const kind of ["codex", "agy"] as const) assert.equal(envelopeToolSentence(kind), unchanged);
   assert.notEqual(envelopeToolSentence("grok"), unchanged);
   // An unmounted agent gets no tool sentence at all, on every engine.
   for (const kind of ["codex", "agy", "grok"] as const) assert.doesNotMatch(identityEnvelope(rootConfig("/private/org", kind)), /Your mounted tools/u);
+  // The transport sentence keeps its bare spelling on every other engine.
+  const transport = "Colleagues only hear you when you call moltnet_send; your terminal response is a private note to the runtime, not a message to anyone — keep it to one line or leave it empty. Do not seek transport credentials or invoke a transport CLI unless the caller explicitly mounted an authenticated transport tool.";
+  for (const kind of ["codex", "agy"] as const) {
+    assert.ok(identityEnvelope(rootConfig("/private/org", kind), mounted).includes(`\n${transport}\n`), kind);
+    assert.equal(identityEnvelope(rootConfig("/private/org", kind), mounted).includes(DAIMON_GROK_TOOL_PREFIX), false, kind);
+  }
 });
