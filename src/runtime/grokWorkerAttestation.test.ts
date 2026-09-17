@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, mkdtemp, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -220,8 +220,9 @@ test("refuses a sandbox profile that is not root-owned, and one reached through 
   const text = `[profiles.daimon-strict]\nextends = "strict"\nrestrict_network = true\ndeny = []\n`;
   await writeFile(profile, text);
   await chmod(profile, 0o444);
-  const events = await eventsFile(dir);
-  const input = { profilePath: profile, eventsPath: events, profileSha256: sha256(text), workerUid: self.uid, brokerGid: self.gid };
+  await mkdir(path.join(dir, "sessions"));
+  const events = await eventsFile(path.join(dir, "sessions"));
+  const input = { profilePath: profile, eventsPath: events, profileSha256: sha256(text), workerUid: self.uid, brokerGid: self.gid, configSha256: "0".repeat(64) };
   // Owned by the test user rather than root: `secureOpen` must refuse it even
   // though its bytes hash correctly.
   await assert.rejects(prepareGrokWorkerAttestation(input), /attestation unavailable/u);
@@ -243,4 +244,29 @@ test("holds the kernel's reported deny_paths to exactly what the pinned profile 
     assert.throws(() => parseGrokWorkerProfileApplied(bytes(observed), workspace, ["/a", "/b"]), /attestation unavailable/u);
   }
   assert.throws(() => parseGrokWorkerProfileApplied(bytes(["/a"]), workspace, []), /attestation unavailable/u);
+});
+
+test("reads sandbox events only from the Grok 1.0.34 sessions log", async (t) => {
+  // Mutation-critical: 1.0.34 writes nothing to `$GROK_HOME/sandbox-events.jsonl`,
+  // so attesting that path would fail every turn as "not enforced" — or worse,
+  // accept a stale file. Restoring the old relation must turn this red.
+  const dir = await workspaceDir();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const input = { profilePath: path.join(dir, "sandbox.toml"), profileSha256: "0".repeat(64), workerUid: self.uid, brokerGid: self.gid, configSha256: "0".repeat(64) };
+  await assert.rejects(prepareGrokWorkerAttestation({ ...input, eventsPath: path.join(dir, "sandbox-events.jsonl") }), /sessions\/sandbox-events\.jsonl/u);
+  await assert.rejects(prepareGrokWorkerAttestation({ ...input, eventsPath: path.join(dir, "sessions", "sandbox-events.jsonl") }), /attestation unavailable/u);
+});
+
+test("attests real Grok 1.0.34 events: ProfileApplied with a non-empty deny list, then the denial it caused", async (t) => {
+  const fixture = await readFile(new URL("./fixtures/grok-1.0.34-sandbox-events.jsonl", import.meta.url));
+  const liveWorkspace = "/var/lib/spawnfile/instance/workspace/agents/a1";
+  assert.doesNotThrow(() => parseGrokWorkerProfileApplied(fixture, liveWorkspace, ["/run/paideia"]));
+  assert.throws(() => parseGrokWorkerProfileApplied(fixture, liveWorkspace, []), /attestation unavailable/u);
+  assert.throws(() => parseGrokWorkerProfileApplied(fixture, liveWorkspace, ["/run/paideia", "/run/training"]), /attestation unavailable/u);
+  const dir = await workspaceDir();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = await eventsFile(dir);
+  const before = await watermark(file, ["/run/paideia"]);
+  await appendFile(file, fixture);
+  await verifyGrokWorkerAttestation({ eventsPath: file, workerUid: self.uid, brokerGid: self.gid, workspace: liveWorkspace }, before);
 });

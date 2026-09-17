@@ -1,17 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import { readChild } from "./cliChildOutput.js";
 import { cliChildEnvironment } from "./cliEnvironment.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import { renderGrokSandboxArgs } from "./cliEngineSpawn.js";
+import { GROK_WORKER_SANDBOX_EVENTS_RELATIVE_PATH, GROK_WORKER_SANDBOX_PROFILE, renderGrokWorkerSandboxProfile } from "../runtime/grokWorkerSandboxProfile.js";
 
-export const GROK_DAIMON_SANDBOX_PROFILE = "daimon-strict";
+export const GROK_DAIMON_SANDBOX_PROFILE = GROK_WORKER_SANDBOX_PROFILE;
 const SANDBOX_CONFIG = "sandbox.toml";
-const SANDBOX_EVENTS = "sandbox-events.jsonl";
+/** Grok 1.0.34 logs sandbox events under `sessions/`; the root file stays empty. */
+const SANDBOX_EVENTS = GROK_WORKER_SANDBOX_EVENTS_RELATIVE_PATH;
 const MAX_EVENTS_BYTES = 16 * 1024 * 1024;
 const ROTATE_EVENTS_BYTES = 8 * 1024 * 1024;
 
@@ -61,13 +63,7 @@ export async function prepareAndVerifyGrokSandbox(
   await verifyProfile(engineHome, denied);
 }
 
-const profileText = (denied: readonly string[]): string => [
-  `[profiles.${GROK_DAIMON_SANDBOX_PROFILE}]`,
-  'extends = "strict"',
-  "restrict_network = true",
-  `deny = [${denied.map((entry) => JSON.stringify(entry)).join(", ")}]`,
-  ""
-].join("\n");
+const profileText = (denied: readonly string[]): string => renderGrokWorkerSandboxProfile(denied);
 
 async function writeProfile(engineHome: string, denied: readonly string[]): Promise<void> {
   const target = path.join(engineHome, SANDBOX_CONFIG);
@@ -155,6 +151,7 @@ async function eventFileSize(file: string): Promise<number> {
     return Number(entry.size);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      await mkdir(path.dirname(file), { mode: 0o700, recursive: true });
       const handle = await open(file, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollow(), 0o600);
       try { await handle.sync(); } finally { await handle.close(); }
       await syncDirectory(path.dirname(file));

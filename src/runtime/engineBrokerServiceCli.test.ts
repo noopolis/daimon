@@ -11,5 +11,8 @@ test("rejects caller-selected commands, duplicate identities, and traversal",()=
   assert.throws(()=>parseEngineBrokerServiceConfig({...base,grokCommand:"evil"}));
   assert.throws(()=>parseEngineBrokerServiceConfig({...base,turnStore:"/var/lib/../secret"}));
   assert.throws(()=>parseEngineBrokerServiceConfig({...base,registrations:[reg("agent-a",0),reg("agent-a",1)]}));
+  // Grok 1.0.34 logs sandbox events under $GROK_HOME/sessions/; the 1.0.13 root path stays empty and must not be attested.
+  assert.throws(()=>parseEngineBrokerServiceConfig({...base,registrations:[{...reg("agent-a",0),eventsPath:"/workers/0/.grok/sandbox-events.jsonl"}]}));
+  assert.throws(()=>parseEngineBrokerServiceConfig({...base,registrations:[{...reg("agent-a",0),eventsPath:"/workers/1/.grok/sessions/sandbox-events.jsonl"}]}));
 });
-const reg=(agentId:string,slot:number)=>({agentId,slot,workerUid:2200+slot,workspace:`/workspace/${slot}`,profilePath:`/workers/${slot}/.grok/sandbox.toml`,eventsPath:`/workers/${slot}/.grok/sandbox-events.jsonl`,profileSha256:"a".repeat(64)});
+const reg=(agentId:string,slot:number)=>({agentId,slot,workerUid:2200+slot,workspace:`/workspace/${slot}`,profilePath:`/workers/${slot}/.grok/sandbox.toml`,eventsPath:`/workers/${slot}/.grok/sessions/sandbox-events.jsonl`,profileSha256:"a".repeat(64)});

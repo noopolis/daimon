@@ -45,7 +45,8 @@ test("rejects a protected root overlapping the selected agent workspace", async 
 test("rotates its private enforcement receipt before the bounded log is exhausted", async () => {
   const fixture = await createFixture();
   try {
-    const events = path.join(fixture.engineHomePath, "sandbox-events.jsonl");
+    const events = path.join(fixture.engineHomePath, "sessions", "sandbox-events.jsonl");
+    await mkdir(path.dirname(events), { mode: 0o700 });
     await writeFile(events, "x".repeat(8 * 1024 * 1024), { mode: 0o600 });
     await prepareAndVerifyGrokSandbox(fixture.authority);
     assert.ok((await readFile(events)).byteLength < 64 * 1024);
@@ -75,8 +76,8 @@ const profile=fs.readFileSync(path.join(home,"sandbox.toml"),"utf8");
 const deny=JSON.parse(profile.split("\\n").find((line)=>line.startsWith("deny = ")).slice(7));
 const observed=${JSON.stringify(mode)}==="drop-deny"?deny.slice(1):deny;
 const event={event_type:"ProfileApplied",profile:"${GROK_DAIMON_SANDBOX_PROFILE}",workspace:fs.realpathSync(args[args.indexOf("--cwd")+1]),platform:"linux/landlock",enforced:${JSON.stringify(mode)}!=="unenforced",restrict_network:true,deny_paths:observed};
-fs.appendFileSync(path.join(home,"sandbox-events.jsonl"),JSON.stringify(event)+"\\n",{mode:0o600});
-fs.chmodSync(path.join(home,"sandbox-events.jsonl"),0o600);
+fs.appendFileSync(path.join(home,"sessions","sandbox-events.jsonl"),JSON.stringify(event)+"\\n",{mode:0o600});
+fs.chmodSync(path.join(home,"sessions","sandbox-events.jsonl"),0o600);
 `);
   await chmod(command, 0o700);
   return {

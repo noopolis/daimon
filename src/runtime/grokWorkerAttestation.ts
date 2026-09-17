@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat,open } from "node:fs/promises";
+import path from "node:path";
+
+import { verifyGrokWorkerHome } from "./grokWorkerHomeAttestation.js";
+import { grokWorkerEventsPathFor } from "./grokWorkerSandboxProfile.js";
 
 /**
  * The per-turn freshness watermark taken before the worker is launched: the
@@ -15,15 +19,13 @@ export class GrokWorkerAttestationFailure extends Error { constructor(readonly f
  * Reads the `deny` list out of a worker sandbox profile, but only after the
  * bytes match `profileSha256` exactly.
  *
- * There is no minimum length. The floor used to be 3 (subscription realm,
- * bootstrap credential, peer roots), then 1, and an empty list is now the
- * *expected* shape: Grok 1.0.13 re-execs itself inside bubblewrap whenever
- * `deny` is non-empty and then opens each deny-path placeholder — which it
- * created at mode 000 — from a capability-stripped process, gets EACCES, and
- * refuses to start ("possible __GROK_INSIDE_BWRAP spoof") without ever
- * emitting a `ProfileApplied` event. Spawnfile therefore renders `deny = []`
- * and confines the worker with unix permissions plus builtin-`strict`
- * Landlock instead (`containerDaimonBrokerRender.ts`).
+ * There is no minimum length, and a populated list is supported. Grok 1.0.13
+ * refused to start on any non-empty `deny` (its mode-000 placeholders failed
+ * an EACCES "__GROK_INSIDE_BWRAP spoof" check), so deployments rendered
+ * `deny = []`. Grok 1.0.34 runs every profile inside bubblewrap and enforces a
+ * non-empty list, and since its strict base reads all of `/run`, `/var` and
+ * `/tmp`, the deny list is what keeps evaluator and host-bind paths away from
+ * the worker. `grokWorkerSandboxProfile.ts` renders these bytes.
  *
  * The integrity guarantee is the hash pin, not the length. `profileSha256`
  * comes from `/etc/daimon-engine-broker/service.json`, which the root
@@ -52,8 +54,17 @@ export function parseGrokWorkerSandboxProfile(bytes:Uint8Array,profileSha256:str
   if(!Array.isArray(parsed)||parsed.some((entry)=>typeof entry!=="string")||new Set(parsed).size!==parsed.length)throw new Error("Grok worker isolation attestation unavailable");
   return [...parsed as string[]].sort();
 }
-export async function prepareGrokWorkerAttestation(input:Readonly<{profilePath:string;eventsPath:string;profileSha256:string;workerUid:number;brokerGid:number}>):Promise<Snapshot>{
+/**
+ * Pre-launch half of the per-turn attestation. Besides the pinned profile and
+ * the events watermark it requires the 1.0.34 layout: events under
+ * `$GROK_HOME/sessions/` (the root `sandbox-events.jsonl` stays empty on
+ * 1.0.34), and a root-owned read-only worker home whose `config.toml` hashes to
+ * the declared renderer output (`grokWorkerHomeAttestation.ts`).
+ */
+export async function prepareGrokWorkerAttestation(input:Readonly<{profilePath:string;eventsPath:string;profileSha256:string;workerUid:number;brokerGid:number;configSha256:string}>):Promise<Snapshot>{
+  if(input.eventsPath!==grokWorkerEventsPathFor(input.profilePath))throw new Error("Grok worker sandbox events must be read from $GROK_HOME/sessions/sandbox-events.jsonl");
   const profile=await secureOpen(input.profilePath,0,0,0o444,65_536);let bytes:Buffer|undefined;let denyPaths:readonly string[]=[];try{bytes=await profile.readFile();denyPaths=parseGrokWorkerSandboxProfile(bytes,input.profileSha256);}catch{throw new Error("Grok worker isolation attestation unavailable");}finally{bytes?.fill(0);await profile.close();}
+  await verifyGrokWorkerHome(path.dirname(input.profilePath),input.configSha256);
   const events=await secureOpen(input.eventsPath,input.workerUid,input.brokerGid,0o640,16*1024*1024);try{const stat=await events.stat();return{dev:Number(stat.dev),ino:Number(stat.ino),size:Number(stat.size),mtimeMs:Number(stat.mtimeMs),denyPaths};}finally{await events.close();}
 }
 export async function verifyGrokWorkerAttestation(input:Readonly<{eventsPath:string;workerUid:number;brokerGid:number;workspace:string}>,before:Snapshot):Promise<void>{
@@ -63,14 +74,16 @@ export async function verifyGrokWorkerAttestation(input:Readonly<{eventsPath:str
  * Requires one fully-conforming `ProfileApplied` event *somewhere* in the
  * fresh region — not as its last line.
  *
- * `sandbox-events.jsonl` is not a profile log. Grok 1.0.13 writes its whole
+ * `sandbox-events.jsonl` is not a profile log. Grok (1.0.13 and 1.0.34) writes its whole
  * sandbox event vocabulary there — verified by reading the shipped binary:
  * `ProfileApplied, ApplyFailed, FsViolation, NetViolation, BypassGranted,
  * BypassDenied` (one contiguous enum blob beside the record fields
  * `timestamp, event_type, read_only_paths, deny_paths, operation, target,
  * command, tool_call_id`, emitted from `xai_grok_sandbox::logging`), and its
  * own embedded documentation says so outright: "Sandbox events (profile
- * applied, violations) are logged to `~/.grok/sandbox-events.jsonl`".
+ * applied, violations) are logged to `~/.grok/sandbox-events.jsonl`" (1.0.34
+ * moved the file to `~/.grok/sessions/`; a 1.0.34 turn logs `ProfileApplied`
+ * followed by an `FsViolation` for every denied read).
  *
  * Requiring `ProfileApplied` to be the *last* line therefore failed on the
  * first denied access of any turn: the violation Grok logged next became the
