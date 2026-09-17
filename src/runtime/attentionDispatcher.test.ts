@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { AttentionDispatcher } from "./attentionDispatcher.js";
+import { AttentionDispatcher, inboxPrompt } from "./attentionDispatcher.js";
 import { DAIMON_GROK_TOOL_PREFIX, grokDaimonToolName } from "../contracts/grokWorkerContract.js";
 import { createOrganizationRuntimeHost } from "./organizationRuntimeHost.js";
 import { WakeAcceptanceStore, WakeExecutionClaimLostError } from "./wakeAcceptanceStore.js";
@@ -242,4 +242,24 @@ test("every other engine's inbox turn keeps the bare tool names", async () => {
     assert.ok(text.includes("with daimon_inbox_disposition (complete)"));
     assert.equal(text.includes(DAIMON_GROK_TOOL_PREFIX), false);
   } finally { await f.cleanup(); }
+});
+
+/**
+ * Every branch of the inbox prompt, not only the one a small delivery takes:
+ * the oversized-payload fallback is the branch a busy agent meets, and it names
+ * `daimon_inbox` too.
+ */
+test("every branch of the inbox prompt names its tools the way the engine can call them", () => {
+  const delivery = { acceptance_id: "a-1", delivery_id: "d-1", kind: "message", text: "Do the thing", occurred_at: "2026-09-11T00:00:00.000Z" };
+  const oversized = { ...delivery, text: "x".repeat(2_000) };
+  for (const [messages, budget] of [[[delivery], 12_000], [[oversized], 64], [[oversized], 8]] as const) {
+    const grok = inboxPrompt(messages, "grok", budget), codex = inboxPrompt(messages, "codex", budget);
+    // Mutation guard: an unprefixed branch leaves a bare name in the Grok text.
+    assert.equal(grok.split("daimon_inbox").length - 1, grok.split(DAIMON_GROK_TOOL_PREFIX).length - 1, grok);
+    assert.ok(grok.includes(grokDaimonToolName("daimon_inbox")), grok);
+    assert.equal(codex.includes(DAIMON_GROK_TOOL_PREFIX), false, codex);
+    assert.ok(codex.includes("daimon_inbox"), codex);
+  }
+  // The smallest budget is the fallback that only points at the tool.
+  assert.match(inboxPrompt([oversized], "grok", 8), new RegExp(`exceeds the prompt budget; read it with ${grokDaimonToolName("daimon_inbox")}\\.$`, "u"));
 });

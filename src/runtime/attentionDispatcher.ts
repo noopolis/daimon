@@ -202,7 +202,7 @@ function deliveryBlock(message: unknown, index: number): string | undefined {
  * cannot mark its work complete — and an unmarked, finished wake is recorded as
  * deferred.
  */
-function inboxPrompt(messages: readonly unknown[], engine: OrganizationRuntimeAgentConfig["engine"]["kind"], maxBytes = 12000): string {
+export function inboxPrompt(messages: readonly unknown[], engine: OrganizationRuntimeAgentConfig["engine"]["kind"], maxBytes = 12000): string {
   const body = JSON.stringify(messages);
   const blocks = messages.map(deliveryBlock).filter((block): block is string => block !== undefined);
   const tool = (name: string): string => engine === "grok" ? grokDaimonToolName(name) : name;
@@ -221,7 +221,7 @@ function inboxPrompt(messages: readonly unknown[], engine: OrganizationRuntimeAg
   const prefix = `Handle this inbox turn. Use ${tool("daimon_inbox")} for deliveries and remaining allowances. Explicitly call ${tool("daimon_inbox_disposition")} for each handled delivery (complete) or unfinished delivery (defer). Reading or ending this turn never completes a delivery. Deferred work waits for a later external wake.\n`;
   const prompt = prefix + body;
   if (Buffer.byteLength(body) > maxBytes || !fits(prompt)) {
-    return prefix + "The selected payload exceeds the prompt budget; read it with daimon_inbox.";
+    return prefix + `The selected payload exceeds the prompt budget; read it with ${tool("daimon_inbox")}.`;
   }
   return prompt;
 }
