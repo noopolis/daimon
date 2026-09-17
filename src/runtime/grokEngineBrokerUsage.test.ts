@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +13,8 @@ import { EngineBrokerTurnRegistry } from "./engineBrokerTurnRegistry.js";
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
 import { EngineBrokerTurnFailure, runGrokEngineBrokerTurn, type GrokEngineBrokerTurnDependencies } from "./grokEngineBrokerTurn.js";
 import { TURN_REQUEST_LEDGER_VERSION } from "./turnRequestLedger.js";
-import { TURN_USAGE_LEDGER_VERSION } from "./turnUsageLedger.js";
+import { dedupeTurnUsageRows, TURN_USAGE_LEDGER_VERSION } from "./turnUsageLedger.js";
+import { WakeFuse } from "./wakeFuse.js";
 
 const lean = ["run_terminal_command", "read_file", "list_dir", "grep", "search_tool", "use_tool"].map((name) => ({ type: "function", function: { name } }));
 const leanBody = JSON.stringify({ model: "grok-4.6", reasoning_effort: "low", stream: true, messages: [], tools: lean });
@@ -201,6 +202,30 @@ test("a directory-sync failure after the completed record is published never re-
     const replayed = await turn("wake-10", async () => { throw new Error("a replay runs no worker"); });
     assert.deepEqual(replayed, result);
     assert.equal((await usageRows()).length, 1);
+  });
+});
+
+test("two concurrent replays of one sealed turn may both append, and every reader still counts the turn once", async () => {
+  await withBroker(async ({ root, turn, usageRows }) => {
+    await turn("wake-11", twoRequests);
+    const [sealed] = await usageRows();
+    await rm(path.join(root, "usage.jsonl")); await rm(path.join(root, "requests.jsonl"));
+    const noWorker = async (): Promise<string> => { throw new Error("a replay runs no worker"); };
+    const replays = await Promise.all([turn("wake-11", noWorker), turn("wake-11", noWorker), turn("wake-11", noWorker)]);
+    assert.ok(replays.every((replayed) => replayed.outcome === "completed"));
+    const rows = await usageRows();
+    assert.ok(rows.length >= 1 && rows.every((row) => row.turn === sealed!.turn && row.total === sealed!.total), "duplicates, if any, are byte-equal sealed rows");
+    // Readers dedupe on `turn`: the ledger helper and the wake fuse's sum both count it once.
+    assert.deepEqual(dedupeTurnUsageRows(rows).map((row) => row.total), [sealed!.total]);
+    const fuseDirectory = path.join(root, "fuse"); await mkdir(fuseDirectory);
+    const fuse = await WakeFuse.open({ organizationKey: "org", now: () => new Date(Date.parse(String(sealed!.at)) - 1), environment: {
+      DAIMON_WAKE_FUSE_DIRECTORY: fuseDirectory, DAIMON_WAKE_FUSE_EPOCH: "replay", DAIMON_WAKE_FUSE_MAX_WAKES: "10",
+      DAIMON_WAKE_FUSE_MAX_TOKENS: String(Number(sealed!.total) + 1), DAIMON_TURN_USAGE_LEDGER_PATH: path.join(root, "usage.jsonl")
+    } });
+    // Counted once the turn is below the ceiling by one token; counted twice it would trip.
+    const concurrentRows = [...rows, ...rows];
+    await writeFile(path.join(root, "usage.jsonl"), concurrentRows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    assert.deepEqual(await fuse.admit("foreman", "next"), { state: "admitted" });
   });
 });
 

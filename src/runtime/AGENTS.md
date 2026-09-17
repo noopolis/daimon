@@ -57,7 +57,13 @@ numeric-only accounting (`usage`, `outcome`, declared `model`, `requests`,
 closed `limitReason`) *and the exact ledger bytes it owes*, and only then are
 those bytes appended. A replay returns the sealed accounting and never meters
 again; it only appends the sealed bytes when the ledger has no row for that
-`turn` (a crash between seal and append). The window not closed: a crash
+`turn` (a crash between seal and append). Two replays of one sealed turn in
+the same broker may both append those identical bytes (a second broker cannot
+exist: the realm lease is an exclusive lock), so **every ledger consumer —
+`wakeFuse.ts`, Spawnfile's reader (P3), Paideia's evidence reader (P4) — MUST
+dedupe usage rows by `turn`** (`dedupeTurnUsageRows`). The turn record's rename
+is its publish point: a directory-sync failure after it is reported, never
+raised, so a published completed turn is never re-sealed as failed. The window not closed: a crash
 before the record's rename seals the turn `failed` with `usage: null` on the
 next boot. Once a completed record is sealed, nothing after it can re-seal the
 turn as failed. v1 records still replay (upgraded with `usage: null`). Completed usage is the terminal `result.usage`;
