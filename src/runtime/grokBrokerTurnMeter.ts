@@ -21,32 +21,47 @@ export type GrokBrokerTurnMeterSnapshot = Readonly<{ requests: number; tokens: n
  *
  * The first limit that fires is sticky: every later request is refused with
  * the same reason, and `onLimit` runs once.
+ *
+ * The token bound is only a bound if no request can be admitted on a total
+ * that an in-flight request has not yet reported into. So a turn has at most
+ * ONE upstream request in flight: a second request arriving before the first
+ * settled is refused (`busy`, HTTP 429) without being counted or tripping a
+ * limit. Grok's headless loop is sequential — every live capture (P1
+ * live-round1, P2 live) shows each request ending before the next starts — so
+ * this refuses only a worker that is not behaving like Grok. Tripping a limit
+ * (including the broker's timer) aborts that in-flight upstream call through
+ * its own `AbortSignal` rather than letting it run to completion.
  */
 export class GrokBrokerTurnMeter {
   private readonly startedAt: number;
   private readonly timings: { startedAt: string; endedAt?: string; usage?: EngineBrokerTurnUsage }[] = [];
   private tokens = 0;
   private reason: EngineBrokerLimitReason = "none";
+  private inFlight: { index: number; controller: AbortController } | undefined;
   constructor(readonly limits: EngineBrokerTurnLimits, private readonly onLimit: (reason: Exclude<EngineBrokerLimitReason, "none">) => void = () => undefined, private readonly now: () => number = Date.now) {
     this.startedAt = now();
   }
 
-  /** Returns the request index when admitted, or the limit that refused it. */
-  admit(): Readonly<{ index: number } | { refused: Exclude<EngineBrokerLimitReason, "none"> }> {
+  /** Returns the request index and its upstream abort signal when admitted, the limit that refused it, or `busy` while another request is in flight. */
+  admit(): Readonly<{ index: number; signal: AbortSignal } | { refused: Exclude<EngineBrokerLimitReason, "none"> } | { busy: true }> {
     if (this.reason === "none") {
       if (this.now() - this.startedAt >= this.limits.timeoutMs) this.trip("timeout");
       else if (this.timings.length >= this.limits.maxRequests) this.trip("requests");
       else if (this.tokens >= this.limits.maxTokens) this.trip("tokens");
     }
     if (this.reason !== "none") return { refused: this.reason };
+    if (this.inFlight !== undefined) return { busy: true };
     this.timings.push({ startedAt: new Date(this.now()).toISOString() });
-    return { index: this.timings.length - 1 };
+    const controller = new AbortController();
+    this.inFlight = { index: this.timings.length - 1, controller };
+    return { index: this.inFlight.index, signal: controller.signal };
   }
 
   /** Records one admitted request's end and its upstream-reported usage, when the body carried any. */
   settle(index: number, usage: EngineBrokerTurnUsage | undefined): void {
     const timing = this.timings[index];
     if (timing === undefined || timing.endedAt !== undefined) return;
+    if (this.inFlight?.index === index) this.inFlight = undefined;
     timing.endedAt = new Date(this.now()).toISOString();
     if (usage === undefined) return;
     timing.usage = usage;
@@ -57,8 +72,12 @@ export class GrokBrokerTurnMeter {
   trip(reason: Exclude<EngineBrokerLimitReason, "none">): void {
     if (this.reason !== "none") return;
     this.reason = reason;
+    this.abortInFlight();
     this.onLimit(reason);
   }
+
+  /** Aborts the in-flight upstream call, if any (limit trip, or the broker ending the turn). */
+  abortInFlight(): void { this.inFlight?.controller.abort(); }
 
   snapshot(): GrokBrokerTurnMeterSnapshot {
     const measured = this.timings.flatMap((timing) => timing.usage === undefined ? [] : [timing.usage]);

@@ -89,7 +89,7 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     await finishBrokerTurnWithUsage(deps.turns, request, failed, metering, { notionalUsd: 0, complete: false, reason, requests: requestRows(stream, snapshot), ...(stream?.sessionId === undefined ? {} : { session: stream.sessionId }) });
     throw new EngineBrokerTurnFailure(code, diagnostic, accounting);
   } finally {
-    clearTimeout(timer); signal?.removeEventListener("abort", onAbort);
+    clearTimeout(timer); signal?.removeEventListener("abort", onAbort); meter.abortInFlight();
     deps.proxy.revokeTurn(turnId); deps.proxy.revokeIsolationGuard(turnId); deps.proxy.capabilities.revoke(turnId); deps.mcp.revoke(turnId);
   }
 }

@@ -10,7 +10,7 @@ import { parseGrokUpstreamUsage, type GrokBrokerTurnMeter } from "./grokBrokerTu
 export type GrokBrokerProxyTurn = Readonly<{ policy: GrokBrokerModelPolicy; meter: GrokBrokerTurnMeter }>;
 
 export type GrokBrokerCredentialAuthority = Readonly<{ accessToken(forceRefresh: boolean): Promise<string>; refreshAfterRejection?(rejectedTokenDigest:string):Promise<string>; markRejected(rejectedTokenDigest?:string): Promise<void> }>;
-export type GrokBrokerUpstream = (request: ReturnType<typeof authorizeGrokBrokerProxyRequest>) => Promise<Readonly<{ status: number; headers: Readonly<Record<string, string>>; body: Uint8Array }>>;
+export type GrokBrokerUpstream = (request: ReturnType<typeof authorizeGrokBrokerProxyRequest>, signal?: AbortSignal) => Promise<Readonly<{ status: number; headers: Readonly<Record<string, string>>; body: Uint8Array }>>;
 
 /**
  * `policy` is the fallback declared model/effort (closed list); a registered
@@ -36,12 +36,13 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     // (a refused session-title body never counts) and before any upstream call.
     const admission=turn.meter.admit();
     if("refused" in admission){response.writeHead(429,{"content-type":"application/json","cache-control":"no-store"});response.end(JSON.stringify({error:"turn limit reached",limit:admission.refused}));return;}
+    if("busy" in admission){response.writeHead(429,{"content-type":"application/json","cache-control":"no-store"});response.end('{"error":"turn request in flight"}');return;}
     settle=(usage)=>{turn.meter.settle(admission.index,usage);settle=undefined;};
-    let result = await upstream(prepared);
-    if (result.status === 401) { token = authority.refreshAfterRejection?await authority.refreshAfterRejection(rejectedDigest):await authority.accessToken(true);const refreshedDigest=createHash("sha256").update(token).digest("hex"); prepared = { ...prepared, headers: { ...prepared.headers, authorization: `Bearer ${token}` } }; token = ""; result = await upstream(prepared);if(result.status===401)await authority.markRejected(refreshedDigest); }
+    let result = await upstream(prepared,admission.signal);
+    if (result.status === 401) { token = authority.refreshAfterRejection?await authority.refreshAfterRejection(rejectedDigest):await authority.accessToken(true);const refreshedDigest=createHash("sha256").update(token).digest("hex"); prepared = { ...prepared, headers: { ...prepared.headers, authorization: `Bearer ${token}` } }; token = ""; result = await upstream(prepared,admission.signal);if(result.status===401)await authority.markRejected(refreshedDigest); }
     settle?.(parseGrokUpstreamUsage(result.body,result.headers["content-type"]));
     response.writeHead(result.status, { "content-type": result.headers["content-type"] ?? "application/json", "cache-control": "no-store" }); response.end(result.body);
   } catch { settle?.(undefined); response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" }); response.end('{"error":"broker unavailable"}'); }
 }
 async function readBody(request: IncomingMessage): Promise<Buffer> { const chunks: Buffer[] = []; let bytes = 0; for await (const chunk of request) { const value = Buffer.from(chunk); bytes += value.length; if (bytes > 2 * 1024 * 1024) throw new Error("too large"); chunks.push(value); } return Buffer.concat(chunks); }
-const defaultUpstream: GrokBrokerUpstream = async (request) => { const result = await fetch(request.url, { method: "POST", headers: request.headers, body: Buffer.from(request.body) }); return { status: result.status, headers: { "content-type": result.headers.get("content-type") ?? "application/json" }, body: new Uint8Array(await result.arrayBuffer()) }; };
+const defaultUpstream: GrokBrokerUpstream = async (request, signal) => { const result = await fetch(request.url, { method: "POST", headers: request.headers, body: Buffer.from(request.body), ...(signal === undefined ? {} : { signal }) }); return { status: result.status, headers: { "content-type": result.headers.get("content-type") ?? "application/json" }, body: new Uint8Array(await result.arrayBuffer()) }; };
