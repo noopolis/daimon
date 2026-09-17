@@ -114,7 +114,7 @@ export const grokBrokerWorkerConfigSha256 = (policy: Partial<GrokBrokerModelPoli
 
 /**
  * TypeScript mirror of the argv compiled into `native/engineBrokerLauncherCore.inc`.
- * `grokWorkerArgv.test.ts` parses the C source and fails on any divergence.
+ * `native/launcherArgv.test.ts` parses the C source and fails on any divergence.
  */
 export const renderGrokBrokerWorkerArgs = (promptFile: string, cwd: string): readonly string[] => {
   if (!path.posix.isAbsolute(promptFile) || !path.posix.isAbsolute(cwd)) throw new TypeError("invalid Grok broker worker path");
