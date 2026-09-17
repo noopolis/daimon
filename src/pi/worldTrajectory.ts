@@ -5,6 +5,7 @@ import path from "node:path";
 import type { PiTurnTraceModel } from "./turnTrace.js";
 import { redactTraceText, sanitizeTraceFileId } from "./turnTrace.js";
 import type { PiWorldTurnContext } from "./worldNudge.js";
+import { RUNTIME_HOME_SUBDIRECTORY_MODE } from "../runtime/runtimeHomeLayout.js";
 
 export const WORLD_TRAJECTORY_SCHEMA = "daimon.world_trajectory.v1" as const;
 
@@ -189,7 +190,7 @@ export const persistPiWorldTrajectory = async (
   };
   const telemetryPath = path.join(input.runtimeHomePath, "telemetry");
   const trajectoriesPath = path.join(telemetryPath, "world-trajectories");
-  await mkdir(trajectoriesPath, { recursive: true });
+  await mkdir(trajectoriesPath, { recursive: true, mode: RUNTIME_HOME_SUBDIRECTORY_MODE });
   const bytes = `${JSON.stringify(record, null, 2)}\n`;
   await writeFile(
     path.join(trajectoriesPath, `${sanitizeTraceFileId(input.turnId)}.json`),

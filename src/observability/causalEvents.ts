@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { appendFile, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
+import { RUNTIME_HOME_SUBDIRECTORY_MODE } from "../runtime/runtimeHomeLayout.js";
 
 /**
  * Daimon's own copy of the `noopolis.causal-event.v1` wire envelope. Field-
@@ -107,7 +108,7 @@ const readSeqStore = async (runtimeHomePath: string): Promise<CausalSeqStore> =>
 
 const writeSeqStore = async (runtimeHomePath: string, store: CausalSeqStore): Promise<void> => {
   const directory = telemetryDir(runtimeHomePath);
-  await mkdir(directory, { recursive: true });
+  await mkdir(directory, { recursive: true, mode: RUNTIME_HOME_SUBDIRECTORY_MODE });
   const file = seqFilePath(runtimeHomePath);
   const temporary = `${file}.${randomUUID()}.tmp`;
   const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
@@ -182,7 +183,7 @@ export const nextCausalSeq = async (input: {
   const lockPath = path.resolve(telemetryDir(input.runtimeHomePath), "causal.seq.lock");
   const previous = seqAllocationQueues.get(lockPath) ?? Promise.resolve();
   const allocation = previous.catch(() => undefined).then(async () => {
-    await mkdir(telemetryDir(input.runtimeHomePath), { recursive: true });
+    await mkdir(telemetryDir(input.runtimeHomePath), { recursive: true, mode: RUNTIME_HOME_SUBDIRECTORY_MODE });
     await acquireSeqLock(lockPath);
     try {
       const store = await readSeqStore(input.runtimeHomePath);
@@ -207,7 +208,7 @@ export const nextCausalSeq = async (input: {
 
 /** Appends one CausalEvent record as a line of `runtimeHome/telemetry/causal.jsonl`. */
 export const appendCausalEvent = async (runtimeHomePath: string, event: CausalEvent): Promise<void> => {
-  await mkdir(telemetryDir(runtimeHomePath), { recursive: true });
+  await mkdir(telemetryDir(runtimeHomePath), { recursive: true, mode: RUNTIME_HOME_SUBDIRECTORY_MODE });
   await appendFile(jsonlFilePath(runtimeHomePath), `${JSON.stringify(event)}\n`, "utf8");
 };
 

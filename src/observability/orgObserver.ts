@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { MemoryRecallAudit } from "@noopolis/mneme";
+import { RUNTIME_HOME_SUBDIRECTORY_MODE } from "../runtime/runtimeHomeLayout.js";
 
 export interface WakeBenchRow {
   agent: string;
@@ -207,7 +208,7 @@ export class OrgObserver {
 
   async write(runtimeRoot: string): Promise<void> {
     const telemetryDir = path.join(runtimeRoot, "telemetry");
-    await mkdir(telemetryDir, { recursive: true });
+    await mkdir(telemetryDir, { recursive: true, mode: RUNTIME_HOME_SUBDIRECTORY_MODE });
     const summaryRecord = {
       assertions: this.assertions,
       behavior: this.behaviorSummary(),

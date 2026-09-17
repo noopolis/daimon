@@ -35,6 +35,7 @@ import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
 import type { PiSessionFactoryInput } from "./piHarness.js";
+import { RUNTIME_HOME_SUBDIRECTORY_MODE } from "../runtime/runtimeHomeLayout.js";
 
 export type CliEngineKind = "agy" | "codex" | "grok";
 
@@ -145,7 +146,7 @@ export const prepareCliRuntimeHome = async (runtimeHomePath: string | undefined)
     `${runtimeHomePath}/.local/state`,
     `${runtimeHomePath}/.cache`,
     `${runtimeHomePath}/.tmp`
-  ].map((directory) => mkdir(directory, { recursive: true })));
+  ].map((directory) => mkdir(directory, { recursive: true, mode: RUNTIME_HOME_SUBDIRECTORY_MODE })));
 };
 
 const childSecretValues = (redactedNames: readonly string[]): readonly string[] =>
