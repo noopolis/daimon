@@ -26,7 +26,11 @@ export type GrokInferenceClientConfigInput = Readonly<{ baseUrl: string; model: 
  * disabled, workflows off, the per-call `session_title` request pointed at a
  * hidden model with a placeholder key the proxy refuses before any credential
  * read or upstream call, and the declared effort as the model's single
- * effort. There is no MCP server. `baseUrl` is the `baseUrl` of the grant (the
+ * effort. There is no MCP server. `max_retries = 0`: with the default, a
+ * refused request (HTTP 503) is retried with backoff past a 45 s bound
+ * (live stub capture), so a gate refusal would hang the judge until its own
+ * timeout; with it the CLI fails in ~0.35 s and the caller's routed retry
+ * policy decides. HTTP 401 is never retried either way. `baseUrl` is the `baseUrl` of the grant (the
  * loopback provider proxy); the manifest pins the sha256 for the production
  * proxy URL and {@link GROK_INFERENCE_GRANT_ENV}.
  *
@@ -46,7 +50,7 @@ export function renderGrokInferenceClientConfig(input: GrokInferenceClientConfig
     "[models]", `default = "${GROK_INFERENCE_CLIENT_MODEL_ID}"`, `default_reasoning_effort = "${declared.reasoningEffort}"`, `session_summary = "${GROK_SESSION_TITLE_SINK_MODEL_ID}"`, "",
     `[model.${GROK_SESSION_TITLE_SINK_MODEL_ID}]`, 'model = "disabled"', `base_url = "${input.baseUrl}"`, `api_key = "${GROK_SESSION_TITLE_SINK_KEY}"`, "max_retries = 0", "hidden = true", "",
     `[model.${GROK_INFERENCE_CLIENT_MODEL_ID}]`, `model = "${declared.model}"`, `base_url = "${input.baseUrl}"`, `env_key = "${input.envKey}"`,
-    'api_backend = "chat_completions"', "context_window = 131072", "supports_backend_search = false", "",
+    'api_backend = "chat_completions"', "context_window = 131072", "supports_backend_search = false", "max_retries = 0", "",
     `[[model.${GROK_INFERENCE_CLIENT_MODEL_ID}.reasoning_efforts]]`, `value = "${declared.reasoningEffort}"`, `label = "${label}"`, "default = true", ""
   ].join("\n");
 }

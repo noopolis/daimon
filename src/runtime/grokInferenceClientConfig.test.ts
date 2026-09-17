@@ -11,7 +11,7 @@ const production = { baseUrl: "http://127.0.0.1:43123/v1", model: "grok-4.6", re
 test("the evaluator client config reaches only the grant proxy through env_key, with no MCP and no credential", () => {
   const config = renderGrokInferenceClientConfig(production);
   assert.match(config, /\[models\]\ndefault = "daimon-inference-grok"\ndefault_reasoning_effort = "low"\nsession_summary = "daimon-session-title-disabled"\n/u);
-  assert.match(config, /\[model\.daimon-inference-grok\]\nmodel = "grok-4\.6"\nbase_url = "http:\/\/127\.0\.0\.1:43123\/v1"\nenv_key = "DAIMON_INFERENCE_GRANT"\napi_backend = "chat_completions"\n/u);
+  assert.match(config, /\[model\.daimon-inference-grok\]\nmodel = "grok-4\.6"\nbase_url = "http:\/\/127\.0\.0\.1:43123\/v1"\nenv_key = "DAIMON_INFERENCE_GRANT"\napi_backend = "chat_completions"\ncontext_window = 131072\nsupports_backend_search = false\nmax_retries = 0\n/u);
   assert.match(config, /\[\[model\.daimon-inference-grok\.reasoning_efforts\]\]\nvalue = "low"\nlabel = "Low"\ndefault = true\n/u);
   assert.equal(config.match(/reasoning_efforts\]\]/gu)?.length, 1);
   assert.doesNotMatch(config, /mcp_servers|auth_provider|access_token|refresh_token/u);
