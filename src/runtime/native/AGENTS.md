@@ -46,3 +46,19 @@ bytes of the worker's merged stdout/stderr and sends them after the fixed
 frame, while `output_length` stays 0 as before. Every other failure sends none,
 and `closed_result` refuses a frame that mixes the two. The bytes are the
 worker's own, so the broker redacts them before they cross any boundary.
+
+**Known gap: that window is the wrong end.** A worker that dies early prints
+its error first and then echoes its own input, so a pure tail keeps the echo:
+the one live capture this has ever produced was 512 bytes of the agent's own
+prompt read back, with the error already off the front and erased here. The
+broker side now keeps both ends of whatever it is handed
+(`boundedDiagnosticWindow` in `../../pi/cliChildOutput.ts`, the same
+head-plus-marker-plus-tail shape as an oversized tool result), but it cannot
+recover a head this supervisor never sent. The fix belongs in
+`engineBrokerLauncherServer.inc`, where the full `used` bytes are still in
+hand at the point of the `memmove`: keep the first `DBL_MAX_DIAGNOSTIC / 2`
+bytes, then a marker naming the elided count, then the last
+`DBL_MAX_DIAGNOSTIC / 2`. It is a source change to a *pinned* artifact, so it
+lands only together with `node --import tsx src/runtime/native/build.ts` and a
+re-pin of `artifacts.sourceSha256`/`x64Sha256`/`arm64Sha256`;
+`artifactsManifest.test.ts` fails by design until the binaries are rebuilt.

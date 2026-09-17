@@ -116,7 +116,8 @@ const measure = (content: readonly unknown[], details: Record<string, unknown>):
   Buffer.byteLength(safeStringify({ content, structuredContent: details }), "utf8");
 
 /** Cut on a code-point boundary, from the front. */
-const headUtf8 = (value: string, maxBytes: number): string => {
+/** Exported for the bounded diagnostic window (`cliChildOutput.ts`): one boundary-safe implementation, not two. */
+export const headUtf8 = (value: string, maxBytes: number): string => {
   const bytes = Buffer.from(value, "utf8");
   if (bytes.byteLength <= maxBytes) return value;
   let end = Math.max(0, maxBytes);
@@ -125,7 +126,8 @@ const headUtf8 = (value: string, maxBytes: number): string => {
 };
 
 /** Cut on a code-point boundary, from the back. */
-const tailUtf8 = (value: string, maxBytes: number): string => {
+/** Exported for the bounded diagnostic window (`cliChildOutput.ts`): one boundary-safe implementation, not two. */
+export const tailUtf8 = (value: string, maxBytes: number): string => {
   const bytes = Buffer.from(value, "utf8");
   if (bytes.byteLength <= maxBytes) return value;
   let start = Math.max(0, bytes.byteLength - maxBytes);

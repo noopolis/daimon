@@ -89,7 +89,23 @@ prelaunch failure ran nothing. `engineBrokerNativeClient.ts` redacts that tail
 exactly as the CLI child path redacts a failed engine child
 (`redactCredentialText` with the turn's own provider/MCP capabilities as exact
 secrets, the same `CLI_ENGINE_MAX_DIAGNOSTIC_BYTES` bound) and flattens it to
-one line as `diagnostic.reason`. It is an optional, control-character-free
+one line as `diagnostic.reason`.
+
+Two rules that live capture taught, both cheap and both load bearing. The
+bytes are **decoded**, never stringified: `Uint8Array.prototype.toString("utf8")`
+ignores its argument and renders bytes as comma-separated decimals, and a
+worker's last words reached an operator as
+`reason=108,111,110,101,46,32,87,104,101,110,...` — a string, control-character
+free, inside the bound, and passing every check on the way out. So the frame is
+normalized to a `Buffer` once on entry and the diagnostic goes through an
+explicit `TextDecoder`, which also replaces rather than throws on the
+multi-byte sequence a byte-counted window can cut in half. And the window
+keeps **both ends** (`boundedDiagnosticWindow`): a worker that dies early
+prints its error before it echoes its input, so a pure tail is the echo. The
+marker is paid out of the same budget, and output that fits is returned
+byte-identical. The launcher's own 512-byte window is still tail-only — see
+`native/AGENTS.md`, it needs an artifact rebuild — so the head of a large blob
+is still lost before Daimon sees it. It is an optional, control-character-free
 member of the sealed terminal response's closed diagnostic — admitted by
 `engineBrokerProtocol.ts` only for the statuses where a worker ran and spoke —
 so it replays with the sealed record and reaches the operator through
