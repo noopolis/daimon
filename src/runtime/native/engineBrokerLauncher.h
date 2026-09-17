@@ -21,6 +21,12 @@
 #ifndef DBL_EXECUTABLE
 #define DBL_EXECUTABLE "/usr/local/bin/grok"
 #endif
+/* Lean Grok worker contract; mirrored byte-for-byte by src/contracts/grokWorkerContract.ts
+   and checked by launcherArgv.test.ts. */
+#define DBL_GROK_SYSTEM_PROMPT                                                 \
+  "You are a headless Daimon agent; no human is present. Your identity, instructions and wake event are in the user prompt. Daimon tools are MCP tools on server daimon: call a known one directly with use_tool (tool_name daimon__moltnet_read, daimon__moltnet_send, daimon__memory_search, daimon__memory_register, or another daimon__ name you were given); use search_tool only for a name you do not know. If a tool result says output was saved to a file, read that path with read_file. If a tool fails, do not retry it in a loop: stop and report the failure. Your final answer is a private note to the runtime: one line, or empty."
+#define DBL_GROK_TOOLS "run_terminal_cmd,read_file,grep,list_dir,search_tool,use_tool"
+#define DBL_GROK_MAX_TURNS "48"
 
 struct dbl_request {
   uint32_t version, slot;
