@@ -203,6 +203,18 @@ in `deny` (verified: `/tmp`, `/var/tmp`, `/run`, `/etc`, `sessions` all fail;
   only list names — `cat`/`read_file` get EACCES and it cannot create files.
   `1770`/`1771` make Grok refuse the profile; `1775`/`1777` leak. Any non-root
   process outside that group that needs temp space must get its own `TMPDIR`;
+- the organization runtime home of a brokered Grok agent is `2000:<worker gid>
+  0710` — traverse-only, so the worker can reach `tool-output/` and nothing
+  else. `physicalReadiness.ts` accepts exactly that shape for a `grok` agent
+  (owner the runtime user, mode `0710`, group a worker group that is not the
+  runtime's own) and keeps the plain `0700` rule for every other engine; wider
+  (`0711`, `0730`, `0750`, `0770`, any world bit, setgid) is refused, and so is
+  a `0700` home for a Grok agent, because its worker could not read its own
+  spills. Everything Daimon creates inside a runtime home is `0700`
+  (`runtimeHomeLayout.ts`: telemetry, turn traces, world trajectories,
+  `tool-state`, the engine XDG directories, `.tmp`), so a traversable home
+  still exposes nothing but `tool-output/`. A deployment-provisioned memory
+  home under that runtime home must stay `0700` for the same reason;
 - spills (`toolResultSpill.ts`) are written `0640`; provision
   `<runtimeHome>/tool-output` as `2000:<worker gid> 2750` (setgid) under a
   runtime home the worker can traverse, so each spill carries that agent's
