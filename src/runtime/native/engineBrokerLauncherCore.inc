@@ -306,12 +306,25 @@ static pid_t launch(const struct dbl_registration *r, int executable,
   if (prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0) ||
       prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
     launch_fail(status_pipe[1], 3);
-  if (dup2(prompt, 3) < 0 || dup2(capability, 4) < 0 ||
-      dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0)
+  /* Received fds carry MSG_CMSG_CLOEXEC and may already sit on 3-5: dup2 onto
+     itself keeps close-on-exec (the prompt vanished at exec) and an
+     overlapping order clobbers a source. Lift all of them above the targets
+     first so every dup2 below changes the fd number and clears CLOEXEC. */
+  int status_fd = fcntl(status_pipe[1], F_DUPFD_CLOEXEC, 16);
+  if (status_fd < 0)
     launch_fail(status_pipe[1], 4);
-  if (executable != 5 && dup2(executable, 5) < 0)
-    launch_fail(status_pipe[1], 5);
-  close_other_fds(status_pipe[1]);
+  int high_prompt = fcntl(prompt, F_DUPFD_CLOEXEC, 16),
+      high_capability = fcntl(capability, F_DUPFD_CLOEXEC, 16),
+      high_output = fcntl(output, F_DUPFD_CLOEXEC, 16),
+      high_executable = fcntl(executable, F_DUPFD_CLOEXEC, 16);
+  if (high_prompt < 0 || high_capability < 0 || high_output < 0 ||
+      high_executable < 0 || dup2(high_prompt, 3) < 0 ||
+      dup2(high_capability, 4) < 0 || dup2(high_output, STDOUT_FILENO) < 0 ||
+      dup2(high_output, STDERR_FILENO) < 0)
+    launch_fail(status_fd, 4);
+  if (dup2(high_executable, 5) < 0)
+    launch_fail(status_fd, 5);
+  close_other_fds(status_fd);
   char *const argv[] = {"grok",
                         "--sandbox",
                         "daimon-strict",
@@ -351,6 +364,6 @@ static pid_t launch(const struct dbl_registration *r, int executable,
                         NULL};
   syscall(SYS_execveat, 5, "", argv, envp, AT_EMPTY_PATH);
   erase(mcp_env, sizeof(mcp_env));
-  launch_fail(status_pipe[1], 6);
+  launch_fail(status_fd, 6);
 }
 
