@@ -53,9 +53,9 @@ export const GROK_ENGINE_BROKER = {
     systemPromptSha256: "2c31c0085a54a4efbf9c0cf0b8124c56e47f38691b7f0c7fa233a74abaa8ddf8",
     // sha256 of `renderGrokBrokerWorkerConfig({ model, reasoningEffort })`, the only accepted config.toml bytes.
     configSha256: {
-      "grok-4.6": { low: "cddeac5f845fa44890679934ad840ca728f5ddcdb0ffdb34a60ed232ef0eda3f", medium: "5a986b87f3888e8b2ec1fe5f7e5361a96494b67bd66a8b9f39836c26f2d602da", high: "e023b566aa28074c544c2f44dad634eca5511a329a2030c2584574e7f419a75a" },
-      "grok-4.5": { low: "e22e543e72ea409cfbb3c229ed3bd605252374d28922f6ab05c29f6d590108de", medium: "706a74cb8401b045604078f526b7afcaf292dbe85c8c26f20b533e828f8a3acc", high: "3357ca76540480f4f3f7dc7e4e05ac92df770104a7ecf6d0aa3cb29eb9b6d0b6" },
-      "grok-build": { low: "905efbe13bda08f3aa3907cb0215a56c07553965f8d81242687f7c993652b294", medium: "56aab068913b69aac68862ab729462b943a31b9efb7ddadd1d1deebc0ff72714", high: "52d66731dcad01ca001243424e324b8c4921a17ab31fe6b7b869dc8473d2c3b6" }
+      "grok-4.6": { low: "eed6a451150a72b2cb528b30c23b3d51c7d3bc38c67a8985d4dcdf956ff214d3", medium: "8850502dbebf8918c5161c63efcc4ccf18719488300f4cec1deceb2c112b451f", high: "3ce44ace503362326b47149b528b942ce638fe146313d62502f248acf9c7333d" },
+      "grok-4.5": { low: "7aa13e90b9bc08d1a018f48b7a84de1dab41db586627ee2d5a25f69011ba7e25", medium: "218ba37e57a6f02fa36b265b4e154e68e30bd2d4794feb130cc226fdda7732a9", high: "0bb4ad8bfa5062169b28422d1d534b45420d4e46b1e546bda1c578eb34303646" },
+      "grok-build": { low: "83ac7202442286a65c359cc596b0b8db7bc4529ee70e98224f6cd6f66deb6878", medium: "0146313f28739888eb4e861f1bfb285f7ee4e0a9164669256ebdf6492a2790ce", high: "bbe72aaf70c417dc7007823a7e9e1a7d1fa8d57e50bde6f24036083b32bcc859" }
     },
     // Worker `GROK_HOME` layout the broker attests before every turn. The home and
     // its `sessions/` directory are root-owned, worker-group writable and sticky so

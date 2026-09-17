@@ -27,15 +27,19 @@ export const GROK_BROKER_WORKER_MODEL_ID = "daimon-broker-grok" as const;
  * turn, and no config key or environment variable disables it
  * (`features.title_refresh` governs only the later refresh; verified against a
  * loopback stub). `[models] session_summary` does select the model it uses, so
- * the title goes to a hidden model whose endpoint is a closed privileged
- * loopback port: the connection is refused locally, Grok falls back to the
- * truncated prompt as the title, and neither the proxy nor the provider sees a
- * request. The placeholder `api_key` is not a credential; it only stops Grok
- * from looking for one.
+ * the title goes to a hidden model whose endpoint is the broker's own provider
+ * proxy with a placeholder key that can never be a turn capability (shorter
+ * than the 40-character capability alphabet). The proxy refuses it before any
+ * capability lookup, isolation guard, credential read, or upstream call, and
+ * Grok falls back to the truncated prompt as the title. The endpoint is always
+ * listening while a worker runs, so the refusal is bounded by one loopback
+ * round trip rather than by a connect timeout, and a prompt-derived title is
+ * never delivered anywhere but Daimon's own proxy.
  */
 export const GROK_SESSION_TITLE_SINK_MODEL_ID = "daimon-session-title-disabled" as const;
-const renderSessionTitleSink = (): readonly string[] => [
-  `[model.${GROK_SESSION_TITLE_SINK_MODEL_ID}]`, 'model = "disabled"', 'base_url = "http://127.0.0.1:9/v1"', 'api_key = "session-title-disabled"',
+export const GROK_SESSION_TITLE_SINK_KEY = "session-title-disabled" as const;
+const renderSessionTitleSink = (proxyPort: number): readonly string[] => [
+  `[model.${GROK_SESSION_TITLE_SINK_MODEL_ID}]`, 'model = "disabled"', `base_url = "http://127.0.0.1:${proxyPort}/v1"`, `api_key = "${GROK_SESSION_TITLE_SINK_KEY}"`,
   "max_retries = 0", "hidden = true", ""
 ];
 
@@ -101,7 +105,7 @@ export function renderGrokBrokerWorkerConfigWith(policy: GrokBrokerModelPolicy, 
   return [
     renderGrokLeanBaseConfig(),
     "[models]", `default = "${GROK_BROKER_WORKER_MODEL_ID}"`, `default_reasoning_effort = "${declared.reasoningEffort}"`, `session_summary = "${GROK_SESSION_TITLE_SINK_MODEL_ID}"`, "",
-    ...renderSessionTitleSink(),
+    ...renderSessionTitleSink(proxyPort),
     `[model.${GROK_BROKER_WORKER_MODEL_ID}]`, `model = "${declared.model}"`, `base_url = "http://127.0.0.1:${proxyPort}/v1"`, `env_key = "${GROK_BROKER_PROVIDER_CAPABILITY_ENV}"`,
     'api_backend = "chat_completions"', "context_window = 131072", "supports_backend_search = false", "",
     `[[model.${GROK_BROKER_WORKER_MODEL_ID}.reasoning_efforts]]`, `value = "${declared.reasoningEffort}"`, `label = "${label}"`, "default = true", "",

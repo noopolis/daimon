@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
 import test from "node:test";
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
+import { GROK_SESSION_TITLE_SINK_KEY } from "./grokBrokerWorkerConfig.js";
 
 const lean = ["run_terminal_command", "read_file", "list_dir", "grep", "search_tool", "use_tool"].map((name) => ({ type: "function", function: { name } }));
 const leanBody = (overrides: Record<string, unknown> = {}): string => JSON.stringify({ model: "grok-4.6", reasoning_effort: "low", stream: true, messages: [], tools: lean, ...overrides });
@@ -52,3 +53,17 @@ function post(port: number, token: string, body: string): Promise<number> {
     req.on("error", reject); req.end(body);
   });
 }
+
+test("the session-title sink is refused before capability, guard, credential, or upstream use", async () => {
+  let calls = 0, accessed = 0, guarded = 0;
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => { accessed++; return "provider-token"; }, markRejected: async () => undefined }, async () => { calls++; return { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from("{}") }; });
+  try {
+    const token = proxy.capabilities.issue("agent", "turn", 60_000, 1); proxy.registerIsolationGuard("turn", async () => { guarded++; });
+    const title = JSON.stringify({ model: "disabled", max_tokens: 100, temperature: 0, stream: true, messages: [{ role: "user", content: "prompt-derived" }], tool_choice: { type: "function", function: { name: "session_title" } }, tools: [{ type: "function", function: { name: "session_title" } }] });
+    assert.equal(await post(proxy.port, GROK_SESSION_TITLE_SINK_KEY, title), 503);
+    assert.deepEqual({ calls, accessed, guarded }, { calls: 0, accessed: 0, guarded: 0 });
+    // The turn capability (budget 1 request) is untouched and still serves the real request.
+    assert.equal(await post(proxy.port, token, leanBody()), 200);
+    assert.equal(calls, 1);
+  } finally { await proxy.close(); }
+});

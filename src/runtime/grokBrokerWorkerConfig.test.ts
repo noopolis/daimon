@@ -28,7 +28,9 @@ test("worker config disables every bundled 1.0.34 skill, workflows, and the per-
   assert.equal(section(config, "[skills]"), `[skills]\ndisabled = [${GROK_1_0_34_BUNDLED_SKILLS.map((name) => JSON.stringify(name)).join(", ")}]\n`);
   assert.equal(section(config, "[workflows]"), "[workflows]\nenabled = false\n");
   assert.match(section(config, "[models]"), /\nsession_summary = "daimon-session-title-disabled"\n/u);
-  assert.equal(section(config, "[model.daimon-session-title-disabled]"), '[model.daimon-session-title-disabled]\nmodel = "disabled"\nbase_url = "http://127.0.0.1:9/v1"\napi_key = "session-title-disabled"\nmax_retries = 0\nhidden = true\n');
+  assert.equal(section(config, "[model.daimon-session-title-disabled]"), '[model.daimon-session-title-disabled]\nmodel = "disabled"\nbase_url = "http://127.0.0.1:43123/v1"\napi_key = "session-title-disabled"\nmax_retries = 0\nhidden = true\n');
+  // The sink carries a static placeholder key only: no env_key, so it can never pick up the turn capability.
+  assert.doesNotMatch(section(config, "[model.daimon-session-title-disabled]"), /env_key|DAIMON_/u);
   for (const toggle of ["title_refresh", "telemetry", "session_recap", "turn_summary", "backend_tools", "ask_user_question"]) assert.match(section(config, "[features]"), new RegExp(`\\n${toggle} = false\\n`, "u"));
   assert.match(section(config, "[cli]"), /auto_update = false\nuse_leader = false/u);
 });
