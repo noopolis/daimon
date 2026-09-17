@@ -36,7 +36,14 @@ export type EngineBrokerResponse =
   | (Readonly<{ version: typeof VERSION; kind: "completed"; requestId: string; turnId: string; text: string; workerPid: number; workerUid: number; workerStartTime: string }> & EngineBrokerTurnAccounting)
   | (Readonly<{ version: typeof VERSION; kind: "failed"; requestId: string; turnId: string; code: EngineBrokerFailureCode; diagnostic?: EngineBrokerFailureDiagnostic }> & EngineBrokerTurnAccounting)
   | EngineBrokerInferenceResponse;
-export const ENGINE_BROKER_FAILURE_CODES = ["auth_stale", "cancelled", "engine_failed", "invalid_request", "limit_exceeded", "turn_conflict", "unavailable"] as const;
+/**
+ * The one name for a fenced credential realm. The turn's failure code, the
+ * proxy's refusal reason on a worker request, and the grant path's 401 body
+ * (`GROK_INFERENCE_AUTH_STALE_BODY`) all say this same word, so an operator
+ * greps one string across every surface instead of three spellings of it.
+ */
+export const ENGINE_BROKER_AUTH_STALE = "auth_stale" as const;
+export const ENGINE_BROKER_FAILURE_CODES = [ENGINE_BROKER_AUTH_STALE, "cancelled", "engine_failed", "invalid_request", "limit_exceeded", "turn_conflict", "unavailable"] as const;
 export type EngineBrokerFailureCode = (typeof ENGINE_BROKER_FAILURE_CODES)[number];
 export type EngineBrokerTerminalResponse = Extract<EngineBrokerResponse, { kind: "completed" | "failed" }>;
 type V1Completed = Readonly<{ version: typeof V1; kind: "completed"; requestId: string; turnId: string; text: string; workerPid: number; workerUid: number; workerStartTime: string }>;

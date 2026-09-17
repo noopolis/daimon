@@ -187,7 +187,18 @@ header. It is redacted through `redactCredentialText` with that request's own
 capabilities as exact secrets and the `CLI_ENGINE_MAX_DIAGNOSTIC_BYTES` bound,
 flattened to one line, exactly as the failed CLI child and the launcher's
 worker diagnostic are. It is a log line only: the 503 is unchanged, because a
-genuinely transient fault is still transient. The sink keeps its 503
+genuinely transient fault is still transient.
+
+One fault is *not* transient and no longer wears that shape: a fenced
+credential realm. `isStale()` is checked on the turn path before the
+credential read, and the request that discovers the fence (the authority's own
+generic error) is promoted to the same refusal, so a stale realm is a named
+400 `auth_stale` instead of one 503 plus fourteen blind retries — the training
+login expired at 22:28Z and the 22:48Z run spent five minutes and $0 learning
+nothing. `ENGINE_BROKER_AUTH_STALE` (`engineBrokerProtocol.ts`) is the single
+name behind the turn failure code, this refusal reason and the grant path's
+401 `GROK_INFERENCE_AUTH_STALE_BODY`; the grant path keeps its own 401 shape,
+and the title sink keeps its 503 on a fenced realm like everywhere else. The sink keeps its 503
 shape because every live capture was taken with it: forcing 400 and 503 there
 were both observed to end the turn `exit=0, result: success`, so a hard 4xx on
 that request does *not* end Grok's session. And effort is only sent when the
@@ -212,7 +223,14 @@ never logged or ledgered. The facade also carries the three methods the
 transport uses — POST, the standalone `GET` SSE stream that is the only route a
 server notification or progress frame can take, and the `DELETE` that ends a
 session — and streams each body rather than buffering it, because a GET tunnel
-stays open for the whole session. Never widen it into a transparent proxy: the
+stays open for the whole session. Streaming means backpressure, and a
+backpressured tunnel must never park: `awaitMcpTunnelDrain` races the client's
+`drain` against its `close`/`error` and the turn's abort, because a bare
+`once("drain")` cannot fire for a client that hung up mid-write and left the
+handler — and the upstream call it was relaying — awaiting for the life of the
+process, with no status, no refusal and no line anywhere to read. Every
+outcome but a real drain rejects, so the relay tears the tunnel down instead
+of writing into a socket that is gone. Never widen it into a transparent proxy: the
 whole point of the boundary is that the allowlist is closed.
 
 Worker `GROK_HOME` layout the deployment must provision (attested before every

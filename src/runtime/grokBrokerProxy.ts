@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { redactCredentialText } from "../core/credentialRedaction.js";
 import { CLI_ENGINE_MAX_DIAGNOSTIC_BYTES } from "../pi/cliChildOutput.js";
 import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
+import { ENGINE_BROKER_AUTH_STALE } from "./engineBrokerProtocol.js";
 import { DEFAULT_GROK_BROKER_MODEL_POLICY, parseGrokBrokerModelPolicy, type GrokBrokerModelPolicy } from "./grokBrokerModelPolicy.js";
 import { authorizeGrokBrokerProxyRequest } from "./grokBrokerProxyRequest.js";
 import { GROK_SESSION_TITLE_SINK_KEY } from "./grokBrokerWorkerConfig.js";
@@ -65,6 +66,11 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     if(match&&match[1]!.startsWith(GROK_ENGINE_BROKER.inferenceGrants.tokenPrefix)){if(!grants)throw new GrokBrokerProxyRefusal("inference_grants_unavailable");return await serveGrokInferenceGrant({method:request.method??"",pathname:new URL(request.url??"/","http://127.0.0.1").pathname,headers,body,token:match[1]!},response,grants,authority,upstream);}
     const scope=match?capabilities.inspectToken(match[1]!):undefined;if(!scope)throw new GrokBrokerProxyRefusal("unknown_capability");const guard=guards.get(scope.turnId),turn=turns.get(scope.turnId);if(!guard||!turn)throw new GrokBrokerProxyRefusal("no_active_turn");
     try { await guard(); } catch (error) { throw new GrokBrokerProxyRefusal("worker_isolation_unverified"); }
+    // A fenced realm is not a transient fault: the credential is gone until an
+    // operator re-logs in, and 503 made Grok blind-retry it (observed: fifteen
+    // retries over five minutes, $0 spent, nothing learned). Named, 400, and
+    // checked before the credential read, so the miss costs one round trip.
+    if (authority.isStale?.() === true) throw new GrokBrokerProxyRefusal(ENGINE_BROKER_AUTH_STALE);
     let token = await authority.accessToken(false);secrets.push(token);const rejectedDigest=createHash("sha256").update(token).digest("hex"); let prepared = authorizeRequestOrRefuse({ method: request.method ?? "", pathname: new URL(request.url ?? "/", "http://127.0.0.1").pathname, headers, body }, capabilities, token, turn.policy ?? fallback); token = "";
     // The spend gate runs after the body is proven a real lean worker request
     // (a refused session-title body never counts) and before any upstream call.
@@ -85,11 +91,16 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     // Name the refusal on the broker's own stderr (reason code only, never a body
     // or a token) so a failing turn is diagnosable without a stub harness —
     // except for the two requests every healthy turn makes anyway.
-    const refusal = error instanceof GrokBrokerProxyRefusal ? error.reason : "broker_unavailable";
+    // The request that *discovers* the fence throws an ordinary error from the
+    // credential authority, so it is promoted to the same named refusal: one
+    // stale realm must not read as one transient fault plus fourteen retries.
+    const fenced = !(error instanceof GrokBrokerProxyRefusal) && authority.isStale?.() === true;
+    const refused = error instanceof GrokBrokerProxyRefusal || fenced;
+    const refusal = error instanceof GrokBrokerProxyRefusal ? error.reason : fenced ? ENGINE_BROKER_AUTH_STALE : "broker_unavailable";
     // A named refusal is its own account; anything else used to reach the log as
     // the bare word `broker_unavailable`, which names nothing — so it carries the
     // fault's own class and message, and nothing else, beside it.
-    const named = error instanceof GrokBrokerProxyRefusal ? refusal : `${refusal} (${brokerFaultCause(error, secrets)})`;
+    const named = refused ? refusal : `${refusal} (${brokerFaultCause(error, secrets)})`;
     if (!titleSink && !expectedWorkerProbe(request)) process.stderr.write(`[grok-proxy] refused: ${named}\n`);
     // Grok's own session-title call is refused by design, and keeps the transient
     // 503 shape it has always had. Forcing 400 and 503 on it were both observed
@@ -101,7 +112,7 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
       response.end('{"error":"broker unavailable"}');
       return;
     }
-    if (error instanceof GrokBrokerProxyRefusal) {
+    if (refused) {
       response.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
       response.end(JSON.stringify({ error: "broker refused this request", reason: refusal }));
       return;

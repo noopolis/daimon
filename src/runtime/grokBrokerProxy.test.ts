@@ -4,6 +4,8 @@ import test from "node:test";
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
 import { GROK_SESSION_TITLE_SINK_KEY } from "./grokBrokerWorkerConfig.js";
 import { GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
+import { ENGINE_BROKER_AUTH_STALE } from "./engineBrokerProtocol.js";
+import { GROK_INFERENCE_AUTH_STALE_BODY } from "./grokInferenceProxy.js";
 
 type Proxy = Awaited<ReturnType<typeof startGrokBrokerProxy>>;
 const arm = (proxy: Proxy, guard: () => Promise<void>, meter = new GrokBrokerTurnMeter({ maxRequests: 32, maxTokens: 300_000, timeoutMs: 240_000 })): GrokBrokerTurnMeter => {
@@ -149,4 +151,52 @@ test("a fault's own cause is named too, because `fetch failed` on its own names 
     assert.equal(await post(proxy.port, token, leanBody()), 503);
     assert.deepEqual(lines, ["[grok-proxy] refused: broker_unavailable (TypeError: fetch failed <- Error: ENOTFOUND)\n"]);
   } finally { process.stderr.write = original; await proxy.close(); }
+});
+
+/**
+ * A fenced realm is the one fault this proxy answered worst: the credential is
+ * gone until an operator logs in again, and 503 made Grok retry it fifteen
+ * times over five minutes for nothing. It is a named, non-retryable refusal
+ * now — and it wears the same name as the turn failure code and the grant
+ * path's 401 body, so one word finds it on every surface.
+ */
+test("a fenced credential realm is a named 400 auth_stale, before any credential read or upstream call", async () => {
+  const lines: string[] = []; const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  let reads = 0, calls = 0, stale = true;
+  const proxy = await startGrokBrokerProxy(
+    { accessToken: async () => { reads += 1; return "provider-token"; }, markRejected: async () => undefined, isStale: () => stale },
+    async () => { calls += 1; return { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from("{}") }; });
+  try {
+    const token = proxy.capabilities.issue("agent", "turn"); arm(proxy, async () => undefined);
+    assert.equal(await post(proxy.port, token, leanBody()), 400, "a stale realm is not transient, so it must not be retryable");
+    assert.deepEqual({ reads, calls }, { reads: 0, calls: 0 }, "no credential is read and nothing is forwarded for a fenced realm");
+    assert.deepEqual(lines, [`[grok-proxy] refused: ${ENGINE_BROKER_AUTH_STALE}\n`]);
+    // The title sink keeps the 503 it has always had, fenced realm or not.
+    assert.equal(await post(proxy.port, GROK_SESSION_TITLE_SINK_KEY, leanBody()), 503);
+    // And the same capability serves the real request once the realm is healthy.
+    stale = false; lines.length = 0;
+    assert.equal(await post(proxy.port, token, leanBody()), 200);
+    assert.deepEqual({ reads, calls, lines }, { reads: 1, calls: 1, lines: [] });
+  } finally { process.stderr.write = original; await proxy.close(); }
+});
+
+test("the request that discovers the fence is named auth_stale too, not one transient fault", async () => {
+  const lines: string[] = []; const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  // The live shape: `accessToken` fences the realm and throws the authority's
+  // own generic error, which on its own reads as a transient fault.
+  let stale = false;
+  const proxy = await startGrokBrokerProxy(
+    { accessToken: async () => { stale = true; throw new Error("Grok broker credential authority unavailable"); }, markRejected: async () => undefined, isStale: () => stale },
+    async () => ({ status: 200, headers: { "content-type": "application/json" }, body: Buffer.from("{}") }));
+  try {
+    const token = proxy.capabilities.issue("agent", "turn"); arm(proxy, async () => undefined);
+    assert.equal(await post(proxy.port, token, leanBody()), 400);
+    assert.deepEqual(lines, [`[grok-proxy] refused: ${ENGINE_BROKER_AUTH_STALE}\n`]);
+  } finally { process.stderr.write = original; await proxy.close(); }
+});
+
+test("the turn path and the grant path name a fenced realm the same way", () => {
+  assert.ok(GROK_INFERENCE_AUTH_STALE_BODY.includes(ENGINE_BROKER_AUTH_STALE), "one name, not three spellings");
 });
