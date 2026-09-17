@@ -15,6 +15,7 @@ import {
   TURN_USAGE_LEDGER_VERSION,
   TURN_USAGE_MAX_IDENTIFIER_CHARS,
   TURN_USAGE_ROTATE_BYTES,
+  dedupeTurnUsageRows,
   type TurnUsageEntry
 } from "./turnUsageLedger.js";
 
@@ -148,7 +149,7 @@ test("a failed wake's row carries the outcome and a reason from the closed vocab
   assert.equal(failed.reason, "token_ceiling");
   assert.equal(failed.total, measurement.total, "the numbers are the ones the engine reported, not the outcome's");
 
-  assert.deepEqual([...TURN_USAGE_FAILURE_REASONS], ["token_ceiling", "wake_timeout", "output_limit", "engine_exit", "turn_rejected", "unknown"]);
+  assert.deepEqual([...TURN_USAGE_FAILURE_REASONS], ["token_ceiling", "request_ceiling", "wake_timeout", "output_limit", "engine_exit", "turn_rejected", "unknown"]);
   for (const reason of TURN_USAGE_FAILURE_REASONS) {
     assert.equal(JSON.parse(renderTurnUsageLine(entry({ outcome: { status: "failed", reason } }))).reason, reason);
   }
@@ -182,4 +183,14 @@ test("the outcome survives an append and a read back of the ledger file", async 
     ]);
     for (const record of written) assert.equal(record.v, TURN_USAGE_LEDGER_VERSION, "an added field, not a version bump");
   });
+});
+
+test("broker rows carry the turn key, closed limit reason and closed model, and readers dedupe on the turn", () => {
+  const turn = "c".repeat(64);
+  const row = JSON.parse(renderTurnUsageLine(entry({ turn, limitReason: "requests", model: "grok-4.6", outcome: { status: "failed", reason: "request_ceiling" } })));
+  assert.deepEqual([row.turn, row.limit_reason, row.model, row.reason], [turn, "requests", "grok-4.6", "request_ceiling"]);
+  assert.equal(row.total, row.input + row.cache_read + row.cache_write + row.output);
+  const forged = JSON.parse(renderTurnUsageLine(entry({ turn: "not-a-turn", limitReason: "budget" as never, model: "gpt-5" as never })));
+  assert.deepEqual([forged.turn, forged.limit_reason, forged.model], [undefined, undefined, undefined]);
+  assert.deepEqual(dedupeTurnUsageRows([{ turn, total: 1 }, { total: 2 }, { turn, total: 3 }, { total: 4 }]), [{ turn, total: 1 }, { total: 2 }, { total: 4 }]);
 });

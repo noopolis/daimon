@@ -68,6 +68,27 @@ export const GROK_ENGINE_BROKER = {
     }
   },
   bounds: { promptBytes: 65_536, capabilityBytes: 4_096, capabilityBundleBytes: 8_196, outputBytes: 65_536 },
+  // Accounting and limits (P2). The broker is the single sealed usage writer.
+  controlProtocolVersion: "noopolis.daimon.engine-broker.v2",
+  turnRecordVersions: ["noopolis.daimon.engine-broker-turn.v1", "noopolis.daimon.engine-broker-turn.v2"],
+  serviceConfigVersions: ["noopolis.daimon.engine-broker-service.v1", "noopolis.daimon.engine-broker-service.v2"],
+  turnLimits: {
+    keys: ["maxRequests", "maxTokens", "timeoutMs"],
+    v1Defaults: { maxRequests: 32, maxTokens: 300_000, timeoutMs: 240_000 },
+    bounds: { maxRequests: [1, GROK_WORKER_MAX_TURNS], maxTokens: [1, 10_000_000], timeoutMs: [1_000, 3_600_000] },
+    limitReasons: ["tokens", "requests", "timeout", "none"],
+    wakeMayOnlyLower: true,
+    tokenCeilingOvershoot: "at-most-one-request",
+    maxInFlightRequests: 1,
+    // A per-request usage block above this is implausible (beyond the model
+    // context window) and treated as invalid rather than added to any total.
+    requestUsageMaxTokens: 500_000,
+    // A request whose response carries no valid usage is charged this estimate.
+    missingUsageEstimate: { inputBytesPerToken: 2, outputTokens: 4_096 }
+  },
+  wakeLimitEnvironment: { timeoutMs: "DAIMON_ENGINE_WAKE_TIMEOUT_MS", maxTokens: "DAIMON_ENGINE_WAKE_TOKEN_CEILING" },
+  projectionVersion: "noopolis.daimon.grok-broker-projection.v1",
+  slotPreflightVersion: "noopolis.daimon.grok-slot-preflight.v1",
   artifacts: {
     sourceSha256: "36f60689f0a8af0e3108f5f53d78ed52b7d4b6f934c75b6184606dfa82bc741e",
     x64Sha256: "36dc76b134eb59cf5a6720b6f94228eb279108e20ea3343fa6efd9ffcb60a4d3",

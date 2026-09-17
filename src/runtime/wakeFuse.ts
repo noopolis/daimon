@@ -201,10 +201,13 @@ async function readFuseRecords(directory: string): Promise<Array<Admission | Epo
 
 async function sumTokens(ledgerPath: string, since: string, agentId?: string): Promise<number> {
   let total = 0;
+  // Rows carrying a `turn` idempotency key count once per turn, whichever file holds them.
+  const turns = new Set<string>();
   for (const file of [`${ledgerPath}.1`, ledgerPath]) {
     for (const line of await lines(file)) {
       try {
-        const value = JSON.parse(line) as { at?: unknown; total?: unknown; agent?: unknown };
+        const value = JSON.parse(line) as { at?: unknown; total?: unknown; agent?: unknown; turn?: unknown };
+        if (typeof value.turn === "string") { if (turns.has(value.turn)) continue; turns.add(value.turn); }
         if ((agentId === undefined || value.agent === agentId) && typeof value.at === "string" && !Number.isNaN(Date.parse(value.at)) && value.at >= since && typeof value.total === "number" && Number.isFinite(value.total) && value.total >= 0) total += value.total;
       } catch { /* usage accounting is advisory input; malformed lines are skipped */ }
     }

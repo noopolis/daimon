@@ -35,10 +35,10 @@ export {
 
 export type OrganizationRuntimeEngineKind = "codex" | "grok" | "agy";
 /**
- * `model`/`reasoningEffort` are codex-only: grok and agy own their own model
- * selection (their subscription auth and model selection are Daimon-owned),
- * and `organizationRuntimeParsing.ts` rejects either field on a non-codex
- * engine at parse time rather than silently ignoring it. The type stays flat
+ * `model`/`reasoningEffort` are accepted for codex (open model name) and for
+ * grok (closed broker lists, declared together); agy owns its own model
+ * selection and `organizationRuntimeParsing.ts` rejects either field there at
+ * parse time rather than silently ignoring it. The type stays flat
  * — not a `kind`-discriminated union — because every parsed value already
  * satisfies the invariant; callers that need it narrow on `kind === "codex"`.
  */

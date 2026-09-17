@@ -2,7 +2,7 @@ import { attentionTools, type AttentionRegistry } from "./attention.js";
 import path from "node:path";
 
 import type { AgentHandle } from "../core/types.js";
-import { AGY_MAX_TOOL_TURNS, createCliSessionFactory, resolveCodexWakeTimeoutMs, resolveCodexWakeTokenCeiling } from "../pi/cliSession.js";
+import { AGY_MAX_TOOL_TURNS, createCliSessionFactory, resolveCodexWakeTimeoutMs, resolveCodexWakeTokenCeiling, resolveEngineWakeLimitOverrides } from "../pi/cliSession.js";
 import {
   GROK_DAIMON_SANDBOX_PROFILE,
   prepareAndVerifyGrokSandbox
@@ -32,6 +32,9 @@ export async function startOrganizationRuntimeEngine(
   sharedProtectedPaths: readonly string[] = [],
   attention?: AttentionRegistry
 ): Promise<AgentHandle> {
+  // A declared Grok model is enforced by the broker proxy and worker config;
+  // the direct path has neither, so it refuses rather than silently ignoring it.
+  if (agent.engine.kind === "grok" && agent.engine.model !== undefined && grokBroker === undefined) throw new Error(`Agent ${agent.id} declares a Grok model, which requires the engine broker`);
   await paths?.verify();
   const canonicalAgent = paths === undefined ? agent : { ...agent, workspacePath: paths.workspacePath, runtimeHomePath: paths.runtimeHomePath };
   const readiness = canonicalAgent.engine.kind === "grok" && grokBroker !== undefined
@@ -151,13 +154,22 @@ function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: stri
           })
         } : {}),
         ...(engine==="grok"&&grokBroker!==undefined?{}:{credentialSecretValues: () => readPortableEngineCredentialSecrets(agent.id, engine, engineHomePath)}),
-        ...(engine==="grok"&&grokBroker!==undefined?{grokBrokerTurn:(prompt:string,endpoint:string,signal:AbortSignal)=>grokBroker.turn(agent.id,wakeEnvironmentContext.current??"wake",prompt,endpoint,signal)}:{}),
+        // The broker seals usage and enforces its registration's limits; the
+        // wake may only lower them (DAIMON_ENGINE_WAKE_*), and a declared model
+        // must be the one the broker reports it ran.
+        ...(engine==="grok"&&grokBroker!==undefined?{grokBrokerTurn:grokBrokerTurnFor(agent,grokBroker,wakeEnvironmentContext)}:{}),
         ...(engine === "grok" && verifyGrokSandbox ? {
           grokSandboxProfile: GROK_DAIMON_SANDBOX_PROFILE,
           verifyGrokSandbox
         } : {}) }
   );
   return cliHarness(agent, sessionFactory, [controlTokenEnv], productionTools, wakeEnvironmentContext);
+}
+
+function grokBrokerTurnFor(agent: OrganizationRuntimeAgentConfig, grokBroker: EngineBrokerTurnClient, wakeEnvironmentContext: import("../pi/piAgentWakeSupport.js").PiWakeEnvironmentContextRef) {
+  const limits = resolveEngineWakeLimitOverrides();
+  const options = { ...(limits === undefined ? {} : { limits }), ...(agent.engine.model === undefined ? {} : { model: agent.engine.model }) };
+  return (prompt: string, endpoint: string, signal: AbortSignal) => grokBroker.turn(agent.id, wakeEnvironmentContext.current ?? "wake", prompt, endpoint, signal, options);
 }
 
 /**

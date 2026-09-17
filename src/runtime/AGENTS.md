@@ -28,6 +28,69 @@ tool), and any body whose `model`/`reasoning_effort` differ from the declared
 `grokBrokerModelPolicy.ts` policy (closed lists; default `grok-4.6`/`low`). The
 model override header follows that declaration.
 
+The proxy is the per-turn limit gate too. Every broker turn registers a
+`grokBrokerTurnMeter.ts` meter with its registration's model policy, and the
+proxy forwards nothing for a turn without one. After a body is proven a lean
+worker request and before any upstream call, the meter refuses request
+`maxRequests + 1`, any request past `timeoutMs`, and any request once the
+upstream-reported running total (prompt tokens *including* cached, plus
+completion) has reached `maxTokens` — HTTP 429, and the tripped limit aborts
+the worker through the ordinary cancel/kill path. The token ceiling is checked
+between requests, so a turn overshoots it by at most the last admitted
+request. That bound holds only because a turn has at most one upstream request
+in flight: an overlapping request is refused (429, uncounted), and Grok's loop
+is sequential in every live capture. A per-request usage block above
+`turnLimits.requestUsageMaxTokens` (500k) is invalid, and a response without
+valid usage is charged `ceil(bodyBytes/2) + 4096` tokens (rows say
+`usage_source: "estimated"`, usage rows `estimated_requests`), so a missing
+`usage` never disables the ceiling. A broker timer also trips `timeout` for a
+worker that is mid-request, and any trip aborts the in-flight upstream call. Limits come from `service.json` v2
+(`engineBrokerServiceConfig.ts`; v1 gets `GROK_ENGINE_BROKER.turnLimits.v1Defaults`)
+and a wake may only lower them: a raise is refused as `invalid_request`, never
+clamped.
+
+The broker stays the single sealed usage writer. `grokEngineBrokerTurn.ts`
+seals every terminal turn — completed, failed, limit, cancelled — through
+`finishBrokerTurnWithUsage` (`grokEngineBrokerMetering.ts`): the turn registry
+record v2 stores the control-protocol v2 terminal response *with* its
+numeric-only accounting (`usage`, `outcome`, declared `model`, `requests`,
+closed `limitReason`) *and the exact ledger bytes it owes*, and only then are
+those bytes appended. A replay returns the sealed accounting and never meters
+again; it only appends the sealed bytes when the ledger has no row for that
+`turn` (a crash between seal and append). Two replays of one sealed turn in
+the same broker may both append those identical bytes (a second broker cannot
+exist: the realm lease is an exclusive lock), so **every ledger consumer —
+`wakeFuse.ts`, Spawnfile's reader (P3), Paideia's evidence reader (P4) — MUST
+dedupe usage rows by `turn`** (`dedupeTurnUsageRows`). The turn record's rename
+is its publish point: a directory-sync failure after it is reported, never
+raised, so a published completed turn is never re-sealed as failed. The window not closed: a crash
+before the record's rename seals the turn `failed` with `usage: null` on the
+next boot. Once a completed record is sealed, nothing after it can re-seal the
+turn as failed. v1 records still replay (upgraded with `usage: null`). Completed usage is the terminal `result.usage`;
+a failed turn's partial usage is its per-request stream frames
+(`../pi/grokStreamUsage.ts`) when output arrived, else the upstream usage the
+proxy saw. Usage rows carry `turn` (the idempotency key readers dedupe on —
+`wakeFuse.ts` does), `limit_reason` and `model`; per-request rows go to
+`requests.jsonl` beside the registration's `usageLedgerPath` with proxy-measured
+`started_at`/`ended_at`. A provider-reported model key must map to the declared
+model (`grok-4.6-build` → `grok-4.6`), otherwise the turn fails as rejected and
+is still metered. Control protocol v2 is refused-v1 on the wire because both
+ends ship in this package.
+
+`grokBrokerProjection.ts` is the public, I/O-free projection of one brokered
+Grok agent's slot (`noopolis.daimon.grok-broker-projection.v1`): Daimon's own
+deny collectors plus the caller's evaluator paths, profile/config/prompt
+digests, pinned executable, model, limits and ledger. A Grok agent must declare
+`model` and `reasoningEffort` for it; nothing is defaulted, and a supplied
+profile digest that differs is refused. Paths are never resolved: Spawnfile
+must supply canonical non-symlink paths (its fixed tmpfs and workspace roots)
+and verify that during provisioning. The projection also carries the seccomp
+profile digest and the `bubblewrap` sandbox runtime a receipt must match. `grokSlotPreflightReceipt.ts` is the
+zod schema a root slot supervisor's receipt must satisfy
+(`noopolis.daimon.grok-slot-preflight.v1`, fixtures under
+`fixtures/grok-slot-preflight/`); `verifyGrokSlotPreflightReceipt` binds it to
+the projection digest and requires a denied canary for exactly every deny path.
+
 `grokBrokerWorkerConfig.ts` is the only source of worker `config.toml` bytes;
 the manifest pins the sha256 of every model/effort combination and the broker
 refuses a turn whose worker config does not hash to the declared one. Three
@@ -91,8 +154,10 @@ the only place its per-wake tool-call bound is decided. `maxToolTurns` only
 mediates daimon-MCP tool calls; Codex's own shell (`exec_command`) is never
 routed through it, so Codex gets its own bounds instead —
 `DEFAULT_CODEX_WAKE_TIMEOUT_MS` (wall clock) and
-`DEFAULT_CODEX_WAKE_TOKEN_CEILING`, both in `../pi/cliSession.ts`, overridable
-via `DAIMON_CODEX_WAKE_TIMEOUT_MS`/`DAIMON_CODEX_WAKE_TOKEN_CEILING`. The token
+`DEFAULT_CODEX_WAKE_TOKEN_CEILING`, both in `../pi/engineWakeLimits.ts`, overridable
+via the engine-neutral `DAIMON_ENGINE_WAKE_TIMEOUT_MS`/`DAIMON_ENGINE_WAKE_TOKEN_CEILING`
+(the `DAIMON_CODEX_*` names are aliases; conflicting values are refused), which
+the dispatcher also passes to the Grok broker as lowering limits. The token
 ceiling can only be checked when Codex reports it: its `--json` stream carries
 usage exactly once, on the turn's own `turn.completed`, so crossing it kills
 the child immediately and fails the wake instead of letting an over-budget
@@ -133,7 +198,10 @@ request count) look like the first without proving it. `../pi/cliChildOutput.ts`
 carries the thread id off Codex's own `thread.started` frame, and
 `../pi/codexRolloutUsage.ts` reads that thread's rollout under
 `$CODEX_HOME/sessions/**` for the per-request `token_usage_record` frames the
-`--json` stream never emits. Rows go to `requests.jsonl` beside `usage.jsonl`
+`--json` stream never emits. Each Codex row carries its own `started_at`/`ended_at`
+from the rollout frame timestamps (end = the usage frame; start = the first
+non-usage frame after the previous request's usage frame, else that request's
+end), absent rather than substituted when a frame has no valid timestamp. Rows go to `requests.jsonl` beside `usage.jsonl`
 (`DAIMON_TURN_REQUESTS_LEDGER_PATH` relocates it) under the same invariants: a
 wake whose rollout is absent, unreadable, or undecodable writes *nothing*,
 because a fabricated zero is byte-identical to a measured one; and every failure

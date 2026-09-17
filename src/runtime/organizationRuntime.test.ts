@@ -287,16 +287,14 @@ test("accepts only the narrow optional Codex workspace policy", () => {
   }
 });
 
-test("rejects model and reasoningEffort on a non-codex engine", () => {
+test("rejects model and reasoningEffort on agy, and codexSandbox on every non-codex engine", () => {
+  const withModel = valid();
+  withModel.agents[0]!.engine = { kind: "agy", model: "gpt-5-codex" } as never;
+  assert.throws(() => parseOrganizationRuntimeConfig(withModel), /codex-only/);
+  const withEffort = valid();
+  withEffort.agents[0]!.engine = { kind: "agy", reasoningEffort: "high" } as never;
+  assert.throws(() => parseOrganizationRuntimeConfig(withEffort), /codex-only/);
   for (const kind of ["grok", "agy"] as const) {
-    const withModel = valid();
-    withModel.agents[0]!.engine = { kind, model: "gpt-5-codex" } as never;
-    assert.throws(() => parseOrganizationRuntimeConfig(withModel), /codex-only/);
-
-    const withEffort = valid();
-    withEffort.agents[0]!.engine = { kind, reasoningEffort: "high" } as never;
-    assert.throws(() => parseOrganizationRuntimeConfig(withEffort), /codex-only/);
-
     const withPolicy = valid();
     withPolicy.agents[0]!.engine = { kind, codexSandbox: { mode: "workspace-write", networkAccess: false, webSearch: "disabled" } } as never;
     assert.throws(() => parseOrganizationRuntimeConfig(withPolicy), /codex-only/);

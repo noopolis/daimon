@@ -88,6 +88,21 @@ skills, workflows, plan mode, subagents, memory or web search, and a declared
 model and reasoning effort from a closed list (default `grok-4.6` at `low`).
 The broker proxy refuses any request outside that shape before it spends.
 
+Each broker registration (`service.json` v2) declares its model and effort,
+its usage ledger, and turn limits `{maxRequests, maxTokens, timeoutMs}`. A wake
+may only lower them (`DAIMON_ENGINE_WAKE_TIMEOUT_MS`,
+`DAIMON_ENGINE_WAKE_TOKEN_CEILING`; the `DAIMON_CODEX_WAKE_*` names are
+aliases). The proxy refuses request `maxRequests + 1` and any request after the
+deadline with HTTP 429 before upstream, and stops admitting requests once the
+upstream-reported running total (cached input included) reaches `maxTokens`, so
+a turn overshoots its token ceiling by at most one request. A tripped limit
+kills the worker. The broker seals every terminal turn with its usage, request
+count, declared model and limit reason, and writes one usage row (keyed by
+`turn`) plus per-request rows for completed and failed turns alike; a replayed
+turn is never metered twice. `resolveOrganizationGrokBrokerProjection` exposes
+a slot's full declared shape, and `noopolis.daimon.grok-slot-preflight.v1`
+receipts bind a slot's denied-path canaries to that projection's digest.
+
 AGY uses OS-native secure storage through one private D-Bus and Secret Service
 realm. Enroll it once with:
 

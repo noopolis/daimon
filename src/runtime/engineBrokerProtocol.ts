@@ -1,10 +1,21 @@
-const VERSION = "noopolis.daimon.engine-broker.v1" as const;
+import { parseEngineBrokerTurnAccounting, parseEngineBrokerTurnLimitOverrides, type EngineBrokerTurnAccounting, type EngineBrokerTurnLimitOverrides } from "./engineBrokerTurnAccounting.js";
+
+/**
+ * Control protocol v2. Both ends ship in the same Daimon package and image
+ * (organization runtime client, broker service), so the wire moved to v2 in
+ * one step: v1 frames are refused. v1 survives only as a *durable record*
+ * shape, which {@link parseEngineBrokerV1TerminalResponse} still reads so
+ * turns sealed before the upgrade keep replaying.
+ */
+const VERSION = "noopolis.daimon.engine-broker.v2" as const;
+export const ENGINE_BROKER_VERSION = VERSION;
+const V1 = "noopolis.daimon.engine-broker.v1" as const;
 export const ENGINE_BROKER_MAX_FRAME_BYTES = 1_048_576;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
 export type EngineBrokerRequest =
   | Readonly<{ version: typeof VERSION; kind: "health"; requestId: string }>
-  | Readonly<{ version: typeof VERSION; kind: "start_turn"; requestId: string; turnId: string; agentId: string; wakeId: string; prompt: string; mcpEndpoint: string }>
+  | Readonly<{ version: typeof VERSION; kind: "start_turn"; requestId: string; turnId: string; agentId: string; wakeId: string; prompt: string; mcpEndpoint: string; limits?: EngineBrokerTurnLimitOverrides }>
   | Readonly<{ version: typeof VERSION; kind: "cancel_turn"; requestId: string; turnId: string }>;
 
 export interface EngineBrokerFailureDiagnostic { status:string;stage:string;failureClass:string;profileApplied:boolean;exitCode:number;termSignal:number;workerPid:number;workerUid:number;startTicks:string }
@@ -12,8 +23,15 @@ export interface EngineBrokerFailureDiagnostic { status:string;stage:string;fail
 export type EngineBrokerResponse =
   | Readonly<{ version: typeof VERSION; kind: "ready"; requestId: string; brokerUid: 2100; providerProxyPort: 43123; mcpFacadePort: 43124; registrations: number; credentialStale: false; realmLease: true; workerIsolation: true }>
   | Readonly<{ version: typeof VERSION; kind: "accepted"; requestId: string; turnId: string }>
-  | Readonly<{ version: typeof VERSION; kind: "completed"; requestId: string; turnId: string; text: string; workerPid: number; workerUid: number; workerStartTime: string }>
-  | Readonly<{ version: typeof VERSION; kind: "failed"; requestId: string; turnId: string; code: "auth_stale" | "cancelled" | "engine_failed" | "invalid_request" | "turn_conflict" | "unavailable"; diagnostic?: EngineBrokerFailureDiagnostic }>;
+  | (Readonly<{ version: typeof VERSION; kind: "completed"; requestId: string; turnId: string; text: string; workerPid: number; workerUid: number; workerStartTime: string }> & EngineBrokerTurnAccounting)
+  | (Readonly<{ version: typeof VERSION; kind: "failed"; requestId: string; turnId: string; code: EngineBrokerFailureCode; diagnostic?: EngineBrokerFailureDiagnostic }> & EngineBrokerTurnAccounting);
+export const ENGINE_BROKER_FAILURE_CODES = ["auth_stale", "cancelled", "engine_failed", "invalid_request", "limit_exceeded", "turn_conflict", "unavailable"] as const;
+export type EngineBrokerFailureCode = (typeof ENGINE_BROKER_FAILURE_CODES)[number];
+export type EngineBrokerTerminalResponse = Extract<EngineBrokerResponse, { kind: "completed" | "failed" }>;
+type V1Completed = Readonly<{ version: typeof V1; kind: "completed"; requestId: string; turnId: string; text: string; workerPid: number; workerUid: number; workerStartTime: string }>;
+type V1Failed = Readonly<{ version: typeof V1; kind: "failed"; requestId: string; turnId: string; code: Exclude<EngineBrokerFailureCode, "limit_exceeded">; diagnostic?: EngineBrokerFailureDiagnostic }>;
+export type EngineBrokerV1TerminalResponse = V1Completed | V1Failed;
+const ACCOUNTING = ["outcome", "usage", "model", "requests", "limitReason"] as const;
 
 type JsonRecord = Record<string, unknown>;
 const record = (value: unknown): JsonRecord => {
@@ -34,9 +52,12 @@ export function parseEngineBrokerRequest(value: unknown): EngineBrokerRequest {
   const input = record(value); version(input.version);
   if(input.kind==="health"){exact(input,["version","kind","requestId"]);return {version:VERSION,kind:"health",requestId:id(input.requestId)};}
   if (input.kind === "start_turn") {
-    exact(input, ["version", "kind", "requestId", "turnId", "agentId", "wakeId", "prompt", "mcpEndpoint"]);
+    const fields = ["version", "kind", "requestId", "turnId", "agentId", "wakeId", "prompt", "mcpEndpoint"];
+    exact(input, input.limits === undefined ? fields : [...fields, "limits"]);
     const mcpEndpoint=text(input.mcpEndpoint,2048);const url=new URL(mcpEndpoint);if(url.protocol!=="http:"||url.hostname!=="127.0.0.1"||url.pathname!=="/mcp")throw new TypeError("invalid broker frame");
-    return { version: VERSION, kind: "start_turn", requestId: id(input.requestId), turnId: id(input.turnId), agentId: id(input.agentId), wakeId: id(input.wakeId), prompt: text(input.prompt, 65_536),mcpEndpoint };
+    let limits: EngineBrokerTurnLimitOverrides | undefined;
+    if (input.limits !== undefined) { try { limits = parseEngineBrokerTurnLimitOverrides(input.limits); } catch { throw new TypeError("invalid broker frame"); } }
+    return { version: VERSION, kind: "start_turn", requestId: id(input.requestId), turnId: id(input.turnId), agentId: id(input.agentId), wakeId: id(input.wakeId), prompt: text(input.prompt, 65_536),mcpEndpoint,...(limits === undefined ? {} : { limits }) };
   }
   if (input.kind === "cancel_turn") {
     exact(input, ["version", "kind", "requestId", "turnId"]);
@@ -52,20 +73,39 @@ export function parseEngineBrokerResponse(value: unknown): EngineBrokerResponse 
     exact(input, ["version", "kind", "requestId", "turnId"]);
     return { version: VERSION, kind: "accepted", requestId: id(input.requestId), turnId: id(input.turnId) };
   }
-  if (input.kind === "completed") {
-    exact(input, ["version", "kind", "requestId", "turnId", "text", "workerPid", "workerUid", "workerStartTime"]);
-    if (!Number.isSafeInteger(input.workerPid) || (input.workerPid as number) < 1 || !Number.isSafeInteger(input.workerUid) || (input.workerUid as number) < 1) throw new TypeError("invalid broker frame");
-    return { version: VERSION, kind: "completed", requestId: id(input.requestId), turnId: id(input.turnId), text: text(input.text, 262_144), workerPid: input.workerPid as number, workerUid: input.workerUid as number, workerStartTime: id(input.workerStartTime) };
-  }
-  if (input.kind === "failed") {
-    exact(input, input.diagnostic === undefined ? ["version", "kind", "requestId", "turnId", "code"] : ["version", "kind", "requestId", "turnId", "code", "diagnostic"]);
-    const codes = ["auth_stale", "cancelled", "engine_failed", "invalid_request", "turn_conflict", "unavailable"] as const;
-    if (!codes.includes(input.code as typeof codes[number])) throw new TypeError("invalid broker frame");
-    let diagnostic:EngineBrokerFailureDiagnostic|undefined;
-    if(input.diagnostic!==undefined){const value=record(input.diagnostic);exact(value,["status","stage","failureClass","profileApplied","exitCode","termSignal","workerPid","workerUid","startTicks"]);const status=["prelaunch_failed","worker_failed","output_failed","cancelled"],stage=["peer","request","registration","executable","exec","wait","output","attestation"],failureClass=["peer","protocol","registration","executable","exec","wait","output_limit","cancelled","profile_missing","profile_invalid"];if(!status.includes(value.status as string)||!stage.includes(value.stage as string)||!failureClass.includes(value.failureClass as string)||typeof value.profileApplied!=="boolean"||![value.exitCode,value.termSignal,value.workerPid,value.workerUid].every(Number.isSafeInteger)||typeof value.startTicks!=="string"||!/^(0|[1-9][0-9]*)$/u.test(value.startTicks)||!closedDiagnostic(value))throw new TypeError("invalid broker frame");diagnostic=value as unknown as EngineBrokerFailureDiagnostic;}
-    return { version: VERSION, kind: "failed", requestId: id(input.requestId), turnId: id(input.turnId), code: input.code as typeof codes[number],...(diagnostic?{diagnostic}:{}) };
-  }
+  if (input.kind === "completed" || input.kind === "failed") return parseTerminal(input, VERSION) as EngineBrokerTerminalResponse;
   throw new TypeError("invalid broker frame");
+}
+
+/**
+ * A terminal response persisted by a pre-v2 broker: the v1 field sets exactly,
+ * with no accounting. Accepted only from the durable turn registry, never from
+ * the wire.
+ */
+export function parseEngineBrokerV1TerminalResponse(value: unknown): EngineBrokerV1TerminalResponse {
+  const input = record(value); if (input.version !== V1 || (input.kind !== "completed" && input.kind !== "failed")) throw new TypeError("invalid broker frame");
+  return parseTerminal(input, V1) as EngineBrokerV1TerminalResponse;
+}
+
+function parseTerminal(input: JsonRecord, expected: typeof VERSION | typeof V1): EngineBrokerTerminalResponse | EngineBrokerV1TerminalResponse {
+  const accounting = expected === VERSION ? ACCOUNTING : [];
+  if (input.kind === "completed") {
+    exact(input, ["version", "kind", "requestId", "turnId", "text", "workerPid", "workerUid", "workerStartTime", ...accounting]);
+    if (!Number.isSafeInteger(input.workerPid) || (input.workerPid as number) < 1 || !Number.isSafeInteger(input.workerUid) || (input.workerUid as number) < 1) throw new TypeError("invalid broker frame");
+    const base = { kind: "completed", requestId: id(input.requestId), turnId: id(input.turnId), text: text(input.text, 262_144), workerPid: input.workerPid as number, workerUid: input.workerUid as number, workerStartTime: id(input.workerStartTime) } as const;
+    return expected === VERSION ? { version: VERSION, ...base, ...parseEngineBrokerTurnAccounting(input, "completed") } : { version: V1, ...base };
+  }
+  const fields = ["version", "kind", "requestId", "turnId", "code", ...accounting];
+  exact(input, input.diagnostic === undefined ? fields : [...fields, "diagnostic"]);
+  const codes: readonly string[] = expected === VERSION ? ENGINE_BROKER_FAILURE_CODES : ENGINE_BROKER_FAILURE_CODES.filter((code) => code !== "limit_exceeded");
+  if (!codes.includes(input.code as string)) throw new TypeError("invalid broker frame");
+  let diagnostic:EngineBrokerFailureDiagnostic|undefined;
+  if(input.diagnostic!==undefined){const value=record(input.diagnostic);exact(value,["status","stage","failureClass","profileApplied","exitCode","termSignal","workerPid","workerUid","startTicks"]);const status=["prelaunch_failed","worker_failed","output_failed","cancelled"],stage=["peer","request","registration","executable","exec","wait","output","attestation"],failureClass=["peer","protocol","registration","executable","exec","wait","output_limit","cancelled","profile_missing","profile_invalid"];if(!status.includes(value.status as string)||!stage.includes(value.stage as string)||!failureClass.includes(value.failureClass as string)||typeof value.profileApplied!=="boolean"||![value.exitCode,value.termSignal,value.workerPid,value.workerUid].every(Number.isSafeInteger)||typeof value.startTicks!=="string"||!/^(0|[1-9][0-9]*)$/u.test(value.startTicks)||!closedDiagnostic(value))throw new TypeError("invalid broker frame");diagnostic=value as unknown as EngineBrokerFailureDiagnostic;}
+  const base = { kind: "failed", requestId: id(input.requestId), turnId: id(input.turnId), code: input.code as EngineBrokerFailureCode, ...(diagnostic ? { diagnostic } : {}) } as const;
+  if (expected === V1) return { version: V1, ...base } as V1Failed;
+  const accountingValue = parseEngineBrokerTurnAccounting(input, "failed");
+  if ((input.code === "limit_exceeded") !== (accountingValue.limitReason !== "none")) throw new TypeError("invalid broker frame");
+  return { version: VERSION, ...base, ...accountingValue };
 }
 
 function closedDiagnostic(value:JsonRecord):boolean{

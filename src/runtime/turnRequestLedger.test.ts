@@ -96,7 +96,21 @@ test("a real rollout reaches the stream end to end, one line per request", async
     assert.equal(rows.length, 4);
     assert.equal(rows.every((row) => row.thread === FIXTURE_THREAD && row.wake === "wake-1" && row.requests === 4), true);
     assert.deepEqual(rows.map((row) => row.fresh_input), [15_742, 248, 4_276, 10_068]);
+    // Each request carries its own rollout-frame interval, not the wake's append time.
+    // Mutation guard: stamping every row with `at` collapses these to one value.
+    assert.deepEqual(rows.map((row) => [row.started_at, row.ended_at]), [
+      ["2026-09-05T01:32:00.678Z", "2026-09-05T01:32:19.183Z"],
+      ["2026-09-05T01:34:00.679Z", "2026-09-05T01:52:22.056Z"],
+      ["2026-09-05T01:52:22.056Z", "2026-09-05T01:52:37.604Z"],
+      ["2026-09-05T01:52:37.604Z", "2026-09-05T01:52:51.112Z"]
+    ]);
   });
+});
+
+test("a request without measured timestamps carries none rather than the wake end", () => {
+  const [row] = renderTurnRequestLines({ agent: "a", wake: "w", thread: FIXTURE_THREAD, at: "2026-09-05T02:00:00.000Z", requests: [request({ startedAt: "not-a-time" })] }).split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line));
+  assert.equal("started_at" in row, false);
+  assert.equal("ended_at" in row, false);
 });
 
 test("a missing or malformed rollout writes nothing and still resolves", async () => {
