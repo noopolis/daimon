@@ -63,7 +63,8 @@ test("a grant refuses any tools member, the session_title request, and undeclare
     // Policy misses are non-retryable: 400, so a judge fails fast instead of retrying a 503.
     for (const body of refused) assert.equal((await post(port, token, body)).status, 400, body.slice(0, 120));
     assert.equal((await post(port, token, judgeBody(), "1.0.30")).status, 400);
-    assert.equal((await post(port, GROK_SESSION_TITLE_SINK_KEY, titleBody)).status, 400);
+    // The title sink keeps its transient 503 shape on the grant path too.
+    assert.equal((await post(port, GROK_SESSION_TITLE_SINK_KEY, titleBody)).status, 503);
     assert.equal(bodies.length, 0); assert.equal(rows.length, 0);
   });
 });
