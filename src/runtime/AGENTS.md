@@ -37,9 +37,14 @@ upstream-reported running total (prompt tokens *including* cached, plus
 completion) has reached `maxTokens` — HTTP 429, and the tripped limit aborts
 the worker through the ordinary cancel/kill path. The token ceiling is checked
 between requests, so a turn overshoots it by at most the last admitted
-request; if an upstream body carries no `usage`, only `maxRequests` and
-`timeoutMs` bound that turn mid-flight. A broker timer also trips `timeout`
-for a worker that is mid-request. Limits come from `service.json` v2
+request. That bound holds only because a turn has at most one upstream request
+in flight: an overlapping request is refused (429, uncounted), and Grok's loop
+is sequential in every live capture. A per-request usage block above
+`turnLimits.requestUsageMaxTokens` (500k) is invalid, and a response without
+valid usage is charged `ceil(bodyBytes/2) + 4096` tokens (rows say
+`usage_source: "estimated"`, usage rows `estimated_requests`), so a missing
+`usage` never disables the ceiling. A broker timer also trips `timeout` for a
+worker that is mid-request, and any trip aborts the in-flight upstream call. Limits come from `service.json` v2
 (`engineBrokerServiceConfig.ts`; v1 gets `GROK_ENGINE_BROKER.turnLimits.v1Defaults`)
 and a wake may only lower them: a raise is refused as `invalid_request`, never
 clamped.
@@ -49,9 +54,13 @@ seals every terminal turn — completed, failed, limit, cancelled — through
 `finishBrokerTurnWithUsage` (`grokEngineBrokerMetering.ts`): the turn registry
 record v2 stores the control-protocol v2 terminal response *with* its
 numeric-only accounting (`usage`, `outcome`, declared `model`, `requests`,
-closed `limitReason`), and only then are ledger rows appended. A replay
-returns the sealed accounting and never meters again; v1 records still replay
-(upgraded with `usage: null`). Completed usage is the terminal `result.usage`;
+closed `limitReason`) *and the exact ledger bytes it owes*, and only then are
+those bytes appended. A replay returns the sealed accounting and never meters
+again; it only appends the sealed bytes when the ledger has no row for that
+`turn` (a crash between seal and append). The window not closed: a crash
+before the record's rename seals the turn `failed` with `usage: null` on the
+next boot. Once a completed record is sealed, nothing after it can re-seal the
+turn as failed. v1 records still replay (upgraded with `usage: null`). Completed usage is the terminal `result.usage`;
 a failed turn's partial usage is its per-request stream frames
 (`../pi/grokStreamUsage.ts`) when output arrived, else the upstream usage the
 proxy saw. Usage rows carry `turn` (the idempotency key readers dedupe on —
@@ -67,7 +76,10 @@ Grok agent's slot (`noopolis.daimon.grok-broker-projection.v1`): Daimon's own
 deny collectors plus the caller's evaluator paths, profile/config/prompt
 digests, pinned executable, model, limits and ledger. A Grok agent must declare
 `model` and `reasoningEffort` for it; nothing is defaulted, and a supplied
-profile digest that differs is refused. `grokSlotPreflightReceipt.ts` is the
+profile digest that differs is refused. Paths are never resolved: Spawnfile
+must supply canonical non-symlink paths (its fixed tmpfs and workspace roots)
+and verify that during provisioning. The projection also carries the seccomp
+profile digest and the `bubblewrap` sandbox runtime a receipt must match. `grokSlotPreflightReceipt.ts` is the
 zod schema a root slot supervisor's receipt must satisfy
 (`noopolis.daimon.grok-slot-preflight.v1`, fixtures under
 `fixtures/grok-slot-preflight/`); `verifyGrokSlotPreflightReceipt` binds it to
