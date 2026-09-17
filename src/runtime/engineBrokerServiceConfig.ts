@@ -31,7 +31,12 @@ const V2_REGISTRATION = [...V1_REGISTRATION, "usageLedgerPath", "limits", "model
 const invalid = (): TypeError => new TypeError("invalid engine broker service config");
 const plain = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const exact = (value: Record<string, unknown>, fields: readonly string[]): void => { if (Object.keys(value).length !== fields.length || fields.some((field) => !Object.hasOwn(value, field))) throw invalid(); };
-const absolute = (item: unknown): item is string => typeof item === "string" && item.startsWith("/") && !item.includes("/../") && !item.endsWith("/..") && !item.includes("\0");
+/**
+ * Absolute and canonical: no `.`/`..`/empty components and no trailing slash.
+ * The native launcher derives HOME, GROK_HOME and TMPDIR from the registered
+ * home and refuses a non-canonical one, so the broker's view must match it.
+ */
+const absolute = (item: unknown): item is string => typeof item === "string" && item.length > 1 && item.startsWith("/") && !item.endsWith("/") && path.posix.normalize(item) === item && !item.split("/").slice(1).some((part) => part === "." || part === "..") && !item.includes("\0");
 
 /** The per-request stream written beside a registration's usage ledger. */
 export const engineBrokerRequestLedgerPathFor = (usageLedgerPath: string): string => path.posix.join(path.posix.dirname(usageLedgerPath), "requests.jsonl");

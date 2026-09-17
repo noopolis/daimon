@@ -21,7 +21,7 @@ const defines = (): ReadonlyMap<string, string> => {
 
 /** The compiled worker argv, token by token, exactly as `launch()` passes it to `execveat`. */
 const compiledArgv = (): readonly string[] => {
-  const source = read("engineBrokerLauncherCore.inc");
+  const source = `${read("engineBrokerLauncherCore.inc")}${read("engineBrokerLauncherServer.inc")}`;
   const block = source.match(/char \*const argv\[\] = \{([\s\S]*?)NULL\};/u);
   assert.ok(block, "launcher argv array not found");
   const values = defines();
@@ -55,15 +55,16 @@ test("the compiled system prompt is byte-identical to the contract prompt pinned
 });
 
 test("the launcher exports the turn provider capability under the env_key the worker config reads", () => {
-  const source = read("engineBrokerLauncherCore.inc");
+  const source = `${read("engineBrokerLauncherCore.inc")}${read("engineBrokerLauncherServer.inc")}`;
   assert.match(source, new RegExp(`"${GROK_BROKER_PROVIDER_CAPABILITY_ENV}=%s"`, "u"));
   assert.match(source, /char \*const envp\[\] = \{home,\s*grok,\s*tmp,\s*mcp_env,\s*provider_env,/u);
   assert.match(renderGrokBrokerWorkerConfig(), new RegExp(`\\nenv_key = "${GROK_BROKER_PROVIDER_CAPABILITY_ENV}"\\n`, "u"));
 });
 
 test("the launcher gives every worker a private TMPDIR under its registered home", () => {
-  const source = read("engineBrokerLauncherCore.inc");
-  assert.match(source, /snprintf\(tmp, sizeof\(tmp\), "TMPDIR=%s\/tmp", r->home\);/u);
+  const source = `${read("engineBrokerLauncherCore.inc")}${read("engineBrokerLauncherServer.inc")}`;
+  assert.match(source, /snprintf\(tmp, sizeof\(tmp\), "TMPDIR=%s\/tmp", r->home\) >=\s*sizeof\(tmp\)/u);
+  assert.match(source, /canonical_path\(r->home, sizeof\(r->home\)\)/u);
   assert.match(source, /char \*const envp\[\] = \{home,\s*grok,\s*tmp,/u);
   assert.equal(GROK_ENGINE_BROKER.worker.home.privateTmp.relativeToWorkerHome, "tmp");
 });
