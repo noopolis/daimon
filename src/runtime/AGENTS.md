@@ -179,6 +179,26 @@ model declares it, so the declared effort is
 the model's single `reasoning_efforts` entry. HTTP MCP needs CA certificates in
 the image even for a loopback `http://` URL ("Failed to build HTTP client").
 
+`engineBrokerMcpFacade.ts` is the worker's only route to its per-wake MCP mount
+and rebuilds every header from a closed allowlist in both directions, so the
+worker's bearer never reaches the mount and no mount header reaches the worker
+uninvited. That allowlist must include the Streamable HTTP transport's own
+routing headers or the route does not exist: forwarding only
+`content-type`/`accept` destroyed `Mcp-Session-Id`, so `initialize` returned 200
+while every request after it — `notifications/initialized`, `tools/list`,
+`tools/call` — came back HTTP 400 `Mcp-Session-Id header is required`, and the
+model saw `search_tool` answer `{"results":[],"total_hidden_tools":0,"status":
+"partial"}`. Client to mount: `content-type`, `accept`, `mcp-session-id`,
+`mcp-protocol-version`, `last-event-id`. Mount to client: `content-type`,
+`mcp-session-id`, `mcp-protocol-version`, plus the facade's own
+`cache-control: no-store`. The session id is an opaque routing value and is
+never logged or ledgered. The facade also carries the three methods the
+transport uses — POST, the standalone `GET` SSE stream that is the only route a
+server notification or progress frame can take, and the `DELETE` that ends a
+session — and streams each body rather than buffering it, because a GET tunnel
+stays open for the whole session. Never widen it into a transparent proxy: the
+whole point of the boundary is that the allowlist is closed.
+
 Worker `GROK_HOME` layout the deployment must provision (attested before every
 turn by `grokWorkerHomeAttestation.ts`, recorded in `GROK_ENGINE_BROKER.worker.home`):
 `$GROK_HOME` and `$GROK_HOME/sessions` `root:<worker> 1771`; `config.toml`,
