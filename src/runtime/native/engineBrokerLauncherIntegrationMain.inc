@@ -1,3 +1,52 @@
+/* A worker that fails before or at exec must not run anything: the launcher
+   child exits instead. The registered "executable" is a #! script; fd 5 is
+   close-on-exec, so execveat(AT_EMPTY_PATH) cannot run it (a script needs
+   /dev/fd/5 after exec) and the turn fails at the exec stage. */
+static void exec_failure_case(struct dbl_registration r) {
+  const char *marker = "/tmp/exec-failure-script-ran";
+  unlink(marker);
+  check(rename("/usr/local/bin/grok", "/usr/local/bin/grok.fixture") == 0,
+        "exec failure fixture move");
+  int script = open("/usr/local/bin/grok", O_CREAT | O_EXCL | O_WRONLY, 0755);
+  const char body[] = "#!/bin/sh\ntouch /tmp/exec-failure-script-ran\n";
+  check(script >= 0 && write(script, body, sizeof(body) - 1) ==
+                           (ssize_t)(sizeof(body) - 1),
+        "exec failure script");
+  close(script);
+  digest("/usr/local/bin/grok", r.executable_sha256);
+  int f = open(DBL_REGISTRY, O_TRUNC | O_WRONLY, 0600);
+  check(f >= 0 && write(f, &r, sizeof(r)) == sizeof(r), "exec failure registry");
+  close(f);
+  pid_t child = fork();
+  if (!child) {
+    setgid(DBL_BROKER_UID);
+    setuid(DBL_BROKER_UID);
+    int s = connect_socket(), p = sealed("prompt"),
+        c = sealed_bundle("provider.Exec-1", "mcp.Exec-2");
+    struct dbl_request q = request();
+    struct dbl_result result;
+    send_request(s, &q, p, c);
+    _exit(read_all(s, &result, sizeof(result)) &&
+                  result.status == DBL_STATUS_PRELAUNCH_FAILED &&
+                  result.stage == DBL_STAGE_EXEC &&
+                  result.failure_class == DBL_FAILURE_EXEC &&
+                  result.worker_pid == 0
+              ? 0
+              : 1);
+  }
+  int status;
+  waitpid(child, &status, 0);
+  check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "exec failure result");
+  sleep(1);
+  check(access(marker, F_OK) != 0, "exec failure ran nothing");
+  unlink("/usr/local/bin/grok");
+  check(rename("/usr/local/bin/grok.fixture", "/usr/local/bin/grok") == 0,
+        "exec failure fixture restore");
+  digest("/usr/local/bin/grok", r.executable_sha256);
+  f = open(DBL_REGISTRY, O_TRUNC | O_WRONLY, 0600);
+  check(f >= 0 && write(f, &r, sizeof(r)) == sizeof(r), "registry restore");
+  close(f);
+}
 int main(void) {
   setbuf(stdout, NULL);
   alarm(40);
@@ -61,6 +110,9 @@ int main(void) {
   }
   int status;
   waitpid(org, &status, 0);
+  check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "org cases");
+  exec_failure_case(r);
+  puts("native-stage exec failure complete");
   kill(broker, SIGKILL);
   waitpid(broker, 0, 0);
   check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "org cases");
