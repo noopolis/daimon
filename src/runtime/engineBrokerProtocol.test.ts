@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { encodeEngineBrokerFrame, EngineBrokerFrameDecoder, parseEngineBrokerRequest, parseEngineBrokerResponse } from "./engineBrokerProtocol.js";
+import { encodeEngineBrokerFrame, EngineBrokerFrameDecoder, parseEngineBrokerRequest, parseEngineBrokerResponse, parseEngineBrokerV1TerminalResponse } from "./engineBrokerProtocol.js";
 
-const start = { version: "noopolis.daimon.engine-broker.v1", kind: "start_turn", requestId: "request-1", turnId: "turn-1", agentId: "agent-1", wakeId: "wake-1", prompt: "work",mcpEndpoint:"http://127.0.0.1:4567/mcp" } as const;
+const accounting = { outcome: "completed", usage: { input: 20, cacheRead: 0, cacheWrite: 0, output: 10, total: 30 }, model: "grok-4.6", requests: 2, limitReason: "none" } as const;
+const start = { version: "noopolis.daimon.engine-broker.v2", kind: "start_turn", requestId: "request-1", turnId: "turn-1", agentId: "agent-1", wakeId: "wake-1", prompt: "work",mcpEndpoint:"http://127.0.0.1:4567/mcp" } as const;
 
 test("broker frames survive arbitrary chunking and validate closed requests", () => {
   const encoded = encodeEngineBrokerFrame(start); const decoder = new EngineBrokerFrameDecoder(); const values: unknown[] = [];
@@ -13,15 +14,51 @@ test("broker frames survive arbitrary chunking and validate closed requests", ()
 });
 
 test("broker response attestation is mandatory and bounded", () => {
-  const value = { version: start.version, kind: "completed", requestId: "request-1", turnId: "turn-1", text: "done", workerPid: 12, workerUid: 2200, workerStartTime: "12345" } as const;
+  const value = { version: start.version, kind: "completed", requestId: "request-1", turnId: "turn-1", text: "done", workerPid: 12, workerUid: 2200, workerStartTime: "12345", ...accounting } as const;
   assert.deepEqual(parseEngineBrokerResponse(value), value);
   assert.throws(() => parseEngineBrokerResponse({ ...value, workerUid: 0 }), /invalid broker frame/);
   const decoder = new EngineBrokerFrameDecoder(); assert.throws(() => decoder.push(Uint8Array.from([0, 16, 0, 1])), /invalid broker frame/);
 });
 
 test("broker failure diagnostics are closed and contain no raw worker output",()=>{
-  const value={version:start.version,kind:"failed",requestId:"request-1",turnId:"turn-1",code:"engine_failed",diagnostic:{status:"prelaunch_failed",stage:"executable",failureClass:"executable",profileApplied:false,exitCode:-1,termSignal:0,workerPid:0,workerUid:0,startTicks:"0"}} as const;
+  const value={version:start.version,kind:"failed",requestId:"request-1",turnId:"turn-1",code:"engine_failed",diagnostic:{status:"prelaunch_failed",stage:"executable",failureClass:"executable",profileApplied:false,exitCode:-1,termSignal:0,workerPid:0,workerUid:0,startTicks:"0"},outcome:"failed",usage:null,model:"grok-4.6",requests:0,limitReason:"none"} as const;
   assert.deepEqual(parseEngineBrokerResponse(value),value);
   assert.throws(()=>parseEngineBrokerResponse({...value,diagnostic:{...value.diagnostic,rawOutput:"secret"}}),/invalid broker frame/u);
   assert.throws(()=>parseEngineBrokerResponse({...value,diagnostic:{...value.diagnostic,failureClass:"secret"}}),/invalid broker frame/u);
+});
+
+test("v2 terminal frames carry closed numeric accounting and refuse anything else", () => {
+  const completed = { version: start.version, kind: "completed", requestId: "request-1", turnId: "turn-1", text: "done", workerPid: 12, workerUid: 2200, workerStartTime: "12345", ...accounting } as const;
+  assert.deepEqual(parseEngineBrokerResponse(completed), completed);
+  for (const bad of [
+    { ...completed, usage: { ...accounting.usage, total: 31 } },
+    { ...completed, usage: { ...accounting.usage, note: "text" } },
+    { ...completed, usage: { ...accounting.usage, input: "20" } },
+    { ...completed, model: "grok-4.6-build" },
+    { ...completed, outcome: "failed" },
+    { ...completed, limitReason: "tokens" },
+    { ...completed, limitReason: "budget" },
+    { ...completed, requests: -1 },
+    { ...completed, extra: 1 },
+    (({ limitReason: _omit, ...rest }) => rest)(completed)
+  ]) assert.throws(() => parseEngineBrokerResponse(bad), /invalid broker frame/u);
+  const limit = { version: start.version, kind: "failed", requestId: "request-1", turnId: "turn-1", code: "limit_exceeded", outcome: "failed", usage: { input: 5, cacheRead: 5, cacheWrite: 0, output: 1, total: 11 }, model: "grok-4.6", requests: 3, limitReason: "requests" } as const;
+  assert.deepEqual(parseEngineBrokerResponse(limit), limit);
+  assert.throws(() => parseEngineBrokerResponse({ ...limit, limitReason: "none" }), /invalid broker frame/u);
+  assert.throws(() => parseEngineBrokerResponse({ ...limit, code: "engine_failed" }), /invalid broker frame/u);
+});
+
+test("v1 frames are refused on the wire but a v1 terminal record still parses", () => {
+  const v1 = { version: "noopolis.daimon.engine-broker.v1", kind: "completed", requestId: "request-1", turnId: "turn-1", text: "done", workerPid: 12, workerUid: 2200, workerStartTime: "12345" } as const;
+  assert.throws(() => parseEngineBrokerResponse(v1), /invalid broker frame/u);
+  assert.throws(() => parseEngineBrokerRequest({ ...start, version: "noopolis.daimon.engine-broker.v1" }), /invalid broker frame/u);
+  assert.deepEqual(parseEngineBrokerV1TerminalResponse(v1), v1);
+  assert.throws(() => parseEngineBrokerV1TerminalResponse({ ...v1, ...accounting }), /invalid broker frame/u);
+});
+
+test("start_turn limits are an optional closed subset inside their bounds", () => {
+  assert.deepEqual(parseEngineBrokerRequest({ ...start, limits: { maxTokens: 1_000 } }), { ...start, limits: { maxTokens: 1_000 } });
+  for (const limits of [{}, { maxTokens: 0 }, { maxRequests: 49 }, { timeoutMs: 999 }, { maxTokens: 1, raise: true }, { maxTokens: 1.5 }]) {
+    assert.throws(() => parseEngineBrokerRequest({ ...start, limits }), /invalid broker frame/u);
+  }
 });
