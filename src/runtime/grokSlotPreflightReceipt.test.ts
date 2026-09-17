@@ -38,6 +38,8 @@ test("a receipt for a different projection, slot, profile or deny set is refused
   // Mutation guard: dropping the digest comparison accepts this fixture.
   await assert.rejects(async () => verifyGrokSlotPreflightReceipt(await fixture("receipt.projection-mismatch.json"), projected), /projection_sha256/u);
   await assert.rejects(async () => verifyGrokSlotPreflightReceipt(await fixture("receipt.missing-canary.json"), projected), /canaries/u);
+  // Exact match, both halves: a canary for a path the projection does not deny is as wrong as a missing one.
+  await assert.rejects(async () => verifyGrokSlotPreflightReceipt(await fixture("receipt.extra-canary.json"), projected), /canaries/u);
   assert.throws(() => verifyGrokSlotPreflightReceipt(valid, { ...projected, limits: { ...projected.limits, maxTokens: 1 } }), /projection_sha256/u);
   assert.throws(() => verifyGrokSlotPreflightReceipt({ ...valid, sandbox_profile_sha256: "1".repeat(64) }, projected), /sandbox_profile_sha256/u);
   assert.throws(() => verifyGrokSlotPreflightReceipt({ ...valid, slot: 1 }, projected), /slot/u);
