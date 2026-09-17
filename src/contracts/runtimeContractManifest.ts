@@ -69,9 +69,9 @@ export const GROK_ENGINE_BROKER = {
   },
   bounds: { promptBytes: 65_536, capabilityBytes: 4_096, capabilityBundleBytes: 8_196, outputBytes: 65_536 },
   artifacts: {
-    sourceSha256: "bdcab1e12dcc531ed8e56f890263ca23a9ee7bac468191dd598e143df4ff8c58",
-    x64Sha256: "e3fe2738fc8a979861085b4003bf2d5d7c284874897cb6ec2e2e2383211768bd",
-    arm64Sha256: "ad44e02c38e6a3207ac4a3d5fd98b6d2e55341ce42dfd2f07204bbe54a7a653d"
+    sourceSha256: "7830ff308420cf1b84aba118903c1e8ef40f8c2a320136977a1e7f9e3292a734",
+    x64Sha256: "b3da1618ca218ff44ce178385f94146736439acccaedaf047d41709ab0aa5d43",
+    arm64Sha256: "b4f41d429db5f8fefaf880f9ff9d64e76d0687829e6002fe7c7052cc7a41af6e"
   }
 } as const;
 export const AGY_SUBSCRIPTION_REALM = {
