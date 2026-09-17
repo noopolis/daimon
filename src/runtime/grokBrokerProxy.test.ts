@@ -137,3 +137,16 @@ test("a non-refusal fault names its own class and message on one bounded line, c
     assert.ok(Buffer.byteLength(line, "utf8") <= 900, `the line stays bounded: ${Buffer.byteLength(line, "utf8")} bytes`);
   } finally { process.stderr.write = original; await proxy.close(); }
 });
+
+test("a fault's own cause is named too, because `fetch failed` on its own names nothing", async () => {
+  const lines: string[] = []; const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  // Exactly the shape undici throws when the provider is unreachable.
+  const fault = new TypeError("fetch failed"); (fault as { cause?: unknown }).cause = Object.assign(new Error(""), { code: "ENOTFOUND" });
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async () => { throw fault; });
+  try {
+    const token = proxy.capabilities.issue("agent", "turn"); arm(proxy, async () => undefined);
+    assert.equal(await post(proxy.port, token, leanBody()), 503);
+    assert.deepEqual(lines, ["[grok-proxy] refused: broker_unavailable (TypeError: fetch failed <- Error: ENOTFOUND)\n"]);
+  } finally { process.stderr.write = original; await proxy.close(); }
+});

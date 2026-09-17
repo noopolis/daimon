@@ -178,8 +178,12 @@ request does name itself on the broker's stderr, and a fault that is not a
 …)` — because the bare word carries no diagnostic content and is answered 503,
 which Grok blind-retries: one live turn emitted it fifteen times over five
 minutes, spent $0, and died with no account of why. That cause is the error's
-class and message only (never a body, bearer, capability, session id or
-header), redacted through `redactCredentialText` with that request's own
+class and message, plus one level of its own `cause` — every failed provider
+`fetch` is `TypeError: fetch failed` and names nothing without it, so the line
+reads `broker_unavailable (TypeError: fetch failed <- Error: ENOTFOUND)`, an
+errno cause with no message named by its `code`. Nothing else: never a body,
+bearer, capability, session id or
+header. It is redacted through `redactCredentialText` with that request's own
 capabilities as exact secrets and the `CLI_ENGINE_MAX_DIAGNOSTIC_BYTES` bound,
 flattened to one line, exactly as the failed CLI child and the launcher's
 worker diagnostic are. It is a log line only: the 503 is unchanged, because a

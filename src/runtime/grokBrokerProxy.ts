@@ -125,16 +125,28 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
  * bound — and flattened to one line, because it travels on a log line. Naming
  * a fault must never be able to fail the response that reports it, so a value
  * that cannot even be described degrades to a marker.
+ *
+ * One level of `cause` is named too, because the fault this exists for names
+ * nothing without it: every failed `fetch` to the provider is `TypeError:
+ * fetch failed`, and which fault it was — `ENOTFOUND`, `ECONNREFUSED`, a TLS
+ * refusal, an abort — is only in the cause. An errno error whose message is
+ * empty is named by its `code`.
  */
 const brokerFaultCause = (error: unknown, secrets: readonly string[]): string => {
   try {
-    const described = error instanceof Error
-      ? `${error.constructor?.name ?? error.name}: ${error.message}`
-      : `${typeof error}: ${String(error)}`;
+    const described = `${describeFault(error)}${error instanceof Error && error.cause !== undefined && error.cause !== null ? ` <- ${describeFault(error.cause)}` : ""}`;
     const flattened = described.replace(/[ -]+/gu, " ").replace(/\s+/gu, " ").trim();
     const named = redactCredentialText(flattened, secrets, CLI_ENGINE_MAX_DIAGNOSTIC_BYTES).trim();
     return named.length === 0 ? "unnamed" : named;
   } catch { return "unnameable"; }
+};
+
+/** One value's class and words: an error's own, or the type of whatever else was thrown. */
+const describeFault = (error: unknown): string => {
+  if (!(error instanceof Error)) return `${typeof error}: ${String(error)}`;
+  const code = (error as NodeJS.ErrnoException).code;
+  const words = error.message.length > 0 ? error.message : typeof code === "string" ? code : "(no message)";
+  return `${error.constructor?.name ?? error.name}: ${words}`;
 };
 
 /**
