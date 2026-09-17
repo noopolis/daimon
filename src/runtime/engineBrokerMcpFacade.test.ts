@@ -14,11 +14,40 @@ import { createPiToolMcpServer } from "../mcp/toolServer.js";
 import { ENGINE_BROKER_MCP_FACADE_PORT, startEngineBrokerMcpFacade } from "./engineBrokerMcpFacade.js";
 
 const FACADE_URL = `http://127.0.0.1:${ENGINE_BROKER_MCP_FACADE_PORT}/mcp`;
+type Facade = Awaited<ReturnType<typeof startEngineBrokerMcpFacade>>;
+
+/**
+ * One facade serves every turn of a broker, so the tests share one too. It
+ * also keeps the fixed port free: a facade per test would leave the HTTP
+ * client pooling a socket onto a server that no longer exists.
+ */
+let shared: Facade | undefined;
+const sharedFacade = async (): Promise<Facade> => (shared ??= await startFacade());
+const releaseShared = async (): Promise<void> => { const facade = shared; shared = undefined; if (facade) await facade.close(); };
+test.after(releaseShared);
+
+/**
+ * Closing a facade destroys its sockets, and the port is fixed, so the HTTP
+ * client can still hold a pooled connection to the server that just went away.
+ * That is a test-harness artifact — one facade outlives a whole broker — so a
+ * fresh facade is probed until a refusal proves the route is live again.
+ */
+const startFacade = async (): Promise<Facade> => {
+  const facade = await startEngineBrokerMcpFacade();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const probe = await fetch(FACADE_URL, { method: "PUT" });
+      await probe.body?.cancel();
+      if (probe.status === 403) return facade;
+    } catch { /* a pooled socket onto the previous facade: try the next one */ }
+  }
+  throw new Error("facade did not answer after starting");
+};
 
 test("MCP facade routes only valid active capabilities to the registered mount", async () => {
   let calls=0;const target=createServer((_request,response)=>{calls++;response.writeHead(200,{"content-type":"application/json"});response.end('{"ok":true}');});await new Promise<void>((resolve)=>target.listen(0,"127.0.0.1",resolve));const address=target.address();if(address===null||typeof address==="string")throw new Error();
-  const facade=await startEngineBrokerMcpFacade();const token=facade.register("agent","turn",`http://127.0.0.1:${address.port}/mcp`);const call=(value:string)=>fetch(FACADE_URL,{method:"POST",headers:{authorization:`Bearer ${value}`,"content-type":"application/json"},body:"{}"});
-  try{assert.equal((await call("wrong-token-abcdefghijklmnopqrstuvwxyz0123456789")).status,403);assert.equal((await call(token)).status,200);assert.equal(calls,1);facade.revoke("turn");assert.equal((await call(token)).status,403);assert.equal(calls,1);}finally{await facade.close();await new Promise<void>((resolve)=>target.close(()=>resolve()));}
+  const facade=await sharedFacade();const token=facade.register("agent","turn-capabilities",`http://127.0.0.1:${address.port}/mcp`);const call=(value:string)=>fetch(FACADE_URL,{method:"POST",headers:{authorization:`Bearer ${value}`,"content-type":"application/json"},body:"{}"});
+  try{assert.equal((await call("wrong-token-abcdefghijklmnopqrstuvwxyz0123456789")).status,403);assert.equal((await call(token)).status,200);assert.equal(calls,1);facade.revoke("turn-capabilities");assert.equal((await call(token)).status,403);assert.equal(calls,1);}finally{facade.revoke("turn-capabilities");await new Promise<void>((resolve)=>target.close(()=>resolve()));}
 });
 
 /**
@@ -28,12 +57,13 @@ test("MCP facade routes only valid active capabilities to the registered mount",
  * so every case below drives the transport end to end.
  */
 type Rig = Readonly<{
-  facade: Awaited<ReturnType<typeof startEngineBrokerMcpFacade>>;
-  mount: HttpServer;
-  transport: StreamableHTTPServerTransport;
+  facade: Facade;
+  turnId: string;
   server: ReturnType<typeof createPiToolMcpServer>;
   capability: string;
   observed: IncomingMessage[];
+  /** Resolves when the mount's standalone GET stream is torn down. */
+  getStreamClosed: Promise<void>;
   close: () => Promise<void>;
 }>;
 
@@ -47,13 +77,20 @@ const echoTool = defineTool({
   }
 });
 
-const startRig = async (): Promise<Rig> => {
+let turns = 0;
+
+const startRig = async (facade?: Facade): Promise<Rig> => {
+  const host = facade ?? await sharedFacade();
+  const turnId = `turn-${++turns}`;
   const server = createPiToolMcpServer([echoTool], {});
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
   await server.connect(transport);
   const observed: IncomingMessage[] = [];
+  let noteGetStreamClosed = (): void => undefined;
+  const getStreamClosed = new Promise<void>((resolve) => { noteGetStreamClosed = resolve; });
   const mount = createServer((request, response) => {
     observed.push(request);
+    if (request.method === "GET") response.on("close", () => noteGetStreamClosed());
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
@@ -66,18 +103,21 @@ const startRig = async (): Promise<Rig> => {
   await new Promise<void>((resolve) => mount.listen(0, "127.0.0.1", resolve));
   const address = mount.address();
   if (address === null || typeof address === "string") throw new Error("mount address unavailable");
-  const facade = await startEngineBrokerMcpFacade();
-  const capability = facade.register("alpha", "turn-1", `http://127.0.0.1:${address.port}/mcp`);
+  const capability = host.register("alpha", turnId, `http://127.0.0.1:${address.port}/mcp`);
   return {
-    facade, mount, transport, server, capability, observed,
+    facade: host, turnId, server, capability, observed, getStreamClosed,
     close: async () => {
-      facade.revoke("turn-1");
-      await facade.close();
-      await new Promise<void>((resolve) => mount.close(() => resolve()));
-      await transport.close().catch(() => undefined);
-      await server.close().catch(() => undefined);
+      host.revoke(turnId);
+      await closeMount(mount, transport, server);
     }
   };
+};
+
+const closeMount = async (mount: HttpServer, transport: StreamableHTTPServerTransport, server: ReturnType<typeof createPiToolMcpServer>): Promise<void> => {
+  mount.closeAllConnections();
+  await new Promise<void>((resolve) => mount.close(() => resolve()));
+  await transport.close().catch(() => undefined);
+  await server.close().catch(() => undefined);
 };
 
 const connectClient = async (capability: string): Promise<{ client: Client; transport: StreamableHTTPClientTransport }> => {
@@ -87,6 +127,15 @@ const connectClient = async (capability: string): Promise<{ client: Client; tran
   const client = new Client({ name: "daimon-facade-test-client", version: "0.1.0" });
   await client.connect(transport);
   return { client, transport };
+};
+
+const withDeadline = async <T>(work: Promise<T>, ms: number, reason: string): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(reason)), ms); })]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 };
 
 test("a brokered worker completes the whole MCP handshake through the facade and calls a mounted tool", async () => {
@@ -120,10 +169,7 @@ test("the facade carries the mount's server-initiated SSE stream, which only the
       // take; a POST-only facade answers it 403 and this never arrives.
       await new Promise<void>((resolve) => setTimeout(resolve, 150));
       rig.server.sendToolListChanged();
-      await Promise.race([
-        notified,
-        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("no server notification reached the client")), 4_000))
-      ]);
+      await withDeadline(notified, 4_000, "no server notification reached the client");
       assert.ok(rig.observed.some((request) => request.method === "GET"), "the mount must have seen the GET stream");
       assert.equal(typeof transport.sessionId, "string");
     } finally {
@@ -170,9 +216,12 @@ test("the facade forwards a closed header allowlist and never the worker's beare
     const forwarded = rig.observed.flatMap((request) => Object.keys(request.headers));
     assert.equal(forwarded.includes("authorization"), false, "the turn capability must never reach the mount");
     assert.equal(forwarded.includes("cookie"), false);
-    const allowed = new Set(["host", "connection", "content-length", "transfer-encoding", "accept-encoding", "accept-language", "user-agent", "content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id",
-      // undici's own outbound headers, set by the facade's fetch rather than forwarded from the worker.
-      "sec-fetch-mode"]);
+    const allowed = new Set([
+      "host", "connection", "content-length", "transfer-encoding", "accept-encoding", "accept-language", "user-agent",
+      "content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id",
+      // undici's own outbound header, set by the facade's fetch rather than forwarded from the worker.
+      "sec-fetch-mode"
+    ]);
     const unexpected = [...new Set(forwarded)].filter((name) => !allowed.has(name));
     assert.deepEqual(unexpected, [], `unexpected headers reached the mount: ${unexpected.join(",")}`);
   } finally {
@@ -194,8 +243,8 @@ test("the facade withholds a mount response header that is not on the allowlist"
   await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
   const address = target.address();
   if (address === null || typeof address === "string") throw new Error("target address unavailable");
-  const facade = await startEngineBrokerMcpFacade();
-  const capability = facade.register("alpha", "turn-1", `http://127.0.0.1:${address.port}/mcp`);
+  const facade = await sharedFacade();
+  const capability = facade.register("alpha", "turn-response-headers", `http://127.0.0.1:${address.port}/mcp`);
   try {
     const answered = await fetch(FACADE_URL, {
       method: "POST",
@@ -210,15 +259,14 @@ test("the facade withholds a mount response header that is not on the allowlist"
     assert.equal(answered.headers.get("x-mount-internal"), null);
     await answered.body?.cancel();
   } finally {
-    facade.revoke("turn-1");
-    await facade.close();
+    facade.revoke("turn-response-headers");
     await new Promise<void>((resolve) => target.close(() => resolve()));
   }
 });
 
 test("the facade still refuses every route and method outside the MCP surface", async () => {
-  const facade = await startEngineBrokerMcpFacade();
-  const capability = facade.register("alpha", "turn-1", "http://127.0.0.1:1/mcp");
+  const facade = await sharedFacade();
+  const capability = facade.register("alpha", "turn-refusals", "http://127.0.0.1:1/mcp");
   const call = (method: string, path: string) => fetch(`http://127.0.0.1:${ENGINE_BROKER_MCP_FACADE_PORT}${path}`, {
     method, headers: { authorization: `Bearer ${capability}` }
   });
@@ -229,7 +277,37 @@ test("the facade still refuses every route and method outside the MCP surface", 
     assert.equal((await call("PATCH", "/mcp")).status, 403);
     assert.equal((await fetch(`http://127.0.0.1:${ENGINE_BROKER_MCP_FACADE_PORT}/mcp`, { method: "GET" })).status, 403);
   } finally {
-    facade.revoke("turn-1");
-    await facade.close();
+    facade.revoke("turn-refusals");
   }
+});
+
+/**
+ * Last, because both cases take the fixed port for themselves: an open GET
+ * tunnel must not survive its own capability, and must not stall shutdown
+ * either — a server-to-client stream stays open for the whole session, so
+ * before it existed nothing could hold the listener open.
+ */
+test("revoking a turn tears down its open server-to-client stream, and closing never stalls on one", async () => {
+  await releaseShared();
+  const facade = await startFacade();
+  const rig = await startRig(facade);
+  const { client } = await connectClient(rig.capability);
+  await new Promise<void>((resolve) => setTimeout(resolve, 150));
+  assert.ok(rig.observed.some((request) => request.method === "GET"), "the GET stream must be open before revoking");
+
+  // The client's stream survives its own capability unless the facade ends the
+  // tunnel: the mount's GET response is the side that has to close.
+  facade.revoke(rig.turnId);
+  await withDeadline(rig.getStreamClosed, 4_000, "a revoked capability left its SSE tunnel open");
+
+  // A second turn's tunnel, deliberately left open, is what shutdown must not wait on.
+  const second = await startRig(facade);
+  const held = await connectClient(second.capability);
+  await new Promise<void>((resolve) => setTimeout(resolve, 150));
+  await withDeadline(facade.close(), 3_000, "closing the facade stalled on an open SSE tunnel");
+
+  await held.client.close().catch(() => undefined);
+  await client.close().catch(() => undefined);
+  await second.close().catch(() => undefined);
+  await rig.close().catch(() => undefined);
 });
