@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { appendFile, chmod, link, mkdir, mkdtemp, open, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdtemp, open, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test, { mock } from "node:test";
+import test from "node:test";
 
 import {
   createGrokWorkerIsolationGuard,
   GrokWorkerAttestationFailure,
-  prepareGrokWorkerAttestation,
   verifyGrokWorkerAttestation,
   type GrokWorkerAttestationSnapshot
 } from "./grokWorkerAttestation.js";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, link, mkdir, mkdtemp, open, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
+import { appendFile, chmod, link, mkdir, mkdtemp, open, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { mock } from "node:test";
