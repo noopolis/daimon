@@ -193,6 +193,7 @@ const notice = (input: Readonly<{
  * creates itself stays 0700, so for every other engine nothing new is exposed.
  */
 export const SPILL_FILE_MODE = 0o640;
+export const SPILL_DIRECTORY_MAX_MODE = 0o2750;
 
 /**
  * Write the full payload where the agent can read it, atomically.
@@ -203,13 +204,66 @@ export const SPILL_FILE_MODE = 0o640;
  */
 const writeSpill = async (directory: string, name: string, text: string): Promise<string> => {
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  const pinned = await pinSpillDirectory(directory);
   const file = path.join(directory, name);
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
-  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, SPILL_FILE_MODE);
-  // Explicit, so a restrictive umask cannot strip the group read an agent's sandboxed worker needs.
-  try { await handle.chmod(SPILL_FILE_MODE); await handle.writeFile(text, "utf8"); await handle.sync(); } finally { await handle.close(); }
-  try { await rename(temporary, file); } catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
-  return file;
+  try {
+    const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, SPILL_FILE_MODE);
+    let written: Awaited<ReturnType<typeof handle.stat>>;
+    // Explicit, so a restrictive umask cannot strip the group read an agent's sandboxed worker needs.
+    try { await handle.chmod(SPILL_FILE_MODE); await handle.writeFile(text, "utf8"); await handle.sync(); written = await handle.stat(); } finally { await handle.close(); }
+    if (!written.isFile() || written.nlink !== 1 || written.uid !== process.getuid?.()) throw new Error("spill file is not a private regular file");
+    // Node has no openat: re-check that the directory entry still names the pinned inode before publishing into it.
+    await assertSameDirectory(directory, pinned);
+    // rename replaces a pre-existing destination entry (a symlink included) without following it.
+    await rename(temporary, file);
+    const published = await lstat(file);
+    if (!published.isFile() || published.dev !== written.dev || published.ino !== written.ino) throw new Error("spill file was replaced");
+    return file;
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  } finally {
+    await pinned.handle.close();
+  }
+};
+
+type PinnedDirectory = Readonly<{ handle: Awaited<ReturnType<typeof open>>; dev: number; ino: number }>;
+
+/**
+ * The spill directory must be a real directory owned by this runtime and no
+ * wider than `2750`: either Daimon's own `0700`, or a deployment-provisioned
+ * setgid directory whose group is not the runtime's own (a worker group). A
+ * symlinked, foreign-owned, world-accessible, or group-open-without-setgid
+ * directory is refused and nothing is written. Daimon cannot know *which*
+ * worker gid belongs to this agent; that mapping is the deployment's
+ * provisioning contract (`GROK_ENGINE_BROKER.worker.home.spillDirectory`).
+ */
+const pinSpillDirectory = async (directory: string): Promise<PinnedDirectory> => {
+  const before = await lstat(directory);
+  if (before.isSymbolicLink() || !before.isDirectory()) throw new Error("spill directory is not a real directory");
+  const handle = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const opened = await handle.stat();
+    if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error("spill directory was replaced");
+    assertSpillDirectoryStat(opened, { uid: process.getuid?.() ?? -1, gid: process.getgid?.() ?? -1 });
+    return { handle, dev: Number(opened.dev), ino: Number(opened.ino) };
+  } catch (error) { await handle.close(); throw error; }
+};
+
+/** Pure so a foreign owner is testable without root. */
+export const assertSpillDirectoryStat = (entry: Readonly<{ uid: number; gid: number; mode: number; isDirectory(): boolean }>, runtime: Readonly<{ uid: number; gid: number }>): void => {
+  const mode = Number(entry.mode) & 0o7777;
+  const groupOpen = (mode & 0o070) !== 0;
+  if (!entry.isDirectory() || entry.uid !== runtime.uid || (mode & ~SPILL_DIRECTORY_MAX_MODE) !== 0
+    || (groupOpen && ((mode & 0o2000) === 0 || entry.gid === runtime.gid))) {
+    throw new Error("spill directory is not a private or provisioned worker-group directory");
+  }
+};
+
+const assertSameDirectory = async (directory: string, pinned: PinnedDirectory): Promise<void> => {
+  const [now, held] = await Promise.all([lstat(directory), pinned.handle.stat()]);
+  if (now.isSymbolicLink() || Number(now.dev) !== pinned.dev || Number(now.ino) !== pinned.ino || Number(held.ino) !== pinned.ino) throw new Error("spill directory was replaced");
 };
 
 /** Newest-first retention, so a busy agent cannot fill its own runtime home. */
