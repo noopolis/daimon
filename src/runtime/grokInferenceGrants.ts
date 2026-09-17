@@ -1,10 +1,11 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
+import type { EngineBrokerInferenceFailureCode } from "./engineBrokerInferenceProtocol.js";
 import type { EngineBrokerTurnLimits, EngineBrokerTurnUsage } from "./engineBrokerTurnAccounting.js";
 import { parseGrokBrokerModelPolicy, type GrokBrokerModelPolicy } from "./grokBrokerModelPolicy.js";
 import { GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
-import { GROK_INFERENCE_PURPOSES, type GrokInferencePurpose, type InferenceUsageEntry } from "./inferenceUsageLedger.js";
+import { GROK_INFERENCE_PURPOSES, recordInferenceUsage, type GrokInferencePurpose, type InferenceUsageEntry } from "./inferenceUsageLedger.js";
 
 const SPEC = GROK_ENGINE_BROKER.inferenceGrants;
 
@@ -14,7 +15,7 @@ export type GrokInferenceGrantIssued = Readonly<{ grantId: string; token: string
 export type GrokInferenceGrantRequest = Readonly<{ model: unknown; reasoningEffort: unknown; purpose: unknown }>;
 
 export class GrokInferenceGrantRefused extends Error {
-  constructor(readonly code: "grant_limit" | "invalid_request") { super(`inference grant refused (${code})`); }
+  constructor(readonly code: EngineBrokerInferenceFailureCode) { super(`inference grant refused (${code})`); }
 }
 
 type Entry = { grant: GrokInferenceGrant; digest: Buffer; timer: NodeJS.Timeout };
@@ -110,5 +111,9 @@ export class GrokInferenceGrants {
     for (const [grantId, entry] of this.grants) if (entry.grant.expiresAt <= now) this.release(grantId);
   }
 }
+
+/** The broker's grants: every settled request is appended to the evaluator inference ledger and nowhere else. */
+export const createLedgeredGrokInferenceGrants = (inferenceLedgerPath: string): GrokInferenceGrants =>
+  new GrokInferenceGrants({ onSettled: (entry) => { void recordInferenceUsage(inferenceLedgerPath, entry); } });
 
 const digest = (value: string): Buffer => createHash("sha256").update(value).digest();

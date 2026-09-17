@@ -12,7 +12,7 @@ const MAX_CONFIG_BYTES=65_536;
 export async function runEngineBrokerServiceCli():Promise<void>{
   if(process.getuid?.()!==2100)throw new Error("engine broker service requires broker identity");
   const config=parseEngineBrokerServiceConfig(await readRootConfig(ENGINE_BROKER_SERVICE_CONFIG));
-  const broker=await startGrokEngineBroker({grokCommand:"/usr/local/bin/grok",nativeClient:"/opt/daimon/bin/daimon-engine-broker",credentialHome:config.credentialHome,turnStore:config.turnStore,registrations:config.registrations});
+  const broker=await startGrokEngineBroker({grokCommand:"/usr/local/bin/grok",nativeClient:"/opt/daimon/bin/daimon-engine-broker",credentialHome:config.credentialHome,turnStore:config.turnStore,registrations:config.registrations,...(config.inferenceLedgerPath===undefined?{}:{inferenceLedgerPath:config.inferenceLedgerPath})});
   const service=await startEngineBrokerService(broker);let stopping:Promise<void>|undefined;
   const stop=()=>{stopping??=service.close();return stopping;};
   const onSignal=()=>{void stop().catch(()=>{process.exitCode=1;});};process.once("SIGINT",onSignal);process.once("SIGTERM",onSignal);

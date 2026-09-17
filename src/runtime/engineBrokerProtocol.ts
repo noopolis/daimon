@@ -1,3 +1,4 @@
+import { isEngineBrokerInferenceRequestKind, isEngineBrokerInferenceResponseKind, parseEngineBrokerInferenceRequest, parseEngineBrokerInferenceResponse, type EngineBrokerInferenceRequest, type EngineBrokerInferenceResponse } from "./engineBrokerInferenceProtocol.js";
 import { parseEngineBrokerTurnAccounting, parseEngineBrokerTurnLimitOverrides, type EngineBrokerTurnAccounting, type EngineBrokerTurnLimitOverrides } from "./engineBrokerTurnAccounting.js";
 
 /**
@@ -16,7 +17,8 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 export type EngineBrokerRequest =
   | Readonly<{ version: typeof VERSION; kind: "health"; requestId: string }>
   | Readonly<{ version: typeof VERSION; kind: "start_turn"; requestId: string; turnId: string; agentId: string; wakeId: string; prompt: string; mcpEndpoint: string; limits?: EngineBrokerTurnLimitOverrides }>
-  | Readonly<{ version: typeof VERSION; kind: "cancel_turn"; requestId: string; turnId: string }>;
+  | Readonly<{ version: typeof VERSION; kind: "cancel_turn"; requestId: string; turnId: string }>
+  | EngineBrokerInferenceRequest;
 
 export interface EngineBrokerFailureDiagnostic { status:string;stage:string;failureClass:string;profileApplied:boolean;exitCode:number;termSignal:number;workerPid:number;workerUid:number;startTicks:string }
 
@@ -24,7 +26,8 @@ export type EngineBrokerResponse =
   | Readonly<{ version: typeof VERSION; kind: "ready"; requestId: string; brokerUid: 2100; providerProxyPort: 43123; mcpFacadePort: 43124; registrations: number; credentialStale: false; realmLease: true; workerIsolation: true }>
   | Readonly<{ version: typeof VERSION; kind: "accepted"; requestId: string; turnId: string }>
   | (Readonly<{ version: typeof VERSION; kind: "completed"; requestId: string; turnId: string; text: string; workerPid: number; workerUid: number; workerStartTime: string }> & EngineBrokerTurnAccounting)
-  | (Readonly<{ version: typeof VERSION; kind: "failed"; requestId: string; turnId: string; code: EngineBrokerFailureCode; diagnostic?: EngineBrokerFailureDiagnostic }> & EngineBrokerTurnAccounting);
+  | (Readonly<{ version: typeof VERSION; kind: "failed"; requestId: string; turnId: string; code: EngineBrokerFailureCode; diagnostic?: EngineBrokerFailureDiagnostic }> & EngineBrokerTurnAccounting)
+  | EngineBrokerInferenceResponse;
 export const ENGINE_BROKER_FAILURE_CODES = ["auth_stale", "cancelled", "engine_failed", "invalid_request", "limit_exceeded", "turn_conflict", "unavailable"] as const;
 export type EngineBrokerFailureCode = (typeof ENGINE_BROKER_FAILURE_CODES)[number];
 export type EngineBrokerTerminalResponse = Extract<EngineBrokerResponse, { kind: "completed" | "failed" }>;
@@ -63,6 +66,7 @@ export function parseEngineBrokerRequest(value: unknown): EngineBrokerRequest {
     exact(input, ["version", "kind", "requestId", "turnId"]);
     return { version: VERSION, kind: "cancel_turn", requestId: id(input.requestId), turnId: id(input.turnId) };
   }
+  if (isEngineBrokerInferenceRequestKind(input.kind)) return parseEngineBrokerInferenceRequest(input, id(input.requestId), VERSION);
   throw new TypeError("invalid broker frame");
 }
 
@@ -74,6 +78,7 @@ export function parseEngineBrokerResponse(value: unknown): EngineBrokerResponse 
     return { version: VERSION, kind: "accepted", requestId: id(input.requestId), turnId: id(input.turnId) };
   }
   if (input.kind === "completed" || input.kind === "failed") return parseTerminal(input, VERSION) as EngineBrokerTerminalResponse;
+  if (isEngineBrokerInferenceResponseKind(input.kind)) return parseEngineBrokerInferenceResponse(input, id(input.requestId), VERSION);
   throw new TypeError("invalid broker frame");
 }
 

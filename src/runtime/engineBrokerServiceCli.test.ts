@@ -53,3 +53,13 @@ test("rejects caller-selected commands, duplicate identities, and traversal", ()
   assert.throws(() => parseEngineBrokerServiceConfig({ ...base, registrations: [{ ...reg("agent-a", 0), eventsPath: "/workers/0/.grok/sandbox-events.jsonl" }] }));
   assert.throws(() => parseEngineBrokerServiceConfig({ ...base, registrations: [{ ...reg("agent-a", 0), eventsPath: "/workers/1/.grok/sessions/sandbox-events.jsonl" }] }));
 });
+
+test("v2 may declare an evaluator inference ledger that is never a subject ledger", () => {
+  const base = config("v2", [v2("agent-a", 0), v2("agent-b", 1)]);
+  assert.equal(parseEngineBrokerServiceConfig(base).inferenceLedgerPath, undefined);
+  assert.equal(parseEngineBrokerServiceConfig({ ...base, inferenceLedgerPath: "/run/paideia-inference/inference.jsonl" }).inferenceLedgerPath, "/run/paideia-inference/inference.jsonl");
+  for (const inferenceLedgerPath of ["/run/slots/0/usage/usage.jsonl", "/run/slots/1/usage/requests.jsonl", "/var/lib/spawnfile/daimon/usage/usage.jsonl", "/var/lib/spawnfile/daimon/usage/requests.jsonl", "relative.jsonl", "/run/x/../inference.jsonl", "/run/inference.json", 7]) {
+    assert.throws(() => parseEngineBrokerServiceConfig({ ...base, inferenceLedgerPath }), /invalid engine broker service config/u, String(inferenceLedgerPath));
+  }
+  assert.throws(() => parseEngineBrokerServiceConfig({ ...config("v1", [reg("agent-a", 0)]), inferenceLedgerPath: "/run/paideia-inference/inference.jsonl" }), /invalid engine broker service config/u);
+});
