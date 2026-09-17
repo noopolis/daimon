@@ -135,7 +135,7 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
 const brokerFaultCause = (error: unknown, secrets: readonly string[]): string => {
   try {
     const described = `${describeFault(error)}${error instanceof Error && error.cause !== undefined && error.cause !== null ? ` <- ${describeFault(error.cause)}` : ""}`;
-    const flattened = described.replace(/[ -]+/gu, " ").replace(/\s+/gu, " ").trim();
+    const flattened = described.replace(/[\u0000-\u001f\u007f]+/gu, " ").replace(/\s+/gu, " ").trim();
     const named = redactCredentialText(flattened, secrets, CLI_ENGINE_MAX_DIAGNOSTIC_BYTES).trim();
     return named.length === 0 ? "unnamed" : named;
   } catch { return "unnameable"; }

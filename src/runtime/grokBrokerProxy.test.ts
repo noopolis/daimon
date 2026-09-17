@@ -123,7 +123,7 @@ test("a non-refusal fault names its own class and message on one bounded line, c
   // than the bound admits.
   const proxy = await startGrokBrokerProxy(
     { accessToken: async () => provider, markRejected: async () => undefined },
-    async () => { throw new RangeError(`socket hang up forwarding ${capability}\nwith ${provider} ${"pad ".repeat(400)}`); });
+    async () => { throw new RangeError(`socket hang up forwarding ${capability}\nwith ${provider}\u0007 ${"pad ".repeat(400)}`); });
   try {
     capability = proxy.capabilities.issue("agent", "turn"); arm(proxy, async () => undefined);
     assert.equal(await post(proxy.port, capability, leanBody()), 503, "a genuine transient fault keeps its 503");
