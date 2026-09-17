@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 import { grokBrokerWorkerConfigSha256, renderGrokBrokerWorkerConfig } from "./grokBrokerWorkerConfig.js";
 import { assertGrokWorkerConfigBytes, assertGrokWorkerHomeEntries, verifyGrokWorkerHome } from "./grokWorkerHomeAttestation.js";
@@ -59,4 +59,34 @@ test("accepts only the renderer's exact config bytes for the declared model poli
     renderGrokBrokerWorkerConfig(declared).replace('session_summary = "daimon-session-title-disabled"', 'session_summary = "grok-4.6"'),
     `${renderGrokBrokerWorkerConfig(declared)}\n[mcp_servers.extra]\nurl = "http://127.0.0.1:1/mcp"\n`
   ]) assert.throws(() => assertGrokWorkerConfigBytes(Buffer.from(tampered), grokBrokerWorkerConfigSha256(declared)), /attestation unavailable/u);
+});
+
+const ownHome = async (t: { after(fn: () => Promise<void>): void }) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "daimon-grok-home-owned-"));
+  t.after(async () => { await chmod(home, 0o700); await rm(home, { recursive: true, force: true }); });
+  await mkdir(path.join(home, "sessions"));
+  const declared = { model: "grok-4.6", reasoningEffort: "low" } as const;
+  for (const name of files) await writeFile(path.join(home, name), name === "config.toml" ? renderGrokBrokerWorkerConfig(declared) : "", { mode: 0o444 });
+  await chmod(path.join(home, "sessions"), 0o1771); await chmod(home, 0o1771);
+  return { home, sha: grokBrokerWorkerConfigSha256(declared), uid: process.getuid?.() ?? 0 };
+};
+
+test("attests a correctly laid out home whose config is the declared renderer output", async (t) => {
+  const { home, sha, uid } = await ownHome(t);
+  await verifyGrokWorkerHome(home, sha, uid);
+  await assert.rejects(verifyGrokWorkerHome(home, grokBrokerWorkerConfigSha256({ model: "grok-4.6", reasoningEffort: "high" }), uid), /attestation unavailable/u);
+});
+
+test("refuses a config.toml whose opened inode is not the one lstat saw", async (t) => {
+  const { home, sha, uid } = await ownHome(t);
+  const probe = await open(path.join(home, "config.toml"), "r");
+  const prototype = Object.getPrototypeOf(probe) as { stat: (...args: unknown[]) => Promise<{ ino: number }> };
+  await probe.close();
+  const original = prototype.stat;
+  const swapped = mock.method(prototype, "stat", async function (this: unknown, ...args: unknown[]) {
+    const real = await original.apply(this, args);
+    return Object.assign(Object.create(Object.getPrototypeOf(real)), real, { ino: Number(real.ino) + 1 });
+  });
+  try { await assert.rejects(verifyGrokWorkerHome(home, sha, uid), /attestation unavailable/u); } finally { swapped.mock.restore(); }
+  await verifyGrokWorkerHome(home, sha, uid);
 });
