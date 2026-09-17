@@ -168,7 +168,8 @@ in `deny` (verified: `/tmp`, `/var/tmp`, `/run`, `/etc`, `sessions` all fail;
 `/tmp/sub` works), so the profile cannot hide evaluator temp files. Instead:
 - the launcher exports `TMPDIR=<worker home>/tmp` (strict adds TMPDIR to its
   read-write grants; Python, Node and `mktemp` use it); provision it
-  `<worker>:<worker> 0700`;
+  `<worker>:<worker> 0700`. Every registered worker's private temp is attested
+  before any turn, so one misprovisioned sibling refuses all turns;
 - `/tmp` and `/var/tmp` must be `root:<non-worker group, e.g. org 2000> 1774`:
   Grok needs to open the directory, but without search or write a worker can
   only list names — `cat`/`read_file` get EACCES and it cannot create files.
@@ -177,7 +178,16 @@ in `deny` (verified: `/tmp`, `/var/tmp`, `/run`, `/etc`, `sessions` all fail;
 - spills (`toolResultSpill.ts`) are written `0640`; provision
   `<runtimeHome>/tool-output` as `2000:<worker gid> 2750` (setgid) under a
   runtime home the worker can traverse, so each spill carries that agent's
-  worker group and no other worker can read it.
+  worker group and no other worker can read it. The writer pins the directory
+  (`O_DIRECTORY|O_NOFOLLOW`, dev/ino re-checked before publishing) and refuses
+  one that is a symlink, not owned by the runtime, wider than `2750`, or
+  group-open without setgid or in the runtime's own group; it cannot tell
+  *which* worker gid belongs to the agent, so that mapping stays the
+  deployment's. A spill is published by rename, replacing any existing entry
+  (a planted symlink included) without following it.
+- registered workspace and home paths must be canonical (no `.`, `..`, empty
+  components or trailing slash) in both `service.json` and `registrations.bin`;
+  the launcher refuses the slot otherwise.
 
 `agySubscriptionRealm.ts` owns the one host-level private D-Bus/Secret Service
 realm, durable keyring lease, bounded unlock stdin, and cleanup.
