@@ -81,6 +81,13 @@ the broker owns refresh and stale-credential recovery. The runtime checks broker
 readiness before admitting Grok agents and verifies their sandbox policy before
 turns. The older credential-lease helper is not the production host path.
 
+The broker worker is pinned to Grok CLI 1.0.34 and runs lean: a fixed Daimon
+system prompt, six tools (`run_terminal_command`, `read_file`, `grep`,
+`list_dir`, and the MCP meta-tools `search_tool`/`use_tool`), no bundled
+skills, workflows, plan mode, subagents, memory or web search, and a declared
+model and reasoning effort from a closed list (default `grok-4.6` at `low`).
+The broker proxy refuses any request outside that shape before it spends.
+
 AGY uses OS-native secure storage through one private D-Bus and Secret Service
 realm. Enroll it once with:
 
