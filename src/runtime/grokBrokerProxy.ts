@@ -72,12 +72,15 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
   } catch (error) {
     settle?.(undefined);
     // Name the refusal on the broker's own stderr (reason code only, never a body
-    // or a token) so a failing turn is diagnosable without a stub harness.
+    // or a token) so a failing turn is diagnosable without a stub harness —
+    // except for the two requests every healthy turn makes anyway.
     const refusal = error instanceof GrokBrokerProxyRefusal ? error.reason : "broker_unavailable";
-    process.stderr.write(`[grok-proxy] refused: ${refusal}\n`);
-    // Grok's own session-title call is refused by design. It must keep the transient
-    // 503 shape it has always had: a hard 4xx on that internal request ends Grok's
-    // session, which surfaces as the worker exiting 1 mid-turn.
+    if (!titleSink && !expectedWorkerProbe(request)) process.stderr.write(`[grok-proxy] refused: ${refusal}\n`);
+    // Grok's own session-title call is refused by design, and keeps the transient
+    // 503 shape it has always had. Forcing 400 and 503 on it were both observed
+    // to end the turn `exit=0, result: success`, so the shape is kept because it
+    // is the one every live capture was taken with, not because a 4xx there ends
+    // Grok's session — it does not.
     if (titleSink) {
       response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
       response.end('{"error":"broker unavailable"}');
@@ -92,6 +95,22 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     response.end('{"error":"broker unavailable"}');
   }
 }
+
+/**
+ * The unauthenticated connectivity probe Grok sends before its own requests: a
+ * bare `GET /` with no Authorization header, which has no capability to look up
+ * and answers 400.
+ *
+ * It and the per-turn `session_title` POST are the only two requests a healthy
+ * turn makes that this proxy does not forward, and both used to print the same
+ * `refused: unknown_capability` line as a real policy miss — so every healthy
+ * turn read as two refusals and cost a live investigation. They answer exactly
+ * as before; they simply stop claiming a refusal on the broker's stderr, which
+ * is left for the misses that are actually worth reading.
+ */
+const expectedWorkerProbe = (request: IncomingMessage): boolean =>
+  request.headers.authorization === undefined && (request.method ?? "") === "GET" &&
+  new URL(request.url ?? "/", "http://127.0.0.1").pathname === "/";
 
 /** The body gate, refused non-retryably: a rejected body is a policy miss, never a transient fault. */
 function authorizeRequestOrRefuse(...args: Parameters<typeof authorizeGrokBrokerProxyRequest>): ReturnType<typeof authorizeGrokBrokerProxyRequest> {

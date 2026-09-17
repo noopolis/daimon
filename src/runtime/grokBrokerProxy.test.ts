@@ -95,3 +95,20 @@ test("the isolation guard is awaited before the first upstream call, and a faili
     assert.deepEqual(order, ["guard-start", "guard-end", "credential", "upstream"]);
   } finally { await proxy.close(); }
 });
+
+test("the two requests every healthy turn makes are not named as refusals", async () => {
+  const lines: string[] = []; const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => { lines.push(String(chunk)); return original(chunk as string, ...rest as []); }) as typeof process.stderr.write;
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async () => ({ status: 200, headers: { "content-type": "application/json" }, body: Buffer.from("{}") }));
+  try {
+    arm(proxy, async () => undefined);
+    const title = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${GROK_SESSION_TITLE_SINK_KEY}`, "content-type": "application/json" }, body: leanBody() });
+    assert.equal(title.status, 503, "the title sink keeps its transient shape");
+    const probe = await fetch(`http://127.0.0.1:${proxy.port}/`);
+    assert.equal(probe.status, 400, "the unauthenticated probe keeps its non-retryable shape");
+    assert.deepEqual(lines, [], "expected per-turn traffic must not read as a refusal on the broker's stderr");
+    const miss = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${"z".repeat(48)}`, "content-type": "application/json" }, body: leanBody() });
+    assert.equal(miss.status, 400);
+    assert.deepEqual(lines, ["[grok-proxy] refused: unknown_capability\n"], "a genuine policy miss is still named with its reason code");
+  } finally { process.stderr.write = original; await proxy.close(); }
+});

@@ -163,8 +163,19 @@ refuses a turn whose worker config does not hash to the declared one. Three
 capability reaches the model through `env_key = "DAIMON_PROVIDER_CAPABILITY"`
 set by the native launcher (as exposed as `DAIMON_MCP_CAPABILITY`); the
 per-turn `session_title` request cannot be disabled by any key, so
-`[models] session_summary` points it at a hidden model on closed loopback port
-9; and effort is only sent when the model declares it, so the declared effort is
+`[models] session_summary` points it at a hidden model
+(`GROK_SESSION_TITLE_SINK_MODEL_ID`) whose `base_url` is the broker's own
+provider proxy and whose `api_key` is a placeholder too short to ever be a turn
+capability — so the request does reach the proxy and is refused there, before
+any capability lookup, isolation guard, credential read or upstream call, and
+Grok falls back to the truncated prompt as the title. That refusal and a bare
+unauthenticated `GET /` probe are the two requests a healthy turn always makes
+and the proxy never forwards; neither prints a `refused:` line, because for as
+long as they did, every healthy turn read as broken. The sink keeps its 503
+shape because every live capture was taken with it: forcing 400 and 503 there
+were both observed to end the turn `exit=0, result: success`, so a hard 4xx on
+that request does *not* end Grok's session. And effort is only sent when the
+model declares it, so the declared effort is
 the model's single `reasoning_efforts` entry. HTTP MCP needs CA certificates in
 the image even for a loopback `http://` URL ("Failed to build HTTP client").
 
