@@ -61,17 +61,40 @@ test("refuses events that change while they are being read", async (t) => {
   assert.ok(reading.mock.callCount() >= 1);
 });
 
-test("prepare refuses a worker home that fails attestation even when profile and events are valid", async (t) => {
-  // Run as a non-root owner so the profile and events legs pass; the home leg
-  // (root-owned, read-only config) cannot, and must be what refuses.
-  const home = await mkdtemp(path.join(os.tmpdir(), "daimon-guard-home-"));
-  t.after(() => rm(home, { recursive: true, force: true }));
+test("prepare refuses a worker home that fails attestation even when profile, temp and events are valid", async (t) => {
+  // Run as a non-root owner so the profile, temp and events legs pass; the home
+  // leg (root-owned, read-only config) cannot, and must be what refuses.
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-guard-home-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = path.join(root, ".grok");
+  await mkdir(path.join(home, "sessions"), { recursive: true });
+  await mkdir(path.join(root, "tmp"), { mode: 0o700 });
   const profile = path.join(home, "sandbox.toml");
   const text = '[profiles.daimon-strict]\nextends = "strict"\nrestrict_network = true\ndeny = []\n';
   await writeFile(profile, text); await chmod(profile, 0o444);
-  await mkdir(path.join(home, "sessions"));
   const events = path.join(home, "sessions", "sandbox-events.jsonl");
   await writeFile(events, ""); await chmod(events, 0o640);
   const input = { profilePath: profile, eventsPath: events, profileSha256: createHash("sha256").update(text).digest("hex"), workerUid: self.uid, brokerGid: self.gid, configSha256: "0".repeat(64) };
-  await assert.rejects(prepareGrokWorkerAttestation(input, { uid: self.uid, gid: Number((await stat(profile)).gid) }), /attestation unavailable/u);
+  await assert.rejects(prepareGrokWorkerAttestation(input, { uid: self.uid, gid: Number((await stat(profile)).gid), sharedTmpRoots: [] }), (error: Error) => error.message === "Grok worker isolation attestation unavailable");
+});
+
+test("prepare refuses a worker without a private temp directory before the home check", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-guard-tmp-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const grokHome = path.join(root, ".grok");
+  await mkdir(path.join(grokHome, "sessions"), { recursive: true });
+  const profile = path.join(grokHome, "sandbox.toml");
+  const text = '[profiles.daimon-strict]\nextends = "strict"\nrestrict_network = true\ndeny = []\n';
+  await writeFile(profile, text); await chmod(profile, 0o444);
+  const events = path.join(grokHome, "sessions", "sandbox-events.jsonl");
+  await writeFile(events, ""); await chmod(events, 0o640);
+  const input = { profilePath: profile, eventsPath: events, profileSha256: createHash("sha256").update(text).digest("hex"), workerUid: self.uid, brokerGid: self.gid, configSha256: "0".repeat(64) };
+  const owner = { uid: self.uid, gid: Number((await stat(profile)).gid) };
+  // No <home>/tmp: the temp leg refuses (the home leg would refuse too, with a different message).
+  await assert.rejects(prepareGrokWorkerAttestation(input, owner), /temp isolation attestation unavailable/u);
+  // A profile outside <home>/.grok cannot name the launcher's TMPDIR home.
+  await mkdir(path.join(root, "elsewhere", "sessions"), { recursive: true });
+  const stray = { ...input, profilePath: path.join(root, "elsewhere", "sandbox.toml"), eventsPath: path.join(root, "elsewhere", "sessions", "sandbox-events.jsonl") };
+  await writeFile(stray.profilePath, text); await chmod(stray.profilePath, 0o444); await writeFile(stray.eventsPath, ""); await chmod(stray.eventsPath, 0o640);
+  await assert.rejects(prepareGrokWorkerAttestation(stray, owner), (error: Error) => /attestation unavailable/u.test(error.message) && !/temp/u.test(error.message));
 });
