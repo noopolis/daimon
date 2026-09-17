@@ -39,9 +39,21 @@ const renderSessionTitleSink = (): readonly string[] => [
   "max_retries = 0", "hidden = true", ""
 ];
 
-type WorkerEndpoints =Readonly<{ helperPath: string; proxyPort: number; mcpUrl: string }>;
+/**
+ * The turn-scoped proxy capability reaches the worker's only model through
+ * `env_key`, set by the native launcher. Grok 1.0.34 accepts
+ * `[auth_provider.<name>]` tables but never runs the helper for a custom model
+ * (verified against a loopback stub: no helper invocation and no Authorization
+ * header, with and without `args`, `api_backend`, `model_providers`, or a
+ * passwd-home config), while `env_key` attaches the bearer on every request.
+ * The capability is exactly as exposed as `DAIMON_MCP_CAPABILITY`: visible to
+ * the worker's own tool children, which run network-restricted, and revoked
+ * when the turn ends.
+ */
+export const GROK_BROKER_PROVIDER_CAPABILITY_ENV = "DAIMON_PROVIDER_CAPABILITY" as const;
+
+type WorkerEndpoints = Readonly<{ proxyPort: number; mcpUrl: string }>;
 const PRODUCTION_ENDPOINTS: WorkerEndpoints = Object.freeze({
-  helperPath: GROK_ENGINE_BROKER.nativeExecutablePath,
   proxyPort: GROK_ENGINE_BROKER.providerProxy.port,
   mcpUrl: `http://${GROK_ENGINE_BROKER.mcpFacade.host}:${GROK_ENGINE_BROKER.mcpFacade.port}${GROK_ENGINE_BROKER.mcpFacade.path}`
 });
@@ -81,8 +93,8 @@ export function renderGrokBrokerWorkerConfig(policy: Partial<GrokBrokerModelPoli
 /** Explicit-endpoint variant for the local live probe; production bytes come only from the function above. */
 export function renderGrokBrokerWorkerConfigWith(policy: GrokBrokerModelPolicy, endpoints: WorkerEndpoints): string {
   const declared = parseGrokBrokerModelPolicy(policy);
-  const { helperPath, proxyPort, mcpUrl } = endpoints;
-  if (!path.posix.isAbsolute(helperPath) || /[\r\n"'\\]/u.test(helperPath) || !Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65_535 || !/^http:\/\/127\.0\.0\.1:\d{1,5}\/mcp$/u.test(mcpUrl)) {
+  const { proxyPort, mcpUrl } = endpoints;
+  if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65_535 || !/^http:\/\/127\.0\.0\.1:\d{1,5}\/mcp$/u.test(mcpUrl)) {
     throw new TypeError("invalid Grok broker worker configuration");
   }
   const label = `${declared.reasoningEffort[0]!.toUpperCase()}${declared.reasoningEffort.slice(1)}`;
@@ -90,8 +102,7 @@ export function renderGrokBrokerWorkerConfigWith(policy: GrokBrokerModelPolicy, 
     renderGrokLeanBaseConfig(),
     "[models]", `default = "${GROK_BROKER_WORKER_MODEL_ID}"`, `default_reasoning_effort = "${declared.reasoningEffort}"`, `session_summary = "${GROK_SESSION_TITLE_SINK_MODEL_ID}"`, "",
     ...renderSessionTitleSink(),
-    "[auth_provider.daimon]", `command = ${JSON.stringify(helperPath)}`, 'args = ["--auth-provider"]', "timeout_secs = 5", "token_ttl_secs = 600", "",
-    `[model.${GROK_BROKER_WORKER_MODEL_ID}]`, `model = "${declared.model}"`, `base_url = "http://127.0.0.1:${proxyPort}/v1"`, 'auth_provider = "daimon"',
+    `[model.${GROK_BROKER_WORKER_MODEL_ID}]`, `model = "${declared.model}"`, `base_url = "http://127.0.0.1:${proxyPort}/v1"`, `env_key = "${GROK_BROKER_PROVIDER_CAPABILITY_ENV}"`,
     'api_backend = "chat_completions"', "context_window = 131072", "supports_backend_search = false", "",
     `[[model.${GROK_BROKER_WORKER_MODEL_ID}.reasoning_efforts]]`, `value = "${declared.reasoningEffort}"`, `label = "${label}"`, "default = true", "",
     "[mcp_servers.daimon]", `url = "${mcpUrl}"`, 'bearer_token_env_var = "DAIMON_MCP_CAPABILITY"', ""

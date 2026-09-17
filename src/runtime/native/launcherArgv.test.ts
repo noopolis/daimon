@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { GROK_ENGINE_BROKER } from "../../contracts/runtimeContractManifest.js";
 import { DAIMON_GROK_SYSTEM_PROMPT, GROK_WORKER_MAX_TURNS, GROK_WORKER_TOOL_IDS } from "../../contracts/grokWorkerContract.js";
-import { renderGrokBrokerWorkerArgs } from "../grokBrokerWorkerConfig.js";
+import { GROK_BROKER_PROVIDER_CAPABILITY_ENV, renderGrokBrokerWorkerArgs, renderGrokBrokerWorkerConfig } from "../grokBrokerWorkerConfig.js";
 
 const read = (name: string): string => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
 const unquote = (literal: string): string => {
@@ -52,4 +52,11 @@ test("the compiled system prompt is byte-identical to the contract prompt pinned
   assert.match(DAIMON_GROK_SYSTEM_PROMPT, /^[\x20-\x7e]+$/u);
   assert.ok(DAIMON_GROK_SYSTEM_PROMPT.length >= 320 && DAIMON_GROK_SYSTEM_PROMPT.length <= 700, "roughly 80-150 tokens");
   for (const tool of ["daimon__moltnet_read", "daimon__moltnet_send", "use_tool", "search_tool", "read_file"]) assert.ok(DAIMON_GROK_SYSTEM_PROMPT.includes(tool), tool);
+});
+
+test("the launcher exports the turn provider capability under the env_key the worker config reads", () => {
+  const source = read("engineBrokerLauncherCore.inc");
+  assert.match(source, new RegExp(`"${GROK_BROKER_PROVIDER_CAPABILITY_ENV}=%s"`, "u"));
+  assert.match(source, /char \*const envp\[\] = \{home,\s*grok,\s*mcp_env,\s*provider_env,/u);
+  assert.match(renderGrokBrokerWorkerConfig(), new RegExp(`\\nenv_key = "${GROK_BROKER_PROVIDER_CAPABILITY_ENV}"\\n`, "u"));
 });

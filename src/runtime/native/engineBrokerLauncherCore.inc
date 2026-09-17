@@ -257,14 +257,19 @@ static __attribute__((noreturn)) void launch_fail(int status_fd,
 static pid_t launch(const struct dbl_registration *r, int executable,
                     int prompt, int capability, int output, uint32_t *failure,
                     uint64_t *observed_start_ticks) {
-  unsigned char mcp[DBL_MAX_TOKEN + 1] = {0};
+  unsigned char provider[DBL_MAX_TOKEN + 1] = {0}, mcp[DBL_MAX_TOKEN + 1] = {0};
   int status_pipe[2];
-  if (capability_bundle(capability, NULL, mcp) || pipe2(status_pipe, O_CLOEXEC))
+  if (capability_bundle(capability, provider, mcp) ||
+      pipe2(status_pipe, O_CLOEXEC)) {
+    erase(provider, sizeof(provider));
+    erase(mcp, sizeof(mcp));
     return -1;
+  }
   pid_t p = fork();
   if (p < 0) {
     close(status_pipe[0]);
     close(status_pipe[1]);
+    erase(provider, sizeof(provider));
     erase(mcp, sizeof(mcp));
     return -1;
   }
@@ -275,6 +280,7 @@ static pid_t launch(const struct dbl_registration *r, int executable,
                   sizeof(*observed_start_ticks)) ||
         !*observed_start_ticks) {
       close(status_pipe[0]);
+      erase(provider, sizeof(provider));
       erase(mcp, sizeof(mcp));
       kill(p, SIGKILL);
       waitpid(p, NULL, 0);
@@ -282,6 +288,7 @@ static pid_t launch(const struct dbl_registration *r, int executable,
     }
     ssize_t got = read(status_pipe[0], &code, sizeof(code));
     close(status_pipe[0]);
+    erase(provider, sizeof(provider));
     erase(mcp, sizeof(mcp));
     if (got == 0)
       return p;
@@ -349,20 +356,29 @@ static pid_t launch(const struct dbl_registration *r, int executable,
                         "--model",
                         "daimon-broker-grok",
                         NULL};
-  char home[300], grok[300], mcp_env[DBL_MAX_TOKEN + 24];
+  char home[300], grok[300], mcp_env[DBL_MAX_TOKEN + 24],
+       provider_env[DBL_MAX_TOKEN + 32];
   snprintf(home, sizeof(home), "HOME=%s", r->home);
   snprintf(grok, sizeof(grok), "GROK_HOME=%s/.grok", r->home);
   snprintf(mcp_env, sizeof(mcp_env), "DAIMON_MCP_CAPABILITY=%s", mcp);
+  /* Grok 1.0.34 never runs `[auth_provider.*]` helpers for a custom model, so
+     the worker's `[model.daimon-broker-grok] env_key` reads the turn-scoped
+     proxy capability from here. It is as exposed as the MCP capability. */
+  snprintf(provider_env, sizeof(provider_env), "DAIMON_PROVIDER_CAPABILITY=%s",
+           provider);
+  erase(provider, sizeof(provider));
   erase(mcp, sizeof(mcp));
   char *const envp[] = {home,
                         grok,
                         mcp_env,
+                        provider_env,
                         "DAIMON_CAPABILITY_FD=4",
                         "PATH=/usr/local/bin:/usr/bin:/bin",
                         "LANG=C.UTF-8",
                         "TZ=UTC",
                         NULL};
   syscall(SYS_execveat, 5, "", argv, envp, AT_EMPTY_PATH);
+  erase(provider_env, sizeof(provider_env));
   erase(mcp_env, sizeof(mcp_env));
   launch_fail(status_fd, 6);
 }

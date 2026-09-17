@@ -13,10 +13,11 @@ const section = (config: string, header: string): string => {
   return config.slice(start, end === -1 ? undefined : end);
 };
 
-test("worker config uses only named in-memory auth, the fixed loopback proxy, and the capability-scoped MCP facade", () => {
+test("worker config uses only the launcher-set turn capability, the fixed loopback proxy, and the capability-scoped MCP facade", () => {
   const config = renderGrokBrokerWorkerConfig();
-  assert.match(section(config, "[auth_provider.daimon]"), /command = "\/opt\/daimon\/bin\/daimon-engine-broker"\nargs = \["--auth-provider"\]/u);
-  assert.match(section(config, "[model.daimon-broker-grok]"), /base_url = "http:\/\/127\.0\.0\.1:43123\/v1"\nauth_provider = "daimon"/u);
+  assert.match(section(config, "[model.daimon-broker-grok]"), /base_url = "http:\/\/127\.0\.0\.1:43123\/v1"\nenv_key = "DAIMON_PROVIDER_CAPABILITY"\n/u);
+  // Grok 1.0.34 ignores [auth_provider.*] for custom models; a helper table would silently send no bearer.
+  assert.doesNotMatch(config, /auth_provider/u);
   assert.equal(section(config, "[mcp_servers.daimon]"), '[mcp_servers.daimon]\nurl = "http://127.0.0.1:43124/mcp"\nbearer_token_env_var = "DAIMON_MCP_CAPABILITY"\n');
   assert.doesNotMatch(config, /access_token|refresh_token|auth\.json/u);
 });
@@ -54,10 +55,11 @@ test("the manifest pins the sha256 of every renderable worker config", () => {
   }
 });
 
-test("the probe-only renderer refuses non-loopback endpoints and injected helper paths", () => {
+test("the probe-only renderer refuses non-loopback or injected endpoints", () => {
   const policy = { model: "grok-4.6", reasoningEffort: "low" } as const;
-  assert.throws(() => renderGrokBrokerWorkerConfigWith(policy, { helperPath: "/x\"\n[evil]", proxyPort: 1, mcpUrl: "http://127.0.0.1:1/mcp" }), /invalid/u);
-  assert.throws(() => renderGrokBrokerWorkerConfigWith(policy, { helperPath: "/x", proxyPort: 1, mcpUrl: "http://example.com/mcp" }), /invalid/u);
+  assert.throws(() => renderGrokBrokerWorkerConfigWith(policy, { proxyPort: 0, mcpUrl: "http://127.0.0.1:1/mcp" }), /invalid/u);
+  assert.throws(() => renderGrokBrokerWorkerConfigWith(policy, { proxyPort: 1, mcpUrl: "http://example.com/mcp" }), /invalid/u);
+  assert.throws(() => renderGrokBrokerWorkerConfigWith(policy, { proxyPort: 1, mcpUrl: "http://127.0.0.1:1/mcp\"\n[evil]" }), /invalid/u);
   const args = renderGrokBrokerWorkerArgs("/run/worker/prompt", "/workspace");
   assert.equal(args.includes("--prompt-file"), true); assert.equal(args.includes("--single"), false);
 });
