@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { AttentionDispatcher } from "./attentionDispatcher.js";
+import { DAIMON_GROK_TOOL_PREFIX, grokDaimonToolName } from "../contracts/grokWorkerContract.js";
 import { createOrganizationRuntimeHost } from "./organizationRuntimeHost.js";
 import { WakeAcceptanceStore, WakeExecutionClaimLostError } from "./wakeAcceptanceStore.js";
 import { parseWakeAcceptanceRequest } from "./wakeAcceptanceTypes.js";
@@ -14,7 +15,7 @@ import type { OrganizationRuntimeHost, OrganizationRuntimeWakeRequest, Organizat
 
 const token = "attention-test";
 const storeOptions = { processIdentity: async () => ({ pid: 1, process_start: "test-start", boot_id: "test-boot", pid_namespace_dev: 1, pid_namespace_ino: 1 }), ownerLiveness: async () => true };
-const config = (maxExecutions = 20) => ({ version: "noopolis.daimon.organization-runtime.v1", host: { bindHost: "127.0.0.1", port: 4318, controlTokenEnv: "ATTENTION_TEST" }, agents: ["alpha", "beta"].map((id) => ({ id, name: id, instructions: "Act", workspacePath: `/workspace/${id}`, runtimeHomePath: `/home/${id}`, engine: { kind: "codex" }, attention: { maxBatchMessages: 3, maxExecutions } })) });
+const config = (maxExecutions = 20, engine: "codex" | "grok" = "codex") => ({ version: "noopolis.daimon.organization-runtime.v1", host: { bindHost: "127.0.0.1", port: 4318, controlTokenEnv: "ATTENTION_TEST" }, agents: ["alpha", "beta"].map((id) => ({ id, name: id, instructions: "Act", workspacePath: `/workspace/${id}`, runtimeHomePath: `/home/${id}`, engine: { kind: engine }, attention: { maxBatchMessages: 3, maxExecutions } })) });
 const request = (id: string, agent_id = "alpha") => ({ token, agent_id, delivery_id: id, event: { version: "noopolis.daimon.wake.v2", kind: "message", text: `Handle ${id}`, occurred_at: "2026-09-11T00:00:00.000Z" } });
 const pause = (ms = 5) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 async function until(test: () => boolean | Promise<boolean>): Promise<void> { for (let n = 0; n < 200; n++) { if (await test()) return; await pause(); } throw new Error("expected side effect did not appear"); }
@@ -29,13 +30,13 @@ class Core implements OrganizationRuntimeHost {
   async activity() { return { version: "noopolis.daimon.organization-runtime-activity.v1" as const, items: [] }; }
   async stop() { this.stops++; this.releases.forEach((release, index) => release({ version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: this.wakes[index]!.agentId, wakeId: this.wakes[index]!.event.id, code: "active_wake_aborted" })); return { version: "noopolis.daimon.organization-runtime-stop.v1" as const, state: "stopped" as const }; }
 }
-async function fixture(limit = 20, maxWakes = 100, claimTtlMs = 240000) {
+async function fixture(limit = 20, maxWakes = 100, claimTtlMs = 240000, engine: "codex" | "grok" = "codex") {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-attention-")); await chmod(root, 0o700);
   const usage = await mkdtemp(path.join(os.tmpdir(), "daimon-attention-usage-")); await writeFile(path.join(usage, "usage.jsonl"), "");
   const registry: AttentionRegistry = new Map();
   const core = new Core();
   const options = { acceptanceStorePath: root, controlToken: token, storeOptions: { ...storeOptions, claimTtlMs }, attentionRegistryForTest: registry, fuseEnvironment: { DAIMON_WAKE_FUSE_DIRECTORY: usage, DAIMON_WAKE_FUSE_EPOCH: "attention", DAIMON_WAKE_FUSE_MAX_WAKES: String(maxWakes), DAIMON_WAKE_FUSE_MAX_TOKENS: "10000", DAIMON_TURN_USAGE_LEDGER_PATH: path.join(usage, "usage.jsonl") } };
-  const control = createOrganizationRuntimeControlHostWithCoreForTest(config(limit), core, options); await control.start();
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(config(limit, engine), core, options); await control.start();
   return { root, usage, registry, core, options, control, cleanup: async () => { await control.stop(); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); } };
 }
 
@@ -212,5 +213,33 @@ test("an inbox turn leads with each delivery's own text and keeps the accounting
     const task = text.indexOf("Handle d-1"), accounting = text.indexOf("daimon_inbox_disposition");
     assert.ok(task >= 0 && accounting > task, "accounting must follow the delivery text");
     assert.ok(text.indexOf("Machine-readable payload:") > accounting, "payload stays a trailing appendix");
+  } finally { await f.cleanup(); }
+});
+
+/**
+ * `daimon_inbox_disposition` is the tool that records a finished wake as
+ * complete; an agent that cannot name it leaves its work recorded as deferred.
+ * On Grok the bare name reaches nothing, so the inbox prompt must name the
+ * `daimon__` form the engine can actually invoke.
+ */
+test("a Grok inbox turn names both inbox tools the way use_tool can call them", async () => {
+  const f = await fixture(20, 100, 240000, "grok");
+  try {
+    await f.control.accept(request("g-1")); await until(() => f.core.wakes.length === 1);
+    const text = f.core.wakes[0]!.event.text!;
+    assert.ok(text.includes(grokDaimonToolName("daimon_inbox_disposition")), "disposition tool carries the daimon__ prefix");
+    assert.ok(text.includes(grokDaimonToolName("daimon_inbox")), "inbox tool carries the daimon__ prefix");
+    // No bare occurrence survives: every mention is the prefixed one.
+    assert.equal(text.split("daimon_inbox").length - 1, text.split(DAIMON_GROK_TOOL_PREFIX).length - 1);
+  } finally { await f.cleanup(); }
+});
+
+test("every other engine's inbox turn keeps the bare tool names", async () => {
+  const f = await fixture();
+  try {
+    await f.control.accept(request("c-1")); await until(() => f.core.wakes.length === 1);
+    const text = f.core.wakes[0]!.event.text!;
+    assert.ok(text.includes("with daimon_inbox_disposition (complete)"));
+    assert.equal(text.includes(DAIMON_GROK_TOOL_PREFIX), false);
   } finally { await f.cleanup(); }
 });

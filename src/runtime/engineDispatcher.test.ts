@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { codexSandboxProtectedPaths, codexSandboxReadablePaths, grokSandboxProtectedPaths, startOrganizationRuntimeEngine } from "./engineDispatcher.js";
+import { codexSandboxProtectedPaths, codexSandboxReadablePaths, grokSandboxProtectedPaths, identityEnvelope, startOrganizationRuntimeEngine } from "./engineDispatcher.js";
+import { DAIMON_GROK_MCP_SERVER, DAIMON_GROK_SYSTEM_PROMPT, DAIMON_GROK_TOOL_PREFIX, GROK_MCP_INVOKE_TOOL, GROK_MCP_SEARCH_TOOL, GROK_MCP_TOOL_NAME_ARGUMENT, grokDaimonToolName } from "../contracts/grokWorkerContract.js";
 import { AGY_SUBSCRIPTION_REALM, GROK_SUBSCRIPTION_REALM } from "./contractManifest.js";
 import type { EngineBrokerTurnClient } from "./engineBrokerControlClient.js";
 import { ORGANIZATION_RUNTIME_VERSION, type OrganizationRuntimeAgentConfig } from "./organizationRuntime.js";
@@ -69,6 +70,55 @@ test("Codex strict sandbox protects current credentials, ingress, shared roots, 
     agy.workspacePath
   ]);
   assert.deepEqual(codexSandboxReadablePaths(current), [path.join(current.runtimeHomePath, "tool-output")]);
+});
+
+/**
+ * The envelope's Grok wording is the second naming rule a Grok worker reads,
+ * after the pinned system prompt. When the two disagreed the later, more
+ * emphatic one won and a live turn made zero tool calls with every tool
+ * correctly mounted, so what is asserted here is agreement: the same route,
+ * stated once, and no instruction to use a bare name.
+ */
+const mounted = ["moltnet_read", "moltnet_send", "memory_search"] as const;
+const envelopeToolSentence = (kind: OrganizationRuntimeAgentConfig["engine"]["kind"]): string =>
+  identityEnvelope(rootConfig("/private/org", kind), mounted).split("\n").find((line) => line.startsWith("Your mounted tools are exactly"))!;
+
+test("the Grok envelope states the use_tool prefix rule once and never countermands the system prompt", () => {
+  const sentence = envelopeToolSentence("grok");
+  // The route, asserted: one bare catalogue, one prefix rule, one example.
+  assert.equal(sentence.includes(`Your mounted tools are exactly: ${mounted.join(", ")}.`), true);
+  assert.match(sentence, new RegExp(`MCP tool on server ${DAIMON_GROK_MCP_SERVER}`, "u"));
+  assert.match(sentence, new RegExp(`invoke it with ${GROK_MCP_INVOKE_TOOL}, ${GROK_MCP_TOOL_NAME_ARGUMENT} = ${DAIMON_GROK_TOOL_PREFIX}<name>`, "u"));
+  assert.match(sentence, new RegExp(`for example ${grokDaimonToolName(mounted[0])}`, "u"));
+  assert.match(sentence, /none is callable by its bare name/u);
+  assert.match(sentence, new RegExp(`${GROK_MCP_SEARCH_TOOL} lists them if a name is unknown`, "u"));
+  assert.match(sentence, /No other tool reaches the newsroom\.$/u);
+  // What it must never say: the bare names are callable, the agent's own
+  // instructions are wrong, or a shell reaches the tools.
+  assert.doesNotMatch(sentence, /Call them by these names/u);
+  assert.doesNotMatch(sentence, /spell them differently/u);
+  assert.doesNotMatch(sentence, /shell|terminal|CLI|run_terminal/u);
+  // One catalogue only: the prefixed names are a rule, not a second list.
+  for (const tool of mounted) assert.equal(sentence.split(tool).length - 1, tool === mounted[0] ? 2 : 1, tool);
+  assert.equal(sentence.split(DAIMON_GROK_TOOL_PREFIX).length - 1, 2, "prefix appears as the rule and its one example");
+  // The transport prohibition is untouched and still follows the tool sentence.
+  assert.match(identityEnvelope(rootConfig("/private/org", "grok"), mounted), /Do not seek transport credentials or invoke a transport CLI/u);
+});
+
+test("the Grok envelope and the pinned worker system prompt state the same route", () => {
+  const sentence = envelopeToolSentence("grok");
+  for (const atom of [DAIMON_GROK_MCP_SERVER, DAIMON_GROK_TOOL_PREFIX, GROK_MCP_INVOKE_TOOL, GROK_MCP_SEARCH_TOOL, GROK_MCP_TOOL_NAME_ARGUMENT]) {
+    assert.ok(DAIMON_GROK_SYSTEM_PROMPT.includes(atom), `system prompt states ${atom}`);
+    assert.ok(sentence.includes(atom), `envelope states ${atom}`);
+  }
+});
+
+test("only Grok gains the prefix rule: every other engine's envelope stays byte-identical", () => {
+  const unchanged = `Your mounted tools are exactly: ${mounted.join(", ")}. Call them by these names; your instructions may spell them differently. No other tool reaches the newsroom.`;
+  for (const kind of ["codex", "agy"] as const) assert.equal(envelopeToolSentence(kind), unchanged);
+  assert.notEqual(envelopeToolSentence("grok"), unchanged);
+  // An unmounted agent gets no tool sentence at all, on every engine.
+  for (const kind of ["codex", "agy", "grok"] as const) assert.doesNotMatch(identityEnvelope(rootConfig("/private/org", kind)), /Your mounted tools/u);
 });
 
 test("production dispatcher starts each closed engine intent through Daimon", async () => {

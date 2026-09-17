@@ -1,4 +1,5 @@
 import { attentionTools, type AttentionRegistry } from "./attention.js";
+import { grokMountedToolNamingRule } from "../contracts/grokWorkerContract.js";
 import path from "node:path";
 
 import type { AgentHandle } from "../core/types.js";
@@ -180,20 +181,29 @@ function grokBrokerTurnFor(agent: OrganizationRuntimeAgentConfig, grokBroker: En
 /**
  * The caller-owned prompt preamble.
  *
- * It names the mounted tools explicitly. A CLI engine reaches Daimon's tools
- * over MCP, and Grok exposes MCP tools only through a deferred `search_tool`
- * catalog, so an agent whose instructions name another engine's tool spelling
- * can finish a turn having called nothing. The declared names are the caller's
- * own configuration, not engine-supplied text.
+ * It names the mounted tools explicitly, because a CLI engine reaches Daimon's
+ * tools over MCP and an agent whose instructions name another engine's tool
+ * spelling can finish a turn having called nothing. The declared names are the
+ * caller's own configuration, not engine-supplied text.
+ *
+ * On Grok the bare names are not the callable ones: every Daimon tool is a
+ * deferred MCP tool of server `daimon`, reached through `use_tool` with
+ * `tool_name` = `daimon__<name>`. That rule is not restated here — it is
+ * rendered by `grokMountedToolNamingRule` in the same contract module that
+ * renders the worker's pinned system prompt, so this envelope can no longer
+ * contradict it. Every other engine's sentence is unchanged, byte for byte.
  */
-function identityEnvelope(agent: OrganizationRuntimeAgentConfig, mountedToolNames: readonly string[] = []): string {
+export function identityEnvelope(agent: OrganizationRuntimeAgentConfig, mountedToolNames: readonly string[] = []): string {
   return [
     "<daimon-agent-identity>",
     JSON.stringify({ id: agent.id, name: agent.name, instructions: agent.instructions }),
     "</daimon-agent-identity>",
     ...(mountedToolNames.length === 0 ? [] : [
-      `Your mounted tools are exactly: ${mountedToolNames.join(", ")}. Call them by these names; `
-        + "your instructions may spell them differently. No other tool reaches the newsroom."
+      (agent.engine.kind === "grok"
+        ? grokMountedToolNamingRule(mountedToolNames)
+        : `Your mounted tools are exactly: ${mountedToolNames.join(", ")}. Call them by these names; `
+          + "your instructions may spell them differently.")
+        + " No other tool reaches the newsroom."
     ]),
     "Colleagues only hear you when you call moltnet_send; your terminal response is a private note to the runtime, not a message to anyone — keep it to one line or leave it empty. "
       + "Do not seek transport credentials or invoke a transport CLI unless the caller explicitly mounted an authenticated transport tool.",
