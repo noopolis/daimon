@@ -106,7 +106,12 @@ const requestClockFields = (request: Readonly<{ startedAt?: string; endedAt?: st
 
 /** One Grok broker model request: usage from the worker stream, timing from the proxy. */
 export type GrokTurnRequest = Readonly<{ index: number; input: number; cacheRead: number; cacheWrite: number; output: number; total: number; startedAt?: string; endedAt?: string }>;
-export type GrokTurnRequestEntry = Readonly<{ agent: string; wake: string; turn: string; session?: string; model: GrokBrokerModel; requests: readonly GrokTurnRequest[]; at?: string }>;
+/**
+ * `requestCount` is the turn's admitted request count when it exceeds the rows:
+ * a killed turn's in-flight request was sent upstream but never reported usage,
+ * so it has no row yet still counts in every row's `requests`.
+ */
+export type GrokTurnRequestEntry = Readonly<{ agent: string; wake: string; turn: string; session?: string; model: GrokBrokerModel; requests: readonly GrokTurnRequest[]; requestCount?: number; at?: string }>;
 
 /**
  * Grok rows share the Codex row's field meaning: `input` is the whole prompt
@@ -128,7 +133,7 @@ export const renderGrokTurnRequestLines = (entry: GrokTurnRequestEntry): string 
     ...(entry.session === undefined ? {} : { thread: bounded(entry.session) }),
     model: entry.model,
     request: request.index,
-    requests: entry.requests.length,
+    requests: Math.max(entry.requests.length, entry.requestCount ?? 0),
     input: request.input + request.cacheRead,
     cached_input: request.cacheRead,
     fresh_input: request.input,

@@ -39,5 +39,5 @@ export async function finishBrokerTurnWithUsage(turns: EngineBrokerTurnRegistry,
     outcome: terminal.kind === "completed" ? { status: "completed" } : { status: "failed", reason: detail.reason ?? "unknown" },
     turn: terminal.turnId, limitReason: terminal.limitReason, model: terminal.model
   });
-  await recordGrokTurnRequests(metering.requestLedgerPath, { agent: metering.agentId, wake: metering.wakeId, turn: terminal.turnId, model: terminal.model, requests: detail.requests, ...(detail.session === undefined ? {} : { session: detail.session }) });
+  await recordGrokTurnRequests(metering.requestLedgerPath, { agent: metering.agentId, wake: metering.wakeId, turn: terminal.turnId, model: terminal.model, requests: detail.requests, requestCount: terminal.requests, ...(detail.session === undefined ? {} : { session: detail.session }) });
 }

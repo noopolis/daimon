@@ -46,10 +46,10 @@ const untilAborted = (signal: AbortSignal): Promise<never> => new Promise((_reso
  * talks to the proxy exactly as the native worker does (capability bearer,
  * pinned client version, lean body). Only the launcher and attestation are fakes.
  */
-const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId: string, worker: Worker, overrides?: Parameters<typeof runGrokEngineBrokerTurn>[6], limits?: EngineBrokerServiceRegistration["limits"], turnStore?: string) => ReturnType<typeof runGrokEngineBrokerTurn>; usageRows: () => Promise<Record<string, unknown>[]>; requestRows: () => Promise<Record<string, unknown>[]>; upstreamCalls: () => number }>) => Promise<void>, usageLedgerPath?: string): Promise<void> => {
+const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId: string, worker: Worker, overrides?: Parameters<typeof runGrokEngineBrokerTurn>[6], limits?: EngineBrokerServiceRegistration["limits"], turnStore?: string) => ReturnType<typeof runGrokEngineBrokerTurn>; usageRows: () => Promise<Record<string, unknown>[]>; requestRows: () => Promise<Record<string, unknown>[]>; upstreamCalls: () => number }>) => Promise<void>, usageLedgerPath?: string, upstreamDelayMs: (call: number) => number = () => 15): Promise<void> => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-broker-usage-"));
   let calls = 0;
-  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async () => { calls++; await new Promise((resolve) => setTimeout(resolve, 15)); return { status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from(`data: ${JSON.stringify({ choices: [], usage: upstreamUsage })}\n\ndata: [DONE]\n\n`) }; }, undefined, 0);
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async () => { calls++; await new Promise((resolve) => setTimeout(resolve, upstreamDelayMs(calls))); return { status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from(`data: ${JSON.stringify({ choices: [], usage: upstreamUsage })}\n\ndata: [DONE]\n\n`) }; }, undefined, 0);
   const ledger = usageLedgerPath ?? path.join(root, "usage.jsonl");
   const rows = async (file: string) => (await readFile(file, "utf8").catch(() => "")).split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
   try {
@@ -128,13 +128,16 @@ test("the token ceiling stops a turn one request past the ceiling at most", asyn
 });
 
 test("the wall-clock limit aborts a worker that is mid-request", async () => {
-  await withBroker(async ({ turn, usageRows }) => {
+  await withBroker(async ({ turn, usageRows, requestRows }) => {
     const started = Date.now();
-    const worker: Worker = async (send, signal) => { assert.equal(await send(), 200); return untilAborted(signal); };
-    await assert.rejects(turn("wake-4", worker, { timeoutMs: 1_000 }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.code === "limit_exceeded" && error.accounting?.limitReason === "timeout");
-    assert.ok(Date.now() - started < 5_000);
-    assert.deepEqual((await usageRows()).map((row) => [row.reason, row.limit_reason, row.total]), [["wake_timeout", "timeout", 2_775]]);
-  });
+    // Request 2 is still upstream (1.5 s) when the 1 s wall clock fires.
+    const worker: Worker = async (send, signal) => { assert.equal(await send(), 200); void send().catch(() => undefined); return untilAborted(signal); };
+    await assert.rejects(turn("wake-4", worker, { timeoutMs: 1_000 }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.code === "limit_exceeded" && error.accounting?.limitReason === "timeout" && error.accounting.requests === 2);
+    assert.ok(Date.now() - started < 1_400, "the turn ends at the deadline, not when the in-flight request returns");
+    assert.deepEqual((await usageRows()).map((row) => [row.reason, row.limit_reason, row.total, row.calls]), [["wake_timeout", "timeout", 2_775, 2]]);
+    // One measured row, but both admitted requests count: the killed one was sent upstream.
+    assert.deepEqual((await requestRows()).map((row) => [row.request, row.requests]), [[0, 2]]);
+  }, undefined, (call) => call === 2 ? 1_500 : 15);
 });
 
 test("a wake may only lower a declared limit: raising one is refused before any turn record or worker", async () => {
