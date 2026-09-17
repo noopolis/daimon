@@ -229,3 +229,15 @@ test("DAIMON_WAKE_FUSE=off never touches the usage ledger, missing or not", asyn
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory, { DAIMON_WAKE_FUSE: "off" }) });
   assert.deepEqual(await fuse.admit("alpha", "one"), { state: "admitted" });
 }));
+
+test("usage rows sharing a broker turn key count once toward the token ceiling", async () => await withDirectory(async (directory) => {
+  const turn = "b".repeat(64);
+  // 600 + 600 would trip a 1000-token ceiling; the duplicate turn row must not.
+  await writeFile(path.join(directory, "usage.jsonl"), [
+    JSON.stringify({ at: "2026-08-30T00:00:00.000Z", total: 600, turn }),
+    JSON.stringify({ at: "2026-08-30T00:00:00.001Z", total: 600, turn })
+  ].join("\n") + "\n");
+  const now = () => new Date("2026-08-30T00:00:00.000Z");
+  const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory), now });
+  assert.deepEqual(await fuse.admit("alpha", "one"), { state: "admitted" });
+}));

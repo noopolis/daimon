@@ -46,6 +46,14 @@ test("a real multi-request rollout yields one row per model request, cached and 
     [288, 228, 50_292]
   ]);
   assert.deepEqual(requests.map((request) => request.cacheWrite), [0, 0, 0, 0]);
+  // End is the usage frame; start is the first non-usage frame after the previous
+  // request's usage frame, else the previous request's end.
+  assert.deepEqual(requests.map((request) => [request.startedAt, request.endedAt]), [
+    ["2026-09-05T01:32:00.678Z", "2026-09-05T01:32:19.183Z"],
+    ["2026-09-05T01:34:00.679Z", "2026-09-05T01:52:22.056Z"],
+    ["2026-09-05T01:52:22.056Z", "2026-09-05T01:52:37.604Z"],
+    ["2026-09-05T01:52:37.604Z", "2026-09-05T01:52:51.112Z"]
+  ]);
 });
 
 test("reasoning tokens, which the per-wake ledger drops entirely, survive per request", async () => {

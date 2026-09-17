@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { open, rename, stat } from "node:fs/promises";
 
 import { readCodexRolloutRequests, type CodexRequestUsage } from "../pi/codexRolloutUsage.js";
+import type { GrokBrokerModel } from "./grokBrokerModelPolicy.js";
 import { TURN_USAGE_LEDGER, TURN_USAGE_MAX_IDENTIFIER_CHARS, TURN_USAGE_ROTATE_BYTES } from "./turnUsageLedger.js";
 
 /**
@@ -91,8 +92,57 @@ export const renderTurnRequestLines = (entry: TurnRequestEntry): string => {
     cache_write: request.cacheWrite,
     output: request.output,
     reasoning: request.reasoning,
-    total: request.total
+    total: request.total,
+    ...requestClockFields(request)
   })}\n`).join("");
+};
+
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/u;
+/** Per-request `started_at`/`ended_at`, each only when it was measured; `at` stays the append time. */
+const requestClockFields = (request: Readonly<{ startedAt?: string; endedAt?: string }>): Record<string, string> => ({
+  ...(request.startedAt !== undefined && TIMESTAMP.test(request.startedAt) ? { started_at: request.startedAt } : {}),
+  ...(request.endedAt !== undefined && TIMESTAMP.test(request.endedAt) ? { ended_at: request.endedAt } : {})
+});
+
+/** One Grok broker model request: usage from the worker stream, timing from the proxy. */
+export type GrokTurnRequest = Readonly<{ index: number; input: number; cacheRead: number; cacheWrite: number; output: number; total: number; startedAt?: string; endedAt?: string }>;
+export type GrokTurnRequestEntry = Readonly<{ agent: string; wake: string; turn: string; session?: string; model: GrokBrokerModel; requests: readonly GrokTurnRequest[]; at?: string }>;
+
+/**
+ * Grok rows share the Codex row's field meaning: `input` is the whole prompt
+ * side the request replayed (`input_tokens + cache_read`), `cached_input` the
+ * cache read, `fresh_input` the uncached remainder. Grok does not separate
+ * reasoning tokens, so `reasoning` is absent rather than zero. `turn` is the
+ * broker idempotency key and `thread` the Grok session id when the stream
+ * named one.
+ */
+export const renderGrokTurnRequestLines = (entry: GrokTurnRequestEntry): string => {
+  const at = entry.at ?? new Date().toISOString();
+  return entry.requests.map((request) => `${JSON.stringify({
+    v: TURN_REQUEST_LEDGER_VERSION,
+    agent: bounded(entry.agent),
+    wake: bounded(entry.wake),
+    engine: "grok",
+    at,
+    turn: entry.turn,
+    ...(entry.session === undefined ? {} : { thread: bounded(entry.session) }),
+    model: entry.model,
+    request: request.index,
+    requests: entry.requests.length,
+    input: request.input + request.cacheRead,
+    cached_input: request.cacheRead,
+    fresh_input: request.input,
+    cache_write: request.cacheWrite,
+    output: request.output,
+    total: request.total,
+    ...requestClockFields(request)
+  })}\n`).join("");
+};
+
+/** Advisory and never rejects, like {@link recordTurnRequests}; an empty turn writes nothing. */
+export const recordGrokTurnRequests = async (file: string, entry: GrokTurnRequestEntry): Promise<boolean> => {
+  if (entry.requests.length === 0) return false;
+  try { await rotate(file); await appendLines(file, renderGrokTurnRequestLines(entry)); return true; } catch { return false; }
 };
 
 const rotate = async (file: string): Promise<void> => {
