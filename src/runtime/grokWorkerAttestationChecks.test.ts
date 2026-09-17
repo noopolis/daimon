@@ -7,6 +7,7 @@ import test, { mock } from "node:test";
 
 import {
     GrokWorkerAttestationFailure,
+  grokBrokerAttestationInput,
   prepareGrokWorkerAttestation,
   verifyGrokWorkerAttestation,
   type GrokWorkerAttestationSnapshot
@@ -75,7 +76,7 @@ test("prepare refuses a worker home that fails attestation even when profile, te
   const events = path.join(home, "sessions", "sandbox-events.jsonl");
   await writeFile(events, ""); await chmod(events, 0o640);
   const input = { profilePath: profile, eventsPath: events, profileSha256: createHash("sha256").update(text).digest("hex"), workerUid: self.uid, brokerGid: self.gid, configSha256: "0".repeat(64) };
-  await assert.rejects(prepareGrokWorkerAttestation(input, { uid: self.uid, gid: Number((await stat(profile)).gid), sharedTmpRoots: [] }), (error: Error) => error.message === "Grok worker isolation attestation unavailable");
+  await assert.rejects(prepareGrokWorkerAttestation(input, { uid: self.uid, gid: Number((await stat(profile)).gid), tmp: { sharedRoots: [root], sharedOwnerUid: self.uid, firstWorkerUid: self.uid } }), (error: Error) => error.message === "Grok worker isolation attestation unavailable");
 });
 
 test("prepare refuses a worker without a private temp directory before the home check", async (t) => {
@@ -97,4 +98,27 @@ test("prepare refuses a worker without a private temp directory before the home 
   const stray = { ...input, profilePath: path.join(root, "elsewhere", "sandbox.toml"), eventsPath: path.join(root, "elsewhere", "sessions", "sandbox-events.jsonl") };
   await writeFile(stray.profilePath, text); await chmod(stray.profilePath, 0o444); await writeFile(stray.eventsPath, ""); await chmod(stray.eventsPath, 0o640);
   await assert.rejects(prepareGrokWorkerAttestation(stray, owner), (error: Error) => /attestation unavailable/u.test(error.message) && !/temp/u.test(error.message));
+});
+
+test("prepare refuses the current turn when a sibling registered worker's private temp is 0777", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-guard-sibling-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const make = async (name: string) => {
+    const home = path.join(root, name), grok = path.join(home, ".grok");
+    await mkdir(path.join(grok, "sessions"), { recursive: true }); await mkdir(path.join(home, "tmp"), { mode: 0o700 });
+    return { home, profile: path.join(grok, "sandbox.toml"), events: path.join(grok, "sessions", "sandbox-events.jsonl") };
+  };
+  const own = await make("own"), sibling = await make("sibling");
+  const text = '[profiles.daimon-strict]\nextends = "strict"\nrestrict_network = true\ndeny = []\n';
+  await writeFile(own.profile, text); await chmod(own.profile, 0o444);
+  await writeFile(own.events, ""); await chmod(own.events, 0o640);
+  const registration = { profilePath: own.profile, eventsPath: own.events, profileSha256: createHash("sha256").update(text).digest("hex"), workerUid: self.uid, workspace: "/w" };
+  const input = grokBrokerAttestationInput(registration, [registration, { profilePath: sibling.profile, workerUid: self.uid }], "0".repeat(64));
+  assert.deepEqual(input.registeredWorkers.map((entry) => entry.profilePath), [own.profile, sibling.profile]);
+  const seams = { uid: self.uid, gid: Number((await stat(own.profile)).gid), tmp: { sharedRoots: [root], sharedOwnerUid: self.uid, firstWorkerUid: self.uid } };
+  await chmod(root, 0o700);
+  // Sibling well provisioned: temp passes and the (root-only) home leg is what refuses.
+  await assert.rejects(prepareGrokWorkerAttestation({ ...input, brokerGid: self.gid }, seams), (error: Error) => error.message === "Grok worker isolation attestation unavailable");
+  await chmod(path.join(sibling.home, "tmp"), 0o777);
+  await assert.rejects(prepareGrokWorkerAttestation({ ...input, brokerGid: self.gid }, seams), /temp isolation attestation unavailable/u);
 });

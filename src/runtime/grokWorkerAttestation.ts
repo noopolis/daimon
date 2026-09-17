@@ -4,7 +4,7 @@ import { lstat,open } from "node:fs/promises";
 import path from "node:path";
 
 import { verifyGrokWorkerHome } from "./grokWorkerHomeAttestation.js";
-import { verifyGrokWorkerTmp } from "./grokWorkerTmpAttestation.js";
+import { grokWorkerHomeForProfile, verifyGrokWorkerTmp, type GrokWorkerTmpOptions, type GrokWorkerTmpWorker } from "./grokWorkerTmpAttestation.js";
 import { grokWorkerEventsPathFor } from "./grokWorkerSandboxProfile.js";
 
 /**
@@ -62,15 +62,19 @@ export function parseGrokWorkerSandboxProfile(bytes:Uint8Array,profileSha256:str
  * 1.0.34), and a root-owned read-only worker home whose `config.toml` hashes to
  * the declared renderer output (`grokWorkerHomeAttestation.ts`).
  */
-export async function prepareGrokWorkerAttestation(input:Readonly<{profilePath:string;eventsPath:string;profileSha256:string;workerUid:number;brokerGid:number;configSha256:string}>,profileOwner:Readonly<{uid:number;gid:number;sharedTmpRoots?:readonly string[]}>={uid:0,gid:0}):Promise<Snapshot>{
+export async function prepareGrokWorkerAttestation(input:Readonly<{profilePath:string;eventsPath:string;profileSha256:string;workerUid:number;brokerGid:number;configSha256:string;registeredWorkers?:readonly Readonly<{profilePath:string;workerUid:number}>[]}>,profileOwner:Readonly<{uid:number;gid:number;tmp?:GrokWorkerTmpOptions}>={uid:0,gid:0}):Promise<Snapshot>{
   if(input.eventsPath!==grokWorkerEventsPathFor(input.profilePath))throw new Error("Grok worker sandbox events must be read from $GROK_HOME/sessions/sandbox-events.jsonl");
   const profile=await secureOpen(input.profilePath,profileOwner.uid,profileOwner.gid,0o444,65_536);let bytes:Buffer|undefined;let denyPaths:readonly string[]=[];try{bytes=await profile.readFile();denyPaths=parseGrokWorkerSandboxProfile(bytes,input.profileSha256);}catch{throw new Error("Grok worker isolation attestation unavailable");}finally{bytes?.fill(0);await profile.close();}
   // The launcher exports TMPDIR=<registered home>/tmp; the profile lives at <home>/.grok/sandbox.toml.
-  if(path.basename(path.dirname(input.profilePath))!==".grok")throw new Error("Grok worker isolation attestation unavailable");
-  await verifyGrokWorkerTmp(path.dirname(path.dirname(input.profilePath)),input.workerUid,profileOwner.sharedTmpRoots);
+  // Every registered worker's private temp is attested, not only this one's (a sibling's open temp is a shared channel).
+  const workers=[{profilePath:input.profilePath,workerUid:input.workerUid},...(input.registeredWorkers??[])].map((worker)=>({home:grokWorkerHomeForProfile(worker.profilePath),uid:worker.workerUid}));
+  if(workers.some((worker)=>worker.home===undefined))throw new Error("Grok worker isolation attestation unavailable");
+  await verifyGrokWorkerTmp(workers as readonly GrokWorkerTmpWorker[],profileOwner.tmp);
   await verifyGrokWorkerHome(path.dirname(input.profilePath),input.configSha256);
   const events=await secureOpen(input.eventsPath,input.workerUid,input.brokerGid,0o640,16*1024*1024);try{const stat=await events.stat();return{dev:Number(stat.dev),ino:Number(stat.ino),size:Number(stat.size),denyPaths};}finally{await events.close();}
 }
+/** The per-turn attestation input for one registration, carrying every registered worker so sibling temp is attested too. */
+export const grokBrokerAttestationInput=<T extends Readonly<{profilePath:string;eventsPath:string;profileSha256:string;workerUid:number}>>(registration:T,registrations:readonly Readonly<{profilePath:string;workerUid:number}>[],configSha256:string)=>({...registration,brokerGid:2100,configSha256,registeredWorkers:registrations.map((entry)=>({profilePath:entry.profilePath,workerUid:entry.workerUid}))});
 /**
  * The accepted `ProfileApplied` line of one turn, as an absolute byte range of
  * the events file plus its digest.

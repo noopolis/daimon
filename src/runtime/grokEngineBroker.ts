@@ -9,7 +9,7 @@ import { acquireGrokBrokerRealmLease } from "./grokBrokerRealmLease.js";
 import { grokBrokerWorkerConfigSha256 } from "./grokBrokerWorkerConfig.js";
 import { parseGrokBrokerModelPolicy } from "./grokBrokerModelPolicy.js";
 import { runGrokEngineBrokerTurn, type GrokEngineBrokerTurnResult } from "./grokEngineBrokerTurn.js";
-import { createGrokWorkerIsolationGuard,prepareGrokWorkerAttestation } from "./grokWorkerAttestation.js";
+import { createGrokWorkerIsolationGuard,grokBrokerAttestationInput,prepareGrokWorkerAttestation } from "./grokWorkerAttestation.js";
 import { createLedgeredGrokInferenceGrants, GrokInferenceGrantRefused, type GrokInferenceGrantRequest } from "./grokInferenceGrants.js";
 
 export { EngineBrokerTurnFailure, type GrokEngineBrokerTurnResult } from "./grokEngineBrokerTurn.js";
@@ -30,7 +30,7 @@ export type GrokEngineBroker = Awaited<ReturnType<typeof startGrokEngineBroker>>
  */
 export async function startGrokEngineBroker(options: Readonly<{ grokCommand: string; nativeClient: string; credentialHome: string; turnStore: string; registrations: readonly GrokEngineBrokerRegistration[]; inferenceLedgerPath?: string }>) {
   const registrations = new Map(options.registrations.map((entry) => [entry.agentId, { ...entry, model: parseGrokBrokerModelPolicy(entry.model) }])); if (registrations.size !== options.registrations.length) throw new Error("engine broker registration conflict");
-  const attestationFor = (registration: GrokEngineBrokerRegistration) => ({ ...registration, brokerGid: 2100, configSha256: grokBrokerWorkerConfigSha256(registration.model) });
+  const attestationFor = (registration: GrokEngineBrokerRegistration) => grokBrokerAttestationInput(registration, [...registrations.values()], grokBrokerWorkerConfigSha256(registration.model));
   const inferenceLedgerPath=options.inferenceLedgerPath;const grants=inferenceLedgerPath===undefined?undefined:createLedgeredGrokInferenceGrants(inferenceLedgerPath);
   const lease=await acquireGrokBrokerRealmLease(options.credentialHome);const authority = new DurableGrokBrokerCredentialAuthority(options.grokCommand, options.credentialHome);try{await authority.initialize();}catch(error){await lease.close();throw error;} let proxy:Awaited<ReturnType<typeof startGrokBrokerProxy>>;try{proxy=await startGrokBrokerProxy(authority,undefined,undefined,undefined,grants);}catch(error){await lease.close();throw error;}let mcp:Awaited<ReturnType<typeof startEngineBrokerMcpFacade>>|undefined;try{mcp=await startEngineBrokerMcpFacade();for(const registration of registrations.values())await prepareGrokWorkerAttestation(attestationFor(registration));}catch(error){if(mcp)await mcp.close().catch(()=>undefined);await proxy.close();await lease.close();throw error;}if(!mcp)throw new Error("engine broker unavailable");const turns = new EngineBrokerTurnRegistry(options.turnStore); const active = new Map<string, { controller: AbortController; done: Promise<void> }>(); let closed = false;
   const facade = mcp;
