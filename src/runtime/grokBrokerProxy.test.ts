@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import test from "node:test";
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
 
@@ -36,11 +37,18 @@ test("proxy refuses a fail-open tool set or an undeclared effort without calling
     const token = proxy.capabilities.issue("agent", "turn"); proxy.registerIsolationGuard("turn", async () => undefined);
     const full = [...lean, ...["search_replace", "todo_write", "write", "monitor"].map((name) => ({ type: "function", function: { name } }))];
     for (const payload of [leanBody({ tools: full }), leanBody({ tools: [{ type: "function", function: { name: "session_title" } }] }), leanBody({ reasoning_effort: "high" }), leanBody({ reasoning_effort: undefined })]) {
-      const response = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${token}`, "x-grok-client-version": "1.0.34" }, body: payload });
-      assert.equal(response.status, 503); await response.text();
+      assert.equal(await post(proxy.port, token, payload), 503);
     }
     assert.equal(calls, 0);
-    const accepted = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${token}`, "x-grok-client-version": "1.0.34" }, body: leanBody() });
-    assert.equal(accepted.status, 200); await accepted.text(); assert.equal(calls, 1); assert.ok(accessed >= 1);
+    assert.equal(await post(proxy.port, token, leanBody()), 200); assert.equal(calls, 1); assert.ok(accessed >= 1);
   } finally { await proxy.close(); }
 });
+
+// One unpooled connection per request: the proxy listens on a fixed port that the
+// previous test just closed, and a pooled keep-alive socket to it would be stale.
+function post(port: number, token: string, body: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path: "/v1/chat/completions", method: "POST", agent: false, headers: { authorization: `Bearer ${token}`, "x-grok-client-version": "1.0.34", "content-type": "application/json" } }, (response) => { response.resume(); response.on("end", () => resolve(response.statusCode ?? 0)); });
+    req.on("error", reject); req.end(body);
+  });
+}
