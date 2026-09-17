@@ -85,13 +85,21 @@ test("a request after the elapsed deadline is refused, and every admitted reques
   assert.deepEqual(snapshot.timings, [{ startedAt: new Date(1_000_000).toISOString(), endedAt: new Date(1_000_000).toISOString(), usage: estimate, estimated: true }]);
 });
 
-test("a turn without a registered meter is never forwarded", async () => {
+// A live capability with no registered meter means the turn is already over: the
+// launcher registers a turn before it starts the worker, so nothing can arrive
+// before the meter exists, and nothing can make a finished turn live again. The
+// answer is therefore 400 (a named, non-retryable refusal) rather than the 503 it
+// once was — a retryable shape here bought only Grok's blind retry storm, which
+// spent ~141k tokens re-asking a question that could never start being answerable.
+test("a turn without a registered meter is refused non-retryably and never forwarded", async () => {
   let calls = 0;
   const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async () => { calls++; return { status: 200, headers: {}, body: Buffer.from("{}") }; }, undefined, 0);
   try {
     const token = proxy.capabilities.issue("agent", "turn");
     proxy.registerIsolationGuard("turn", async () => undefined);
-    assert.equal((await post(proxy.port, token)).status, 503);
+    const answer = await post(proxy.port, token);
+    assert.equal(answer.status, 400);
+    assert.equal(JSON.parse(answer.text).reason, "no_active_turn");
     assert.equal(calls, 0);
   } finally { await proxy.close(); }
 });
