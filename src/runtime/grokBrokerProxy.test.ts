@@ -46,7 +46,8 @@ test("proxy refuses a fail-open tool set or an undeclared effort without calling
     const token = proxy.capabilities.issue("agent", "turn"); arm(proxy, async () => undefined);
     const full = [...lean, ...["search_replace", "todo_write", "write", "monitor"].map((name) => ({ type: "function", function: { name } }))];
     for (const payload of [leanBody({ tools: full }), leanBody({ tools: [{ type: "function", function: { name: "session_title" } }] }), leanBody({ reasoning_effort: "high" }), leanBody({ reasoning_effort: undefined })]) {
-      assert.equal(await post(proxy.port, token, payload), 503);
+      // A policy miss is non-retryable: 400, so Grok fails fast instead of retrying a 503.
+      assert.equal(await post(proxy.port, token, payload), 400);
     }
     assert.equal(calls, 0);
     assert.equal(await post(proxy.port, token, leanBody()), 200); assert.equal(calls, 1); assert.ok(accessed >= 1);
@@ -68,7 +69,7 @@ test("the session-title sink is refused before capability, guard, credential, or
   try {
     const token = proxy.capabilities.issue("agent", "turn", 60_000, 1); arm(proxy, async () => { guarded++; });
     const title = JSON.stringify({ model: "disabled", max_tokens: 100, temperature: 0, stream: true, messages: [{ role: "user", content: "prompt-derived" }], tool_choice: { type: "function", function: { name: "session_title" } }, tools: [{ type: "function", function: { name: "session_title" } }] });
-    assert.equal(await post(proxy.port, GROK_SESSION_TITLE_SINK_KEY, title), 503);
+    assert.equal(await post(proxy.port, GROK_SESSION_TITLE_SINK_KEY, title), 400);
     assert.deepEqual({ calls, accessed, guarded }, { calls: 0, accessed: 0, guarded: 0 });
     // The turn capability (budget 1 request) is untouched and still serves the real request.
     assert.equal(await post(proxy.port, token, leanBody()), 200);
@@ -85,7 +86,7 @@ test("the isolation guard is awaited before the first upstream call, and a faili
       order.push("guard-start"); await new Promise((resolve) => setTimeout(resolve, 30)); order.push("guard-end");
       if (fail) throw new Error("no enforcement evidence");
     });
-    assert.equal(await post(proxy.port, token, leanBody()), 503);
+    assert.equal(await post(proxy.port, token, leanBody()), 400);
     assert.equal(upstreamCalls, 0);
     assert.deepEqual(order, ["guard-start", "guard-end"]);
     fail = false; order.length = 0;
