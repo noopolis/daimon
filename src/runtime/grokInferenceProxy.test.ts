@@ -132,3 +132,26 @@ test("a grant's request ceiling and one-in-flight rule hold on the wire", async 
     assert.equal(calls, 1); assert.equal(rows.length, 64);
   }, { upstream: async () => { calls++; await gate; return { status: 200, headers: { "content-type": "text/event-stream" }, body: usageStream(50) }; } });
 });
+
+test("a grant whose id equals a live turn id leaves that turn's capability, policy and meter untouched", async () => {
+  const shared = "0123456789abcdef0123456789abcdef";
+  const grants = new GrokInferenceGrants({ grantId: () => shared });
+  let calls = 0;
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async () => { calls++; return { status: 200, headers: { "content-type": "text/event-stream" }, body: usageStream(20) }; }, undefined, 0, grants);
+  try {
+    const turnToken = proxy.capabilities.issue("agent-a", shared);
+    const turnMeter = new GrokBrokerTurnMeter({ maxRequests: 4, maxTokens: 10_000, timeoutMs: 60_000 });
+    proxy.registerIsolationGuard(shared, async () => undefined);
+    proxy.registerTurn(shared, { policy: { model: "grok-4.6", reasoningEffort: "low" }, meter: turnMeter });
+    const issued = grants.issue({ model: "grok-4.5", reasoningEffort: "high", purpose: "judge" });
+    assert.equal(issued.grantId, shared);
+    const lean = ["run_terminal_command", "read_file", "list_dir", "grep", "search_tool", "use_tool"].map((name) => ({ type: "function", function: { name } }));
+    const leanBody = JSON.stringify({ model: "grok-4.6", reasoningEffort: undefined, reasoning_effort: "low", stream: true, messages: [], tools: lean });
+    assert.equal((await post(proxy.port, turnToken, leanBody)).status, 200);
+    assert.equal((await post(proxy.port, issued.token, judgeBody({ model: "grok-4.5", reasoning_effort: "high" }))).status, 200);
+    assert.equal(turnMeter.snapshot().requests, 1); assert.equal(grants.authorize(issued.token)!.meter.snapshot().requests, 1);
+    grants.release(shared);
+    assert.equal((await post(proxy.port, turnToken, leanBody)).status, 200);
+    assert.equal(turnMeter.snapshot().requests, 2); assert.equal(calls, 3);
+  } finally { grants.close(); await proxy.close(); }
+});
