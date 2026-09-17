@@ -103,6 +103,9 @@ test("upstream usage parsing takes the last usage block and never zero-fills", (
   assert.equal(parseGrokUpstreamUsage(sse({ prompt_tokens: "4", completion_tokens: 1 }), "text/event-stream"), undefined);
   assert.equal(parseGrokUpstreamUsage(sse({ prompt_tokens: 4, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 9 } }), "text/event-stream"), undefined);
   assert.equal(parseGrokUpstreamUsage(Buffer.from("not json"), "application/json"), undefined);
+  // Mutation guard: keeping the earlier valid block under-reports a request whose final usage is implausible.
+  const twoBlocks = Buffer.from([{ choices: [], usage: { prompt_tokens: 5, completion_tokens: 1 } }, { choices: [], usage: { prompt_tokens: 900_000, completion_tokens: 1 } }].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join(""));
+  assert.equal(parseGrokUpstreamUsage(twoBlocks, "text/event-stream"), undefined);
 });
 
 test("at most one upstream request is in flight per turn: an overlapping request is refused, uncounted", async () => {

@@ -133,8 +133,10 @@ export function parseGrokUpstreamUsage(body: Uint8Array, contentType: string | u
   let found: EngineBrokerTurnUsage | undefined;
   for (const candidate of candidates) {
     if (!isRecord(candidate) || !isRecord(candidate.usage)) continue;
-    const decoded = decodeOpenAiUsage(candidate.usage);
-    if (decoded !== undefined) found = decoded;
+    // Last usage block wins even when invalid: an implausible final report
+    // must not fall back to an earlier, smaller block (the request is then
+    // charged the estimate instead).
+    found = decodeOpenAiUsage(candidate.usage);
   }
   return found;
 }
