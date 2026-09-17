@@ -1,4 +1,5 @@
 import { WORK_AVAILABILITY_SCHEMA, WORK_BLOCKED_SCHEMA } from "./attentionContract.js";
+import { GROK_BROKER_MODELS, GROK_BROKER_REASONING_EFFORTS, GROK_WORKER_MAX_TURNS, GROK_WORKER_TOOL_IDS, GROK_WORKER_VISIBLE_TOOLS } from "./grokWorkerContract.js";
 import {
   ORGANIZATION_RUNTIME_CONFIG_SCHEMA,
   ORGANIZATION_RUNTIME_CONFIG_V2_SCHEMA,
@@ -34,6 +35,38 @@ export const GROK_ENGINE_BROKER = {
   providerProxy: { host: "127.0.0.1", port: 43_123 },
   mcpFacade: { host: "127.0.0.1", port: 43_124, path: "/mcp" },
   identities: { organizationUid: 2_000, brokerUid: 2_100, firstWorkerUid: 2_200 },
+  grokCliVersion: "1.0.34",
+  grokCliBuild: "3736acbc8658",
+  grokCliArtifacts: {
+    arm64: { url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.34-linux-aarch64", sha256: "39ab87666877d64ef3a40aa60fbe0c3b6a6acd7001b78fe60e2c76bb6cfc4a94", bytes: 136_090_504 },
+    x64: { url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.34-linux-x86_64", sha256: "be5905e107d2b8b5f3c142d21ecfe4c8fd32a913d2fd551b788707930c4dc80d", bytes: 163_035_648 }
+  },
+  worker: {
+    modelId: "daimon-broker-grok",
+    models: GROK_BROKER_MODELS,
+    reasoningEfforts: GROK_BROKER_REASONING_EFFORTS,
+    defaultModel: "grok-4.6",
+    defaultReasoningEffort: "low",
+    toolIds: GROK_WORKER_TOOL_IDS,
+    visibleTools: GROK_WORKER_VISIBLE_TOOLS,
+    maxTurns: GROK_WORKER_MAX_TURNS,
+    systemPromptSha256: "2c31c0085a54a4efbf9c0cf0b8124c56e47f38691b7f0c7fa233a74abaa8ddf8",
+    // sha256 of `renderGrokBrokerWorkerConfig({ model, reasoningEffort })`, the only accepted config.toml bytes.
+    configSha256: {
+      "grok-4.6": { low: "e09c127363094a7cad560586d89e994a9e6117b9c548feaffb1b5b01705cf363", medium: "b90807d3c73651a1a3f0bf89eacb0c73360e7cfc34d10e0185a381a27b40a718", high: "045171e44ba44b09522589ba85770f7c09fb8cab3e3f76fbb88cb534dcc01018" },
+      "grok-4.5": { low: "848df2f71d0a88cf1185728cd6e0b7e15238b3a7536bf1538467f8c4868b0647", medium: "3e84795e834cf7b5857c24070d9f91b951c9c5f806823dd29c92cf88635a9318", high: "792f90bb7ae5154d6e002419f5b308e2ea975fc55ae7c324952f928329238f93" },
+      "grok-build": { low: "1be3438799f9023b6acdaec991c139133bc791877f86a8b139129ef4b7b8386c", medium: "cadef8a2fcca778b515fcc10bfa8ab2ed8425fa46f37dc3a64095b477beb914a", high: "cb3ef9f71eefa913517dc775e5d72c49cbf718cf6c43ccc33d55b22401ef2e2f" }
+    },
+    // Worker `GROK_HOME` layout the broker attests before every turn. The home and
+    // its `sessions/` directory are root-owned, worker-group writable and sticky so
+    // Grok can create its own state but never replace a root-owned file.
+    home: {
+      directory: { uid: 0, group: "worker", mode: 0o1771 },
+      sessionsDirectory: { relativePath: "sessions", uid: 0, group: "worker", mode: 0o1771 },
+      readOnlyFiles: { names: ["config.toml", "managed_config.toml", "requirements.toml", "sandbox.toml", "trusted_folders.toml"], uid: 0, gid: 0, mode: 0o444 },
+      sandboxEvents: { relativePath: "sessions/sandbox-events.jsonl", owner: "worker", group: "broker", mode: 0o640 }
+    }
+  },
   bounds: { promptBytes: 65_536, capabilityBytes: 4_096, capabilityBundleBytes: 8_196, outputBytes: 65_536 },
   artifacts: {
     sourceSha256: "bdcab1e12dcc531ed8e56f890263ca23a9ee7bac468191dd598e143df4ff8c58",

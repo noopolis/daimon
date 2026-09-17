@@ -1,17 +1,118 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 
-export function renderGrokBrokerWorkerConfig(helperPath: string, proxyPort: number): string {
-  if (!path.posix.isAbsolute(helperPath) || /[\r\n"']/u.test(helperPath) || !Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65_535) throw new TypeError("invalid Grok broker worker configuration");
+import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
+import { DAIMON_GROK_SYSTEM_PROMPT, GROK_WORKER_MAX_TURNS, GROK_WORKER_TOOL_IDS } from "../contracts/grokWorkerContract.js";
+import { parseGrokBrokerModelPolicy, type GrokBrokerModelPolicy } from "./grokBrokerModelPolicy.js";
+
+export { DAIMON_GROK_SYSTEM_PROMPT, GROK_WORKER_MAX_TURNS, GROK_WORKER_TOOL_IDS, GROK_WORKER_VISIBLE_TOOLS } from "../contracts/grokWorkerContract.js";
+
+/**
+ * Bundled skills shipped by Grok CLI 1.0.34. Names are version-specific:
+ * `[skills] disabled` removed all ~2.1k skill tokens in the P0 matrix, and a
+ * CLI bump must re-derive this list rather than inherit it.
+ */
+export const GROK_1_0_34_BUNDLED_SKILLS = Object.freeze([
+  "build-with-ai", "code-review", "create-skill", "create-workflow", "design", "docx", "execute-plan",
+  "game-animation-frames", "game-asset-core", "game-character-consistency", "game-tilesets", "game-ui-icons",
+  "imagine", "implement", "learn", "long-running-background-tasks", "pdf", "pptx", "pr-babysit",
+  "resume-claude", "resume-codex", "resume-cursor", "review", "skill-design-principles", "statusline"
+] as const);
+
+/** The worker's only model id; the argv selects it and the proxy never sees another. */
+export const GROK_BROKER_WORKER_MODEL_ID = "daimon-broker-grok" as const;
+
+/**
+ * Grok 1.0.34 sends a `session_title` model request before every headless
+ * turn, and no config key or environment variable disables it
+ * (`features.title_refresh` governs only the later refresh; verified against a
+ * loopback stub). `[models] session_summary` does select the model it uses, so
+ * the title goes to a hidden model whose endpoint is a closed privileged
+ * loopback port: the connection is refused locally, Grok falls back to the
+ * truncated prompt as the title, and neither the proxy nor the provider sees a
+ * request. The placeholder `api_key` is not a credential; it only stops Grok
+ * from looking for one.
+ */
+export const GROK_SESSION_TITLE_SINK_MODEL_ID = "daimon-session-title-disabled" as const;
+const renderSessionTitleSink = (): readonly string[] => [
+  `[model.${GROK_SESSION_TITLE_SINK_MODEL_ID}]`, 'model = "disabled"', 'base_url = "http://127.0.0.1:9/v1"', 'api_key = "session-title-disabled"',
+  "max_retries = 0", "hidden = true", ""
+];
+
+type WorkerEndpoints =Readonly<{ helperPath: string; proxyPort: number; mcpUrl: string }>;
+const PRODUCTION_ENDPOINTS: WorkerEndpoints = Object.freeze({
+  helperPath: GROK_ENGINE_BROKER.nativeExecutablePath,
+  proxyPort: GROK_ENGINE_BROKER.providerProxy.port,
+  mcpUrl: `http://${GROK_ENGINE_BROKER.mcpFacade.host}:${GROK_ENGINE_BROKER.mcpFacade.port}${GROK_ENGINE_BROKER.mcpFacade.path}`
+});
+
+/**
+ * Sections shared by every Grok worker Daimon configures, broker or direct.
+ *
+ * Each toggle is either measured (skills −2.1k tokens, workflows −314, the
+ * per-turn `session_title` model request) or behavioural hardening that P0
+ * showed to be token-neutral and warning-free on 1.0.34.
+ */
+export const renderGrokLeanBaseConfig = (): string => [
+  "[cli]", "auto_update = false", "use_leader = false", "show_tips = false", "",
+  "[features]", "telemetry = false", "title_refresh = false", "session_recap = false", "turn_summary = false",
+  "repo_status_in_system_prompt = false", "codebase_indexing = false", "backend_tools = false", "ask_user_question = false",
+  "image_gen = false", "video_gen = false", "web_fetch = false", "campaigns = false", "managed_config = false", "",
+  "[managed_mcps]", "enabled = false", "",
+  "[skills]", `disabled = [${GROK_1_0_34_BUNDLED_SKILLS.map((name) => JSON.stringify(name)).join(", ")}]`, "",
+  "[workflows]", "enabled = false", ""
+].join("\n");
+
+/**
+ * The only source of broker worker `config.toml` bytes.
+ *
+ * Effort is declared here, not on the compiled launcher argv: the argv is one
+ * constant for every registration while effort is declared per deployment, and
+ * Grok 1.0.34 drops both `--reasoning-effort` and `[models]
+ * default_reasoning_effort` unless the model advertises effort support. A
+ * one-entry `reasoning_efforts` table makes the declared effort the model's
+ * default *and* its closed enum, so it reaches the request body and nothing
+ * else can be selected; the proxy then re-verifies it on every body.
+ */
+export function renderGrokBrokerWorkerConfig(policy: Partial<GrokBrokerModelPolicy> = {}): string {
+  return renderGrokBrokerWorkerConfigWith(parseGrokBrokerModelPolicy(policy), PRODUCTION_ENDPOINTS);
+}
+
+/** Explicit-endpoint variant for the local live probe; production bytes come only from the function above. */
+export function renderGrokBrokerWorkerConfigWith(policy: GrokBrokerModelPolicy, endpoints: WorkerEndpoints): string {
+  const declared = parseGrokBrokerModelPolicy(policy);
+  const { helperPath, proxyPort, mcpUrl } = endpoints;
+  if (!path.posix.isAbsolute(helperPath) || /[\r\n"'\\]/u.test(helperPath) || !Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65_535 || !/^http:\/\/127\.0\.0\.1:\d{1,5}\/mcp$/u.test(mcpUrl)) {
+    throw new TypeError("invalid Grok broker worker configuration");
+  }
+  const label = `${declared.reasoningEffort[0]!.toUpperCase()}${declared.reasoningEffort.slice(1)}`;
   return [
-    "[cli]", "auto_update = false", "use_leader = false", "",
-    "[features]", "telemetry = false", "",
+    renderGrokLeanBaseConfig(),
+    "[models]", `default = "${GROK_BROKER_WORKER_MODEL_ID}"`, `default_reasoning_effort = "${declared.reasoningEffort}"`, `session_summary = "${GROK_SESSION_TITLE_SINK_MODEL_ID}"`, "",
+    ...renderSessionTitleSink(),
     "[auth_provider.daimon]", `command = ${JSON.stringify(helperPath)}`, 'args = ["--auth-provider"]', "timeout_secs = 5", "token_ttl_secs = 600", "",
-    "[model.daimon-broker-grok]", 'model = "grok-build"', `base_url = "http://127.0.0.1:${proxyPort}/v1"`, 'auth_provider = "daimon"', "context_window = 131072", "supports_backend_search = false", "",
-    "[mcp_servers.daimon]", 'url = "http://127.0.0.1:43124/mcp"', 'headers = { Authorization = "Bearer ${DAIMON_MCP_CAPABILITY}" }', ""
+    `[model.${GROK_BROKER_WORKER_MODEL_ID}]`, `model = "${declared.model}"`, `base_url = "http://127.0.0.1:${proxyPort}/v1"`, 'auth_provider = "daimon"',
+    'api_backend = "chat_completions"', "context_window = 131072", "supports_backend_search = false", "",
+    `[[model.${GROK_BROKER_WORKER_MODEL_ID}.reasoning_efforts]]`, `value = "${declared.reasoningEffort}"`, `label = "${label}"`, "default = true", "",
+    "[mcp_servers.daimon]", `url = "${mcpUrl}"`, 'bearer_token_env_var = "DAIMON_MCP_CAPABILITY"', ""
   ].join("\n");
 }
 
+export const grokBrokerWorkerConfigSha256 = (policy: Partial<GrokBrokerModelPolicy> = {}): string =>
+  createHash("sha256").update(renderGrokBrokerWorkerConfig(policy)).digest("hex");
+
+/**
+ * TypeScript mirror of the argv compiled into `native/engineBrokerLauncherCore.inc`.
+ * `grokWorkerArgv.test.ts` parses the C source and fails on any divergence.
+ */
 export const renderGrokBrokerWorkerArgs = (promptFile: string, cwd: string): readonly string[] => {
   if (!path.posix.isAbsolute(promptFile) || !path.posix.isAbsolute(cwd)) throw new TypeError("invalid Grok broker worker path");
-  return ["--sandbox", "daimon-strict", "--always-approve", "--no-subagents", "--prompt-file", promptFile, "--no-memory", "--disable-web-search", "--cwd", cwd, "--output-format", "streaming-messages-json", "--model", "daimon-broker-grok"];
+  return [
+    "--sandbox", "daimon-strict", "--always-approve", "--no-subagents", "--prompt-file", promptFile,
+    "--no-memory", "--disable-web-search", "--no-plan", "--verbatim",
+    "--system-prompt-override", DAIMON_GROK_SYSTEM_PROMPT,
+    "--tools", GROK_WORKER_TOOL_IDS.join(","),
+    "--max-turns", String(GROK_WORKER_MAX_TURNS),
+    "--cwd", cwd, "--output-format", "streaming-messages-json", "--model", GROK_BROKER_WORKER_MODEL_ID
+  ];
 };
