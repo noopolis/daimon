@@ -171,14 +171,47 @@ export function selectBatch(records: readonly StoredWakeAcceptanceRecord[], agen
   return selected.length ? selected : [first];
 }
 
+/** One claimed delivery, rendered as the task it is. */
+function deliveryBlock(message: unknown, index: number): string | undefined {
+  if (message === null || typeof message !== "object") return undefined;
+  const row = message as Record<string, unknown>;
+  const text = typeof row.text === "string" ? row.text : undefined;
+  if (text === undefined) return undefined;
+  const from = typeof row.from === "string" ? row.from : undefined;
+  const kind = typeof row.kind === "string" ? row.kind : "delivery";
+  const id = typeof row.delivery_id === "string" ? row.delivery_id : `#${index + 1}`;
+  return [`<delivery id="${id}" kind="${kind}"${from === undefined ? "" : ` from="${from}"`}>`, text, "</delivery>"].join("\n");
+}
+
+/**
+ * The inbox turn, task first.
+ *
+ * A delivery's own text *is* the work. Leading with bookkeeping and handing the
+ * model `JSON.stringify(messages)` buried the task: an agent read the JSON, did
+ * the accounting and deferred without doing the job (observed on Grok: nine
+ * model requests, no tool calls, nothing filed). The deliveries are therefore
+ * rendered as labelled blocks and the `daimon_inbox` accounting follows them as
+ * what to do *after* the work, with the machine-readable payload kept as a
+ * trailing appendix while it fits the same budget.
+ */
 function inboxPrompt(messages: readonly unknown[], maxBytes = 12000): string {
   const body = JSON.stringify(messages);
+  const blocks = messages.map(deliveryBlock).filter((block): block is string => block !== undefined);
+  const accounting = "\nWhen the work above is done, record each delivery with daimon_inbox_disposition (complete), or defer the ones you could not finish; use daimon_inbox for deliveries and remaining allowances. Reading or ending this turn never completes a delivery, and deferred work waits for a later external wake.\n";
+  const header = blocks.length === 1 ? "Carry out this delivery.\n" : `Carry out these ${blocks.length} deliveries.\n`;
+  const fits = (value: string): boolean => Buffer.byteLength(value) <= ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES
+    && [...value].length <= ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS;
+  if (blocks.length > 0 && Buffer.byteLength(blocks.join("\n\n")) <= maxBytes) {
+    const task = header + blocks.join("\n\n") + accounting;
+    const withPayload = `${task}\nMachine-readable payload: ${body}`;
+    // The inbox budget bounds selection; the v1 execution boundary independently
+    // bounds the complete prompt, including metadata, escaping, and instructions.
+    if (Buffer.byteLength(body) <= maxBytes && fits(withPayload)) return withPayload;
+    if (fits(task)) return task;
+  }
   const prefix = "Handle this inbox turn. Use daimon_inbox for deliveries and remaining allowances. Explicitly call daimon_inbox_disposition for each handled delivery (complete) or unfinished delivery (defer). Reading or ending this turn never completes a delivery. Deferred work waits for a later external wake.\n";
   const prompt = prefix + body;
-  // The inbox budget bounds selection; the v1 execution boundary independently
-  // bounds the complete prompt, including metadata, escaping, and instructions.
-  if (Buffer.byteLength(body) > maxBytes || Buffer.byteLength(prompt) > ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES
-      || [...prompt].length > ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS) {
+  if (Buffer.byteLength(body) > maxBytes || !fits(prompt)) {
     return prefix + "The selected payload exceeds the prompt budget; read it with daimon_inbox.";
   }
   return prompt;

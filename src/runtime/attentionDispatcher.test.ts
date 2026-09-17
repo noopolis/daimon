@@ -200,3 +200,17 @@ test("claim-renewal failure revokes execution authority, stops cognition, and la
     const accepted = await f.control.accept(request("after-fence")); assert.equal(accepted.state, "stopped"); assert.equal(accepted.blocked!.reason, "ledger_unavailable");
   } finally { WakeAcceptanceStore.prototype.renewClaim = original; await f.cleanup(); }
 });
+
+test("an inbox turn leads with each delivery's own text and keeps the accounting after the work", async () => {
+  const f = await fixture();
+  try {
+    await f.control.accept(request("d-1")); await until(() => f.core.wakes.length === 1);
+    const text = f.core.wakes[0]!.event.text;
+    // The task comes first: a delivery's text is the work, not a JSON payload to account for.
+    assert.match(text, /^Carry out this delivery\./u);
+    assert.match(text, /<delivery id="d-1" kind="message">/u);
+    const task = text.indexOf("Handle d-1"), accounting = text.indexOf("daimon_inbox_disposition");
+    assert.ok(task >= 0 && accounting > task, "accounting must follow the delivery text");
+    assert.ok(text.indexOf("Machine-readable payload:") > accounting, "payload stays a trailing appendix");
+  } finally { await f.cleanup(); }
+});
