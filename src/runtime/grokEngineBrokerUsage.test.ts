@@ -49,7 +49,7 @@ const untilAborted = (signal: AbortSignal): Promise<never> => new Promise((_reso
 const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId: string, worker: Worker, overrides?: Parameters<typeof runGrokEngineBrokerTurn>[6], limits?: EngineBrokerServiceRegistration["limits"], turnStore?: string) => ReturnType<typeof runGrokEngineBrokerTurn>; usageRows: () => Promise<Record<string, unknown>[]>; requestRows: () => Promise<Record<string, unknown>[]>; upstreamCalls: () => number }>) => Promise<void>, usageLedgerPath?: string): Promise<void> => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-broker-usage-"));
   let calls = 0;
-  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async () => { calls++; return { status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from(`data: ${JSON.stringify({ choices: [], usage: upstreamUsage })}\n\ndata: [DONE]\n\n`) }; }, undefined, 0);
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async () => { calls++; await new Promise((resolve) => setTimeout(resolve, 15)); return { status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from(`data: ${JSON.stringify({ choices: [], usage: upstreamUsage })}\n\ndata: [DONE]\n\n`) }; }, undefined, 0);
   const ledger = usageLedgerPath ?? path.join(root, "usage.jsonl");
   const rows = async (file: string) => (await readFile(file, "utf8").catch(() => "")).split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
   try {
@@ -92,8 +92,10 @@ test("a completed turn seals its accounting, writes one usage row and per-reques
       [TURN_REQUEST_LEDGER_VERSION, "grok", 1, 2, 2_797, 109, 2_688, 2_810, turnIdFor("foreman", "wake-1")]
     ]);
     // Mutation guard: stamping every request with the wake end collapses these.
-    for (const row of requests) assert.match(String(row.started_at), /^\d{4}-\d{2}-\d{2}T/u);
-    assert.ok(String(requests[0]!.ended_at) <= String(requests[1]!.started_at), "request 1 ends before request 2 starts");
+    // The upstream stub takes 15 ms per request, so each request has a measurable interval.
+    const [a, b] = requests.map((row) => [Date.parse(String(row.started_at)), Date.parse(String(row.ended_at))] as const);
+    assert.ok(a![0] < a![1] && a![1] <= b![0] && b![0] < b![1], JSON.stringify(requests.map((row) => [row.started_at, row.ended_at])));
+    assert.ok(b![1] <= Date.parse(String(requests[1]!.at)), "every request ended before the rows were appended");
   });
 });
 
