@@ -84,7 +84,7 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     // is already buffered here for its usage block, so what the model tried to
     // call is in hand. A decoder fault records no attempt rather than a false
     // empty one, and never disturbs the turn.
-    settle?.(parseGrokUpstreamUsage(result.body,result.headers["content-type"]),toolCallsOrNothing(result.body,result.headers["content-type"]));
+    settle?.(usageOrEstimate(result.body,result.headers["content-type"]),toolCallsOrNothing(result.body,result.headers["content-type"]));
     response.writeHead(result.status, { "content-type": result.headers["content-type"] ?? "application/json", "cache-control": "no-store" }); response.end(result.body);
   } catch (error) {
     settle?.(undefined);
@@ -175,6 +175,21 @@ const describeFault = (error: unknown): string => {
 const expectedWorkerProbe = (request: IncomingMessage): boolean =>
   request.headers.authorization === undefined && (request.method ?? "") === "GET" &&
   new URL(request.url ?? "/", "http://127.0.0.1").pathname === "/";
+
+/**
+ * Upstream-reported usage, or the documented conservative estimate.
+ *
+ * The decoder faulting must not fail the request that already cost real
+ * money: the upstream call succeeded, the worker is owed its answer, and a
+ * 503 here would throw away a paid response and have Grok buy it again. The
+ * `undefined` this returns is not "no usage" — `GrokBrokerTurnMeter.settle`
+ * charges it `ceil(bodyBytes/2) + 4096` and marks the row
+ * `usage_source: "estimated"`, so the token ceiling still counts it and no
+ * fabricated zero ever reaches a ledger.
+ */
+const usageOrEstimate = (body: Uint8Array, contentType: string | undefined): ReturnType<typeof parseGrokUpstreamUsage> => {
+  try { return parseGrokUpstreamUsage(body, contentType); } catch { return undefined; }
+};
 
 /** Instrumentation must never fail a turn: a throwing decoder records nothing, exactly as an undecodable response does. */
 const toolCallsOrNothing = (body: Uint8Array, contentType: string | undefined): readonly string[] | undefined => {

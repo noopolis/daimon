@@ -424,7 +424,13 @@ decoded records *no field at all*, because a fabricated empty list is
 byte-identical to a measured one. On the stream row path the names are attached
 only when the proxy's timings and the worker's stream requests are aligned
 request-for-request, since an unaligned index would credit one request's attempt
-to another. It is an additive field inside the unchanged
+to another. The *usage* decode beside it is wrapped the same way, and for a
+sharper reason: the upstream call has already succeeded, so a decoder fault
+that failed the request would throw away a response the broker paid for and
+have Grok buy it again. A fault there falls through to the documented estimate
+(`ceil(bodyBytes/2) + 4096`, `usage_source: "estimated"`, counted in
+`estimated_requests`) — never to zero and never to absence, because the
+ceiling must still count what was spent. It is an additive field inside the unchanged
 `noopolis.daimon.turn-requests.v1` row and deliberately not a version bump:
 Spawnfile's reader pins `v` and ignores fields it does not know, and Paideia
 only relocates this stream's path. The whole path is advisory — the parse is

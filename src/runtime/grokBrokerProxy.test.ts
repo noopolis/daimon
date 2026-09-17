@@ -3,7 +3,7 @@ import { request as httpRequest } from "node:http";
 import test from "node:test";
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
 import { GROK_SESSION_TITLE_SINK_KEY } from "./grokBrokerWorkerConfig.js";
-import { GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
+import { estimateGrokRequestUsage, GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
 import { ENGINE_BROKER_AUTH_STALE } from "./engineBrokerProtocol.js";
 import { GROK_INFERENCE_AUTH_STALE_BODY } from "./grokInferenceProxy.js";
 
@@ -199,4 +199,31 @@ test("the request that discovers the fence is named auth_stale too, not one tran
 
 test("the turn path and the grant path name a fenced realm the same way", () => {
   assert.ok(GROK_INFERENCE_AUTH_STALE_BODY.includes(ENGINE_BROKER_AUTH_STALE), "one name, not three spellings");
+});
+
+/**
+ * A response the usage decoder cannot read is the worst case to get wrong: the
+ * upstream call already succeeded, so the money is spent whatever happens
+ * next. It must reach the worker anyway, and it must be charged — a fabricated
+ * zero is byte-identical to a measured one, so the documented estimate is the
+ * only honest landing place. (The fault is synthetic: the real one is a
+ * response body past the maximum string length, which is not a thing to
+ * allocate in a test.)
+ */
+test("a response whose usage cannot be decoded is still delivered, and charged the documented estimate", async () => {
+  const contentType = { toString: () => "application/json" } as unknown as string;
+  const proxy = await startGrokBrokerProxy(
+    { accessToken: async () => "provider-token", markRejected: async () => undefined },
+    async () => ({ status: 200, headers: { "content-type": contentType }, body: Buffer.from('{"usage":{"prompt_tokens":11,"completion_tokens":3}}') }));
+  try {
+    const token = proxy.capabilities.issue("agent", "turn");
+    const meter = arm(proxy, async () => undefined);
+    const payload = leanBody();
+    assert.equal(await post(proxy.port, token, payload), 200, "a paid response must not be thrown away over its own instrumentation");
+    const snapshot = meter.snapshot();
+    assert.equal(snapshot.requests, 1);
+    assert.equal(snapshot.estimatedRequests, 1, "the row says the charge was estimated, not measured");
+    assert.deepEqual(snapshot.usage, estimateGrokRequestUsage(Buffer.byteLength(payload)), "charged the documented conservative estimate, never zero and never nothing");
+    assert.equal(snapshot.timings[0]?.toolCalls, undefined, "an undecodable response records no tool-call attempt either");
+  } finally { await proxy.close(); }
 });
