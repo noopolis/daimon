@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
 import { DEFAULT_GROK_BROKER_MODEL_POLICY, parseGrokBrokerModelPolicy, type GrokBrokerModelPolicy } from "./grokBrokerModelPolicy.js";
 import { authorizeGrokBrokerProxyRequest } from "./grokBrokerProxyRequest.js";
+import { GROK_SESSION_TITLE_SINK_KEY } from "./grokBrokerWorkerConfig.js";
 import { parseGrokUpstreamUsage, type GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
 import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
 import { serveGrokInferenceGrant } from "./grokInferenceProxy.js";
@@ -49,8 +50,10 @@ export class GrokBrokerProxyRefusal extends Error {
 
 async function serve(request: IncomingMessage, response: ServerResponse, authority: GrokBrokerCredentialAuthority, upstream: GrokBrokerUpstream, capabilities: EngineBrokerCapabilities,guards:Map<string,()=>Promise<void>>,turns:Map<string,GrokBrokerProxyTurn>,fallback:GrokBrokerModelPolicy,grants?:GrokInferenceGrants): Promise<void> {
   let settle:((usage:ReturnType<typeof parseGrokUpstreamUsage>)=>void)|undefined;
+  let titleSink = false;
   try {
     const body = await readBody(request); const headers = Object.fromEntries(Object.entries(request.headers).map(([key, value]) => [key, Array.isArray(value) ? value[0] : value]));
+    titleSink = headers.authorization === `Bearer ${GROK_SESSION_TITLE_SINK_KEY}`;
     const match=headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]{40,})$/u);
     if(match&&match[1]!.startsWith(GROK_ENGINE_BROKER.inferenceGrants.tokenPrefix)){if(!grants)throw new GrokBrokerProxyRefusal("inference_grants_unavailable");return await serveGrokInferenceGrant({method:request.method??"",pathname:new URL(request.url??"/","http://127.0.0.1").pathname,headers,body,token:match[1]!},response,grants,authority,upstream);}
     const scope=match?capabilities.inspectToken(match[1]!):undefined;if(!scope)throw new GrokBrokerProxyRefusal("unknown_capability");const guard=guards.get(scope.turnId),turn=turns.get(scope.turnId);if(!guard||!turn)throw new GrokBrokerProxyRefusal("no_active_turn");
@@ -72,6 +75,14 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     // or a token) so a failing turn is diagnosable without a stub harness.
     const refusal = error instanceof GrokBrokerProxyRefusal ? error.reason : "broker_unavailable";
     process.stderr.write(`[grok-proxy] refused: ${refusal}\n`);
+    // Grok's own session-title call is refused by design. It must keep the transient
+    // 503 shape it has always had: a hard 4xx on that internal request ends Grok's
+    // session, which surfaces as the worker exiting 1 mid-turn.
+    if (titleSink) {
+      response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end('{"error":"broker unavailable"}');
+      return;
+    }
     if (error instanceof GrokBrokerProxyRefusal) {
       response.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
       response.end(JSON.stringify({ error: "broker refused this request", reason: refusal }));

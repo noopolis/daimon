@@ -69,7 +69,8 @@ test("the session-title sink is refused before capability, guard, credential, or
   try {
     const token = proxy.capabilities.issue("agent", "turn", 60_000, 1); arm(proxy, async () => { guarded++; });
     const title = JSON.stringify({ model: "disabled", max_tokens: 100, temperature: 0, stream: true, messages: [{ role: "user", content: "prompt-derived" }], tool_choice: { type: "function", function: { name: "session_title" } }, tools: [{ type: "function", function: { name: "session_title" } }] });
-    assert.equal(await post(proxy.port, GROK_SESSION_TITLE_SINK_KEY, title), 400);
+    // The title sink keeps its transient 503 shape: a 4xx there ends Grok's session.
+    assert.equal(await post(proxy.port, GROK_SESSION_TITLE_SINK_KEY, title), 503);
     assert.deepEqual({ calls, accessed, guarded }, { calls: 0, accessed: 0, guarded: 0 });
     // The turn capability (budget 1 request) is untouched and still serves the real request.
     assert.equal(await post(proxy.port, token, leanBody()), 200);
