@@ -7,6 +7,7 @@ import { lowerEngineBrokerTurnLimits, mapGrokReportedModel, type EngineBrokerTur
 import { NativeBrokerTurnFailure, type NativeBrokerDiagnostic, type NativeBrokerTurn, type NativeBrokerTurnResult } from "./engineBrokerNativeClient.js";
 import type { EngineBrokerTurnRegistry } from "./engineBrokerTurnRegistry.js";
 import { engineBrokerRequestLedgerPathFor, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
+import { ensureBrokerTurnLedgered } from "./grokEngineBrokerLedger.js";
 import { finishBrokerTurnWithUsage, type BrokerTurnMetering, type BrokerTurnMeteringDetail } from "./grokEngineBrokerMetering.js";
 import type { GrokBrokerProxyTurn } from "./grokBrokerProxy.js";
 import { GrokBrokerTurnMeter, type GrokBrokerTurnMeterSnapshot } from "./grokBrokerTurnMeter.js";
@@ -51,13 +52,14 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
   const turnId = createHash("sha256").update(`${agentId}\0${wakeId}`).digest("hex");
   const request = { version: ENGINE_BROKER_VERSION, kind: "start_turn", requestId: randomUUID(), turnId, agentId, wakeId, prompt, mcpEndpoint, ...(overrides === undefined ? {} : { limits: overrides }) } as const;
   const begun = await deps.turns.begin(request, declared);
-  if (begun !== "start") return replay(begun.replay);
+  const metering: BrokerTurnMetering = { usageLedgerPath: registration.usageLedgerPath, requestLedgerPath: engineBrokerRequestLedgerPathFor(registration.usageLedgerPath), agentId, wakeId };
+  if (begun !== "start") { await ensureBrokerTurnLedgered(begun.ledger, turnId, metering); return replay(begun.replay); }
   const controller = new AbortController();
   const meter = new GrokBrokerTurnMeter(limits, () => controller.abort());
   const onAbort = () => controller.abort(); signal?.addEventListener("abort", onAbort, { once: true }); if (signal?.aborted) controller.abort();
   const timer = setTimeout(() => meter.trip("timeout"), limits.timeoutMs); timer.unref?.();
-  const metering: BrokerTurnMetering = { usageLedgerPath: registration.usageLedgerPath, requestLedgerPath: engineBrokerRequestLedgerPathFor(registration.usageLedgerPath), agentId, wakeId };
-  let nativeDiagnostic: NativeBrokerDiagnostic | undefined, attested = false, output: string | undefined, rejected = false;
+
+  let nativeDiagnostic: NativeBrokerDiagnostic | undefined, attested = false, output: string | undefined, rejected = false, sealed: GrokEngineBrokerTurnResult | undefined;
   try {
     const isolationGuard = await deps.prepareIsolation(registration);
     deps.proxy.registerIsolationGuard(turnId, isolationGuard);
@@ -76,8 +78,9 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     const usage = decoded.usage === undefined ? streamOrMeterUsage(stream, snapshot) : usageOf(decoded.usage);
     const accounting = { outcome: "completed", usage, model: declared, requests: requestCount(stream, snapshot), limitReason: "none" } as const;
     const completed = { version: request.version, kind: "completed", requestId: request.requestId, turnId, text: decoded.text, workerPid: result.workerPid, workerUid: result.workerUid, workerStartTime: result.startTicks.toString(), ...accounting } as const;
-    await finishBrokerTurnWithUsage(deps.turns, request, completed, metering, { notionalUsd: decoded.usage?.notionalUsd ?? 0, complete: decoded.usage?.complete ?? false, estimatedRequests: snapshot.estimatedRequests, requests: requestRows(stream, snapshot), ...(stream.sessionId === undefined ? {} : { session: stream.sessionId }) });
-    return { text: completed.text, workerPid: completed.workerPid, workerUid: completed.workerUid, workerStartTime: completed.workerStartTime, ...accounting };
+    const result_ = { text: completed.text, workerPid: completed.workerPid, workerUid: completed.workerUid, workerStartTime: completed.workerStartTime, ...accounting };
+    await finishBrokerTurnWithUsage(deps.turns, request, completed, metering, { notionalUsd: decoded.usage?.notionalUsd ?? 0, complete: decoded.usage?.complete ?? false, estimatedRequests: snapshot.estimatedRequests, requests: requestRows(stream, snapshot), ...(stream.sessionId === undefined ? {} : { session: stream.sessionId }) }, () => { sealed = result_; });
+    return result_;
   } catch (error) {
     const snapshot = meter.snapshot();
     const code: EngineBrokerTurnFailure["code"] = snapshot.limitReason !== "none" ? "limit_exceeded" : deps.credentialStale() ? "auth_stale" : controller.signal.aborted ? "cancelled" : "engine_failed";

@@ -150,6 +150,16 @@ export const renderGrokTurnRequestLines = (entry: GrokTurnRequestEntry): string 
   })}\n`).join("");
 };
 
+/**
+ * Append already-rendered, newline-terminated ledger lines in one write, with the
+ * same rotation and file mode as both ledgers. Advisory: never rejects. The
+ * broker uses it to append the exact bytes it sealed into a turn record.
+ */
+export const recordLedgerLines = async (file: string, lines: string): Promise<boolean> => {
+  if (lines.length === 0) return false;
+  try { await rotate(file); await appendLines(file, lines); return true; } catch { return false; }
+};
+
 /** Advisory and never rejects, like {@link recordTurnRequests}; an empty turn writes nothing. */
 export const recordGrokTurnRequests = async (file: string, entry: GrokTurnRequestEntry): Promise<boolean> => {
   if (entry.requests.length === 0) return false;

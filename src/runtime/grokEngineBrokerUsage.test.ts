@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -156,6 +156,23 @@ test("a turn whose stream reports an undeclared model fails as rejected but is s
   await withBroker(async ({ turn, usageRows }) => {
     await assert.rejects(turn("wake-6", async (send) => { await send(); await send(); return stream("grok-4.5-build"); }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.code === "engine_failed");
     assert.deepEqual((await usageRows()).map((row) => [row.outcome, row.reason, row.model, row.total]), [["failed", "turn_rejected", "grok-4.6", 5_585]]);
+  });
+});
+
+test("a crash between sealing and appending is completed by the replay exactly once, with the sealed bytes", async () => {
+  await withBroker(async ({ root, turn, usageRows, requestRows }) => {
+    await turn("wake-8", twoRequests);
+    const [sealedUsage] = await usageRows(); const sealedRequests = await requestRows();
+    // Simulate the crash window: the record is published but the append never happened.
+    await rm(path.join(root, "usage.jsonl")); await rm(path.join(root, "requests.jsonl"));
+    // Mutation guard: a replay that never ensures its ledger leaves this spend unmetered.
+    assert.equal((await turn("wake-8", async () => { throw new Error("a replay runs no worker"); })).outcome, "completed");
+    assert.deepEqual(await usageRows(), [sealedUsage]);
+    assert.deepEqual(await requestRows(), sealedRequests);
+    // A replay after the rows exist writes nothing further.
+    await turn("wake-8", async () => { throw new Error("a replay runs no worker"); });
+    assert.equal((await usageRows()).length, 1);
+    assert.equal((await requestRows()).length, 2);
   });
 });
 

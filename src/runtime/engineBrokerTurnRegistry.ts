@@ -4,6 +4,7 @@ import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { parseEngineBrokerResponse, parseEngineBrokerV1TerminalResponse, type EngineBrokerRequest, type EngineBrokerTerminalResponse } from "./engineBrokerProtocol.js";
 import type { GrokBrokerModel } from "./grokBrokerModelPolicy.js";
+import { EMPTY_BROKER_TURN_LEDGER, parseBrokerTurnLedgerLines, type BrokerTurnLedgerLines } from "./grokEngineBrokerLedger.js";
 
 type Start = Extract<EngineBrokerRequest, { kind: "start_turn" }>;
 type Terminal = EngineBrokerTerminalResponse;
@@ -13,7 +14,7 @@ export const ENGINE_BROKER_TURN_RECORD_V2 = "noopolis.daimon.engine-broker-turn.
 // record written before the upgrade still identifies the same turn.
 const digest = (request: Start): string => createHash("sha256").update(JSON.stringify([request.turnId, request.agentId, request.wakeId, request.prompt,request.mcpEndpoint])).digest("hex");
 const safe = (turnId: string): string => `${createHash("sha256").update(turnId).digest("hex")}.json`;
-type Observed = Readonly<{ version: typeof ENGINE_BROKER_TURN_RECORD_V1 | typeof ENGINE_BROKER_TURN_RECORD_V2; digest: string; state: "active" | "terminal"; bootId: string; response?: Terminal }>;
+type Observed = Readonly<{ version: typeof ENGINE_BROKER_TURN_RECORD_V1 | typeof ENGINE_BROKER_TURN_RECORD_V2; digest: string; state: "active" | "terminal"; bootId: string; response?: Terminal; ledger?: BrokerTurnLedgerLines }>;
 
 /**
  * Durable per-turn state. Record v2 stores the terminal response *with* its
@@ -24,28 +25,29 @@ type Observed = Readonly<{ version: typeof ENGINE_BROKER_TURN_RECORD_V1 | typeof
 export class EngineBrokerTurnRegistry {
   constructor(private readonly root: string,private readonly bootId:string=randomUUID()) {}
   /** `model` is the registration's declared model, used only to upgrade a v1 record on replay. */
-  async begin(request: Start, model: GrokBrokerModel): Promise<"start" | { replay: Terminal }> {
+  async begin(request: Start, model: GrokBrokerModel): Promise<"start" | { replay: Terminal; ledger: BrokerTurnLedgerLines }> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     const file = path.join(this.root, safe(request.turnId)); const expected = digest(request);
     try { const handle = await open(file, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600); try { await handle.writeFile(`${JSON.stringify({ version: ENGINE_BROKER_TURN_RECORD_V2, digest: expected, state: "active",bootId:this.bootId })}\n`); await handle.sync(); } finally { await handle.close(); } await syncDirectory(this.root); return "start"; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw new Error("broker turn registry unavailable"); }
     const observed = parseEngineBrokerTurnRecord(await readFile(file, "utf8"), model);
     if (observed.digest !== expected) throw new Error("broker turn conflict");
-    if (observed.state === "terminal" && observed.response !== undefined) return { replay: observed.response };
-    if(observed.state==="active"&&observed.bootId!==this.bootId){const response={version:request.version,kind:"failed",requestId:request.requestId,turnId:request.turnId,code:"engine_failed",outcome:"failed",usage:null,model,requests:0,limitReason:"none"} as const;await this.finish(request,response);return {replay:response};}
+    if (observed.state === "terminal" && observed.response !== undefined) return { replay: observed.response, ledger: observed.ledger ?? EMPTY_BROKER_TURN_LEDGER };
+    if(observed.state==="active"&&observed.bootId!==this.bootId){const response={version:request.version,kind:"failed",requestId:request.requestId,turnId:request.turnId,code:"engine_failed",outcome:"failed",usage:null,model,requests:0,limitReason:"none"} as const;await this.finish(request,response);return {replay:response,ledger:EMPTY_BROKER_TURN_LEDGER};}
     throw new Error("broker turn already active");
   }
-  async finish(request: Start, response: Terminal): Promise<void> {
+  /** `ledger` is the exact ledger bytes this turn owes, sealed with it so a replay can finish an interrupted append. */
+  async finish(request: Start, response: Terminal, ledger: BrokerTurnLedgerLines = EMPTY_BROKER_TURN_LEDGER): Promise<void> {
     const file = path.join(this.root, safe(request.turnId)); const temporary = `${file}.${randomUUID()}.tmp`;
     const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-    try { await handle.writeFile(`${JSON.stringify({ version: ENGINE_BROKER_TURN_RECORD_V2, digest: digest(request), state: "terminal",bootId:this.bootId, response })}\n`); await handle.sync(); } finally { await handle.close(); }
+    try { await handle.writeFile(`${JSON.stringify({ version: ENGINE_BROKER_TURN_RECORD_V2, digest: digest(request), state: "terminal",bootId:this.bootId, response, ledger })}\n`); await handle.sync(); } finally { await handle.close(); }
     try { await rename(temporary, file); await syncDirectory(this.root); } finally { await unlink(temporary).catch(() => undefined); }
   }
 }
 
 /**
  * Strict record parser. v2 accepts exactly `{version,digest,state,bootId}`
- * plus `response` when terminal, and the response must be a v2 terminal frame.
+ * plus `response` and its sealed `ledger` bytes when terminal, and the response must be a v2 terminal frame.
  * v1 records keep their historical looser shape and are upgraded on read: no
  * usage (`null`), zero requests, `limitReason: "none"`, the declared model.
  */
@@ -65,13 +67,15 @@ export function parseEngineBrokerTurnRecord(text: string, model: GrokBrokerModel
     return { version: ENGINE_BROKER_TURN_RECORD_V1, ...base, response };
   }
   if (input.version !== ENGINE_BROKER_TURN_RECORD_V2) throw new Error("broker turn conflict");
-  const fields = input.state === "terminal" ? ["version", "digest", "state", "bootId", "response"] : ["version", "digest", "state", "bootId"];
+  const fields = input.state === "terminal" ? ["version", "digest", "state", "bootId", "response", "ledger"] : ["version", "digest", "state", "bootId"];
   if (Object.keys(input).length !== fields.length || fields.some((field) => !Object.hasOwn(input, field))) throw new Error("broker turn registry unavailable");
   if (input.state === "active") return { version: ENGINE_BROKER_TURN_RECORD_V2, ...base };
   let response;
   try { response = parseEngineBrokerResponse(input.response); } catch { throw new Error("broker turn registry unavailable"); }
   if (response.kind !== "completed" && response.kind !== "failed") throw new Error("broker turn registry unavailable");
-  return { version: ENGINE_BROKER_TURN_RECORD_V2, ...base, response };
+  const ledger = parseBrokerTurnLedgerLines(input.ledger, response.turnId);
+  if ((response.usage === null) !== (ledger.usage === null)) throw new Error("broker turn registry unavailable");
+  return { version: ENGINE_BROKER_TURN_RECORD_V2, ...base, response, ledger };
 }
 
 async function syncDirectory(directory: string): Promise<void> { const handle = await open(directory, constants.O_RDONLY); try { await handle.sync(); } finally { await handle.close(); } }
