@@ -11,7 +11,7 @@ const agent = (id: string, engine: Record<string, unknown>) => ({ id, name: id, 
 const config = { version: "noopolis.daimon.organization-runtime.v2", host: { bindHost: "127.0.0.1", port: 19700, controlTokenEnv: "UNIT_CONTROL_TOKEN" },
   agents: [agent("foreman", { kind: "grok", model: "grok-4.6", reasoningEffort: "low" }), agent("peer", { kind: "codex" })] };
 const options = { slot: 0, workerUid: 2_200, workerHomePath: "/var/lib/daimon-workers/2200", architecture: "arm64", usageLedgerPath: "/run/slots/0/usage/usage.jsonl",
-  limits: { maxRequests: 24, maxTokens: 400_000, timeoutMs: 480_000 }, acceptanceStorePath: "/run/paideia/control", denyPaths: ["/run/paideia", "/run/training/inputs"] } as const;
+  limits: { maxRequests: 24, maxTokens: 400_000, timeoutMs: 480_000 }, acceptanceStorePath: "/run/paideia/control", denyPaths: ["/run/paideia", "/run/training/inputs"], seccompProfileSha256: "7".repeat(64) } as const;
 
 test("the projection is Daimon's own renderers and collectors, fully declared and deterministic", () => {
   const projection = resolveOrganizationGrokBrokerProjection(config, "foreman", options);
@@ -23,7 +23,8 @@ test("the projection is Daimon's own renderers and collectors, fully declared an
     workerConfigSha256: grokBrokerWorkerConfigSha256({ model: "grok-4.6", reasoningEffort: "low" }), systemPromptSha256: GROK_ENGINE_BROKER.worker.systemPromptSha256,
     grokCliVersion: "1.0.34", grokExecutableSha256: GROK_ENGINE_BROKER.grokCliArtifacts.arm64.sha256, nativeAbiVersion: GROK_ENGINE_BROKER.nativeAbiVersion,
     model: "grok-4.6", reasoningEffort: "low", limits: options.limits, usageLedgerPath: options.usageLedgerPath,
-    attestation: { platform: "linux/landlock", enforced: true, restrictNetwork: true, profileName: "daimon-strict", eventsPath: "/var/lib/daimon-workers/2200/.grok/sessions/sandbox-events.jsonl" }
+    seccompProfileSha256: "7".repeat(64),
+    attestation: { platform: "linux/landlock", enforced: true, restrictNetwork: true, profileName: "daimon-strict", sandboxRuntime: "bubblewrap", eventsPath: "/var/lib/daimon-workers/2200/.grok/sessions/sandbox-events.jsonl" }
   });
   assert.equal(grokBrokerProjectionSha256(resolveOrganizationGrokBrokerProjection(config, "foreman", { ...options, denyPaths: [...options.denyPaths].reverse() })), grokBrokerProjectionSha256(projection));
   assert.match(grokBrokerProjectionSha256(projection), /^[a-f0-9]{64}$/u);
@@ -32,6 +33,7 @@ test("the projection is Daimon's own renderers and collectors, fully declared an
 test("the projection refuses undeclared models, non-Grok agents, and a profile digest it did not render", () => {
   assert.throws(() => resolveOrganizationGrokBrokerProjection({ ...config, agents: [agent("foreman", { kind: "grok" })] }, "foreman", options), /declared model/u);
   assert.throws(() => resolveOrganizationGrokBrokerProjection(config, "peer", options), /known Grok agent/u);
+  assert.throws(() => resolveOrganizationGrokBrokerProjection(config, "foreman", { ...options, seccompProfileSha256: "not-a-digest" }), /seccomp profile sha256/u);
   assert.throws(() => resolveOrganizationGrokBrokerProjection(config, "missing", options), /known Grok agent/u);
   // Mutation guard: skipping the digest comparison accepts a weaker profile's digest.
   assert.throws(() => resolveOrganizationGrokBrokerProjection(config, "foreman", { ...options, profileSha256: grokWorkerSandboxProfileSha256([]) }), /profile digest mismatch/u);

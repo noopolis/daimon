@@ -2,9 +2,10 @@
   "version": "noopolis.daimon.grok-slot-preflight.v1",
   "slot": 0,
   "worker_uid": 2200,
-  "projection_sha256": "b41a6952dfe3319f014866e7468df69ca2e77cfd28d781ac39cfdf0d3d587bd8",
+  "projection_sha256": "9e8bbd4e9337df40b90d5a382ece6c3745cb5e11038d10ea17b5032408bf30e4",
   "sandbox_profile_sha256": "2a1dcab471092eab77565838b17a5cf138489e3daa1349612ebcedcdb69e23c4",
   "seccomp_profile_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+  "sandbox_runtime": "bubblewrap",
   "grok_executable_sha256": "39ab87666877d64ef3a40aa60fbe0c3b6a6acd7001b78fe60e2c76bb6cfc4a94",
   "canaries": [
     {

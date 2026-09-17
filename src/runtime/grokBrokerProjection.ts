@@ -39,7 +39,9 @@ export type OrganizationGrokBrokerProjection = Readonly<{
   reasoningEffort: GrokBrokerReasoningEffort;
   limits: EngineBrokerTurnLimits;
   usageLedgerPath: string;
-  attestation: Readonly<{ platform: "linux/landlock"; enforced: true; restrictNetwork: true; profileName: typeof GROK_WORKER_SANDBOX_PROFILE; eventsPath: string }>;
+  /** The container seccomp profile the worker must run under (the pinned default-plus-userns profile bubblewrap needs). */
+  seccompProfileSha256: string;
+  attestation: Readonly<{ platform: "linux/landlock"; enforced: true; restrictNetwork: true; profileName: typeof GROK_WORKER_SANDBOX_PROFILE; sandboxRuntime: "bubblewrap"; eventsPath: string }>;
 }>;
 
 export type OrganizationGrokBrokerProjectionOptions = Readonly<{
@@ -55,12 +57,20 @@ export type OrganizationGrokBrokerProjectionOptions = Readonly<{
   acceptanceStorePath: string;
   /** Evaluator and host-bind paths the deployment must keep from the worker (R4). */
   denyPaths?: readonly string[];
+  /** sha256 of the seccomp profile bytes the deployment runs the worker under. */
+  seccompProfileSha256: string;
   /** When the caller already holds a rendered profile digest, it must equal Daimon's. */
   profileSha256?: string;
 }>;
 
 /**
  * Resolve the public Grok broker projection for one agent.
+ *
+ * Paths are taken as given, never resolved: the caller (Spawnfile provisioning)
+ * must supply canonical, non-symlink paths — the fixed tmpfs/workspace roots it
+ * creates — and its provisioning must verify they are not symlinks before a
+ * slot is used; the broker's own attestation re-checks the worker home at
+ * every turn.
  *
  * Deterministic and I/O-free on purpose: its digest
  * ({@link grokBrokerProjectionSha256}) is what the slot preflight receipt
@@ -81,6 +91,7 @@ export function resolveOrganizationGrokBrokerProjection(config: unknown, agentId
   for (const [label, value] of [["workerHomePath", options.workerHomePath], ["acceptanceStorePath", options.acceptanceStorePath]] as const) {
     if (!path.posix.isAbsolute(value) || path.posix.normalize(value) !== value || value === "/" || value.endsWith("/")) throw new Error(`Grok broker projection requires a canonical absolute ${label}`);
   }
+  if (!/^[a-f0-9]{64}$/u.test(options.seccompProfileSha256)) throw new Error("Grok broker projection requires a seccomp profile sha256");
   const model = agent.engine.model as GrokBrokerModel, reasoningEffort = agent.engine.reasoningEffort as GrokBrokerReasoningEffort;
   const denyPaths = [...new Set([...grokSandboxProtectedPaths(agent.id, parsed.agents, [options.acceptanceStorePath]), ...(options.denyPaths ?? [])])].sort();
   renderGrokWorkerSandboxProfile(denyPaths);
@@ -96,8 +107,8 @@ export function resolveOrganizationGrokBrokerProjection(config: unknown, agentId
     version: GROK_BROKER_PROJECTION_VERSION, agentId, workspacePath: agent.workspacePath, runtimeHomePath: agent.runtimeHomePath,
     workerUid: options.workerUid, slot: options.slot, profilePath, profileSha256, denyPaths, workerConfigSha256,
     systemPromptSha256: GROK_ENGINE_BROKER.worker.systemPromptSha256, grokCliVersion: GROK_ENGINE_BROKER.grokCliVersion, grokExecutableSha256: artifact.sha256,
-    nativeAbiVersion: GROK_ENGINE_BROKER.nativeAbiVersion, model, reasoningEffort, limits: parseEngineBrokerTurnLimits(options.limits), usageLedgerPath: options.usageLedgerPath,
-    attestation: { platform: "linux/landlock", enforced: true, restrictNetwork: true, profileName: GROK_WORKER_SANDBOX_PROFILE, eventsPath: grokWorkerEventsPathFor(profilePath) }
+    nativeAbiVersion: GROK_ENGINE_BROKER.nativeAbiVersion, model, reasoningEffort, limits: parseEngineBrokerTurnLimits(options.limits), usageLedgerPath: options.usageLedgerPath, seccompProfileSha256: options.seccompProfileSha256,
+    attestation: { platform: "linux/landlock", enforced: true, restrictNetwork: true, profileName: GROK_WORKER_SANDBOX_PROFILE, sandboxRuntime: "bubblewrap", eventsPath: grokWorkerEventsPathFor(profilePath) }
   };
   // The registration this projection implies must itself be a valid v2 service.json entry.
   grokBrokerServiceRegistrationFor(projection);

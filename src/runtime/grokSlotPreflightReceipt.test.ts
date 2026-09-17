@@ -43,4 +43,8 @@ test("a receipt for a different projection, slot, profile or deny set is refused
   assert.throws(() => verifyGrokSlotPreflightReceipt(valid, { ...projected, limits: { ...projected.limits, maxTokens: 1 } }), /projection_sha256/u);
   assert.throws(() => verifyGrokSlotPreflightReceipt({ ...valid, sandbox_profile_sha256: "1".repeat(64) }, projected), /sandbox_profile_sha256/u);
   assert.throws(() => verifyGrokSlotPreflightReceipt({ ...valid, slot: 1 }, projected), /slot/u);
+  // Mutation guard: never comparing the seccomp digest accepts a receipt taken under another profile.
+  assert.throws(() => verifyGrokSlotPreflightReceipt({ ...valid, seccomp_profile_sha256: "8".repeat(64) }, projected), /seccomp_profile_sha256/u);
+  assert.throws(() => parseGrokSlotPreflightReceipt({ ...valid, sandbox_runtime: "none" }), /invalid Grok slot preflight receipt/u);
+  assert.throws(() => parseGrokSlotPreflightReceipt((({ sandbox_runtime: _omit, ...rest }) => rest)(valid)), /invalid Grok slot preflight receipt/u);
 });
