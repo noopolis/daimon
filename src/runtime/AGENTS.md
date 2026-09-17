@@ -87,9 +87,14 @@ must supply canonical non-symlink paths (its fixed tmpfs and workspace roots)
 and verify that during provisioning. The projection also carries the seccomp
 profile digest and the `bubblewrap` sandbox runtime a receipt must match. `grokSlotPreflightReceipt.ts` is the
 zod schema a root slot supervisor's receipt must satisfy
-(`noopolis.daimon.grok-slot-preflight.v1`, fixtures under
+(`noopolis.daimon.grok-slot-preflight.v2`, fixtures under
 `fixtures/grok-slot-preflight/`); `verifyGrokSlotPreflightReceipt` binds it to
 the projection digest and requires a denied canary for exactly every deny path.
+The projection digest does not change across recycles, so the receipt also
+carries freshness: a supervisor-owned per-slot `generation` (strictly
+increasing) and the caller's recycle `nonce` (32 random bytes, hex). The
+verifier requires `{expectedNonce, minGeneration}` and refuses another nonce, a
+lower generation, and any v1 receipt.
 
 `grokBrokerWorkerConfig.ts` is the only source of worker `config.toml` bytes;
 the manifest pins the sha256 of every model/effort combination and the broker

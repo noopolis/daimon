@@ -1,7 +1,9 @@
 {
-  "version": "noopolis.daimon.grok-slot-preflight.v1",
+  "version": "noopolis.daimon.grok-slot-preflight.v2",
   "slot": 0,
   "worker_uid": 2200,
+  "generation": 3,
+  "nonce": "5f0e2a1c9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f",
   "projection_sha256": "9e8bbd4e9337df40b90d5a382ece6c3745cb5e11038d10ea17b5032408bf30e4",
   "sandbox_profile_sha256": "2a1dcab471092eab77565838b17a5cf138489e3daa1349612ebcedcdb69e23c4",
   "seccomp_profile_sha256": "7777777777777777777777777777777777777777777777777777777777777777",

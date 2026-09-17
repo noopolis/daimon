@@ -118,7 +118,7 @@ export const GROK_ENGINE_BROKER = {
     }
   },
   projectionVersion: "noopolis.daimon.grok-broker-projection.v1",
-  slotPreflightVersion: "noopolis.daimon.grok-slot-preflight.v1",
+  slotPreflightVersion: "noopolis.daimon.grok-slot-preflight.v2",
   artifacts: {
     sourceSha256: "36f60689f0a8af0e3108f5f53d78ed52b7d4b6f934c75b6184606dfa82bc741e",
     x64Sha256: "36dc76b134eb59cf5a6720b6f94228eb279108e20ea3343fa6efd9ffcb60a4d3",

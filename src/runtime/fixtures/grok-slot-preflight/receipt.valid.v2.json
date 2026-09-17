@@ -11,6 +11,11 @@
   "grok_executable_sha256": "39ab87666877d64ef3a40aa60fbe0c3b6a6acd7001b78fe60e2c76bb6cfc4a94",
   "canaries": [
     {
+      "path": "/run/paideia",
+      "method": "sandboxed-read",
+      "result": "denied"
+    },
+    {
       "path": "/run/paideia/control",
       "method": "sandboxed-read",
       "result": "denied"
