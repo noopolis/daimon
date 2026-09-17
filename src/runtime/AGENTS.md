@@ -77,6 +77,25 @@ model (`grok-4.6-build` → `grok-4.6`), otherwise the turn fails as rejected an
 is still metered. Control protocol v2 is refused-v1 on the wire because both
 ends ship in this package.
 
+A failed brokered turn also carries the worker's own last words. The launcher
+gives the worker one pipe for stdout and stderr and publishes no output for a
+failure, so a `worker_failed` turn used to reach the host as nothing but
+`exit=1` — the reason the worker printed died with the container's tmpfs.
+`DBL_MAX_DIAGNOSTIC` (512 bytes) is now the launcher's bounded tail of that
+pipe, sent beside the fixed result frame in `diagnostic_length` and kept only
+for a worker that exited on its own account: an output-limit tail would be the
+very payload the bound refused, a cancelled turn has no reader left, and a
+prelaunch failure ran nothing. `engineBrokerNativeClient.ts` redacts that tail
+exactly as the CLI child path redacts a failed engine child
+(`redactCredentialText` with the turn's own provider/MCP capabilities as exact
+secrets, the same `CLI_ENGINE_MAX_DIAGNOSTIC_BYTES` bound) and flattens it to
+one line as `diagnostic.reason`. It is an optional, control-character-free
+member of the sealed terminal response's closed diagnostic — admitted by
+`engineBrokerProtocol.ts` only for the statuses where a worker ran and spoke —
+so it replays with the sealed record and reaches the operator through
+`engineBrokerControlClient.ts`'s failure message. Nothing new is written to
+disk: the reason travels inside the response the broker already seals.
+
 Evaluator inference grants (`grokInferenceGrants.ts`) let Paideia judges and
 the DSPy optimizer — uid 2000, the trusted evaluator side — spend the broker's
 Grok credential without holding it. `request_inference_grant {model,

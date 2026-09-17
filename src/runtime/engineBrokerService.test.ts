@@ -56,3 +56,9 @@ test("a limit failure reaches the client with its code and limit reason", async 
     await assert.rejects(client.turn("agent-a","wake-a","hello","http://127.0.0.1:44001/mcp"),/engine broker turn failed \(limit_exceeded; limit=requests\)/u);
   },async()=>{throw new EngineBrokerTurnFailure("limit_exceeded",undefined,{outcome:"failed",usage:{input:1,cacheRead:0,cacheWrite:0,output:1,total:2},model:"grok-4.6",requests:3,limitReason:"requests"});});
 });
+
+test("a failed worker's own reason reaches the client instead of a bare exit code", async () => {
+  await withService(async (client) => {
+    await assert.rejects(client.turn("agent-a","wake-a","hello","http://127.0.0.1:44001/mcp"),/engine broker turn failed \(engine_failed; wait\/exec; exit=1; signal=0; reason=grok: session store unwritable\)/u);
+  },async()=>{throw new EngineBrokerTurnFailure("engine_failed",{status:"worker_failed",stage:"wait",failureClass:"exec",profileApplied:false,exitCode:1,termSignal:0,workerPid:31,workerUid:2200,startTicks:"9",reason:"grok: session store unwritable"},{outcome:"failed",usage:null,model:"grok-4.6",requests:4,limitReason:"none"});});
+});

@@ -62,3 +62,18 @@ test("start_turn limits are an optional closed subset inside their bounds", () =
     assert.throws(() => parseEngineBrokerRequest({ ...start, limits }), /invalid broker frame/u);
   }
 });
+
+test("a failed worker's redacted reason is an optional bounded member of its diagnostic",()=>{
+  const worker={status:"worker_failed",stage:"wait",failureClass:"exec",profileApplied:false,exitCode:1,termSignal:0,workerPid:31,workerUid:2200,startTicks:"9"} as const;
+  const failed={version:start.version,kind:"failed",requestId:"request-1",turnId:"turn-1",code:"engine_failed",outcome:"failed",usage:null,model:"grok-4.6",requests:4,limitReason:"none"} as const;
+  const named={...failed,diagnostic:{...worker,reason:"grok: session store unwritable"}} as const;
+  assert.deepEqual(parseEngineBrokerResponse(named),named);
+  const prelaunch={status:"prelaunch_failed",stage:"executable",failureClass:"executable",profileApplied:false,exitCode:-1,termSignal:0,workerPid:0,workerUid:0,startTicks:"0"} as const;
+  for(const bad of [
+    {...failed,diagnostic:{...worker,reason:""}},
+    {...failed,diagnostic:{...worker,reason:"x".repeat(769)}},
+    {...failed,diagnostic:{...worker,reason:"line\nbreak"}},
+    {...failed,diagnostic:{...worker,reason:7}},
+    {...failed,diagnostic:{...prelaunch,reason:"no worker ran"}}
+  ])assert.throws(()=>parseEngineBrokerResponse(bad),/invalid broker frame/u);
+});

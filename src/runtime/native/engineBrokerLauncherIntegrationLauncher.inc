@@ -83,6 +83,34 @@ static void output_boundary_case(const char *provider, int overflow) {
   close(p);
   close(c);
 }
+/* A worker that exits nonzero publishes no output, but its own last words —
+   stderr and stdout share one pipe — must survive as the bounded diagnostic
+   tail, because the host otherwise sees nothing but `exit=1`. */
+static void worker_failure_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("stderr-failure", "mcp.Failure-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
+            r.status == DBL_STATUS_WORKER_FAILED && r.stage == DBL_STAGE_WAIT &&
+            r.failure_class == DBL_FAILURE_EXEC && r.exit_code == 1 &&
+            r.term_signal == 0 && r.worker_pid > 0 && r.worker_uid == 2200 &&
+            r.start_ticks > 0 && r.output_length == 0 &&
+            r.diagnostic_length > 0 &&
+            r.diagnostic_length <= DBL_MAX_DIAGNOSTIC,
+        "worker failure diagnostic length");
+  char *reason = calloc(1, r.diagnostic_length + 1);
+  check(read_all(s, reason, r.diagnostic_length) &&
+            strstr(reason, "grok: session store unwritable"),
+        "worker failure reason");
+  char extra;
+  check(read(s, &extra, 1) == 0, "worker failure EOF");
+  free(reason);
+  close(s);
+  close(p);
+  close(c);
+}
 static void org_cases(void) {
   check(!setgid(DBL_BROKER_UID) && !setuid(DBL_BROKER_UID), "drop broker uid");
   client_case();
@@ -90,6 +118,7 @@ static void org_cases(void) {
   client_input_reject(5, 1);
   output_boundary_case("exact-output", 0);
   output_boundary_case("overflow-output", 1);
+  worker_failure_case();
   int s = connect_socket(), p = sealed("prompt"),
       c = sealed_bundle("provider.Token-1", "mcp.Token-2");
   struct dbl_request q = request();

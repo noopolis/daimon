@@ -114,7 +114,8 @@ int main(void) {
                 DBL_RESULT_FAILURE_CLASS_OFFSET &&
             offsetof(struct dbl_result, profile_applied) ==
                 DBL_RESULT_PROFILE_APPLIED_OFFSET &&
-            offsetof(struct dbl_result, reserved) == DBL_RESULT_RESERVED_OFFSET,
+            offsetof(struct dbl_result, diagnostic_length) ==
+                DBL_RESULT_DIAGNOSTIC_LENGTH_OFFSET,
         "result ABI");
   mkdir("/run/daimon-engine-broker", 0755);
   mkdir("/etc/daimon-engine-broker", 0755);

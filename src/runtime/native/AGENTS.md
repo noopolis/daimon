@@ -39,3 +39,10 @@ Holding one verified descriptor and `execveat`-ing it would not make a replaced
 binary unrunnable: Grok 1.0.34 re-executes itself inside bubblewrap by path
 (`/usr/local/bin/grok`), so the image path's root ownership, not the launcher
 descriptor, is what protects the sandboxed process.
+
+The result frame's last word is `diagnostic_length`, not padding: on
+`DBL_STATUS_WORKER_FAILED` the supervisor keeps the last `DBL_MAX_DIAGNOSTIC`
+bytes of the worker's merged stdout/stderr and sends them after the fixed
+frame, while `output_length` stays 0 as before. Every other failure sends none,
+and `closed_result` refuses a frame that mixes the two. The bytes are the
+worker's own, so the broker redacts them before they cross any boundary.

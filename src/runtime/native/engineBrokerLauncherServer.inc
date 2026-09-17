@@ -225,12 +225,25 @@ static void supervise(int client, pid_t pid, int output,
     out->output_length = (uint32_t)used;
   }
   if (out->status != DBL_STATUS_OK) {
+    /* A failed turn publishes no output, but a worker that exited on its own
+       account said why on the pipe it shares with stdout, and that tail is the
+       only reason the host can ever see: without it a failure reads `exit=1`.
+       Keep a bounded tail of it and erase the rest here; the broker redacts it
+       before it crosses any boundary. The other failures get none: an
+       output-limit tail is the very payload the bound refused to publish, a
+       cancelled turn has no reader left, and a prelaunch failure ran nothing. */
+    size_t keep = out->status != DBL_STATUS_WORKER_FAILED ? 0
+                  : used > DBL_MAX_DIAGNOSTIC ? DBL_MAX_DIAGNOSTIC
+                                              : used;
+    memmove(bytes, bytes + (used - keep), keep);
+    erase(bytes + keep, sizeof(bytes) - keep);
     out->output_length = 0;
-    erase(bytes, sizeof(bytes));
+    out->diagnostic_length = (uint32_t)keep;
+    used = keep;
   }
   if (!disconnected) {
     full_write(client, out, sizeof(*out));
-    if (out->status == DBL_STATUS_OK)
+    if (used)
       full_write(client, bytes, used);
   }
   erase(bytes, sizeof(bytes));
@@ -334,7 +347,8 @@ static int client_send(int socket_fd, const struct dbl_request *r, int prompt,
   return sendmsg(socket_fd, &m, MSG_NOSIGNAL) == (ssize_t)sizeof(*r) ? 0 : -1;
 }
 static int closed_result(const struct dbl_result *r, const char turn_id[65]) {
-  if (r->version != DBL_VERSION || r->reserved || r->profile_applied > 1 ||
+  if (r->version != DBL_VERSION || r->diagnostic_length > DBL_MAX_DIAGNOSTIC ||
+      r->profile_applied > 1 ||
       r->stage > DBL_STAGE_ATTESTATION ||
       r->failure_class > DBL_FAILURE_ATTESTATION_PROFILE_INVALID ||
       r->output_length > DBL_MAX_OUTPUT || memcmp(r->turn_id, turn_id, 65))
@@ -343,12 +357,14 @@ static int closed_result(const struct dbl_result *r, const char turn_id[65]) {
     return r->stage == DBL_STAGE_OUTPUT &&
            r->failure_class == DBL_FAILURE_NONE && r->profile_applied == 0 &&
            r->worker_pid > 0 && r->worker_uid >= 2200 && r->start_ticks &&
-           r->exit_code == 0 && r->term_signal == 0;
+           r->exit_code == 0 && r->term_signal == 0 &&
+           r->diagnostic_length == 0;
   if (r->status == DBL_STATUS_PRELAUNCH_FAILED)
     return r->stage >= DBL_STAGE_PEER && r->stage <= DBL_STAGE_EXEC &&
            r->failure_class >= DBL_FAILURE_PEER &&
            r->failure_class <= DBL_FAILURE_EXEC && r->worker_pid == 0 &&
-           r->worker_uid == 0 && r->start_ticks == 0 && r->output_length == 0;
+           r->worker_uid == 0 && r->start_ticks == 0 && r->output_length == 0 &&
+           r->diagnostic_length == 0;
   if (r->status == DBL_STATUS_WORKER_FAILED)
     return r->stage == DBL_STAGE_WAIT &&
            (r->failure_class == DBL_FAILURE_EXEC ||
@@ -358,10 +374,12 @@ static int closed_result(const struct dbl_result *r, const char turn_id[65]) {
   if (r->status == DBL_STATUS_OUTPUT_FAILED)
     return r->stage == DBL_STAGE_OUTPUT &&
            r->failure_class == DBL_FAILURE_OUTPUT_LIMIT && r->worker_pid > 0 &&
-           r->worker_uid >= 2200 && r->start_ticks && r->output_length == 0;
+           r->worker_uid >= 2200 && r->start_ticks && r->output_length == 0 &&
+           r->diagnostic_length == 0;
   if (r->status == DBL_STATUS_CANCELLED)
     return r->stage == DBL_STAGE_WAIT &&
            r->failure_class == DBL_FAILURE_CANCELLED && r->worker_pid > 0 &&
-           r->worker_uid >= 2200 && r->start_ticks && r->output_length == 0;
+           r->worker_uid >= 2200 && r->start_ticks && r->output_length == 0 &&
+           r->diagnostic_length == 0;
   return 0;
 }

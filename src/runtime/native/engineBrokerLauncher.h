@@ -9,6 +9,11 @@
 #define DBL_MAX_TOKEN 4096u
 #define DBL_MAX_CAPABILITY_BUNDLE (DBL_MAX_TOKEN * 2u + 4u)
 #define DBL_MAX_OUTPUT 65536u
+/* Bounded tail of the worker's own merged stdout/stderr, kept only for a
+   worker that exited on its own account (`DBL_STATUS_WORKER_FAILED`), so the
+   reason reaches the host instead of `exit=1`. It is a diagnostic, never the
+   turn's output: `output_length` stays 0 on every failure. */
+#define DBL_MAX_DIAGNOSTIC 512u
 #ifndef DBL_REGISTRY
 #define DBL_REGISTRY "/etc/daimon-engine-broker/registrations.bin"
 #endif
@@ -73,13 +78,13 @@ struct dbl_result {
   int32_t worker_pid, exit_code, term_signal;
   uint64_t start_ticks;
   char turn_id[65];
-  uint32_t stage, failure_class, profile_applied, reserved;
+  uint32_t stage, failure_class, profile_applied, diagnostic_length;
 };
 #define DBL_RESULT_SIZE 128u
 #define DBL_RESULT_STAGE_OFFSET 108u
 #define DBL_RESULT_FAILURE_CLASS_OFFSET 112u
 #define DBL_RESULT_PROFILE_APPLIED_OFFSET 116u
-#define DBL_RESULT_RESERVED_OFFSET 120u
+#define DBL_RESULT_DIAGNOSTIC_LENGTH_OFFSET 120u
 _Static_assert(sizeof(struct dbl_result) == DBL_RESULT_SIZE,
                "dbl_result ABI size");
 _Static_assert(__builtin_offsetof(struct dbl_result, stage) ==
@@ -91,8 +96,8 @@ _Static_assert(__builtin_offsetof(struct dbl_result, failure_class) ==
 _Static_assert(__builtin_offsetof(struct dbl_result, profile_applied) ==
                    DBL_RESULT_PROFILE_APPLIED_OFFSET,
                "dbl_result profile offset");
-_Static_assert(__builtin_offsetof(struct dbl_result, reserved) ==
-                   DBL_RESULT_RESERVED_OFFSET,
-               "dbl_result reserved offset");
+_Static_assert(__builtin_offsetof(struct dbl_result, diagnostic_length) ==
+                   DBL_RESULT_DIAGNOSTIC_LENGTH_OFFSET,
+               "dbl_result diagnostic length offset");
 
 #endif

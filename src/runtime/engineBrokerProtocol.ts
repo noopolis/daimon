@@ -20,7 +20,15 @@ export type EngineBrokerRequest =
   | Readonly<{ version: typeof VERSION; kind: "cancel_turn"; requestId: string; turnId: string }>
   | EngineBrokerInferenceRequest;
 
-export interface EngineBrokerFailureDiagnostic { status:string;stage:string;failureClass:string;profileApplied:boolean;exitCode:number;termSignal:number;workerPid:number;workerUid:number;startTicks:string }
+/**
+ * `reason` is the worker's own last words (`engineBrokerNativeClient.ts`),
+ * already redacted and flattened to one bounded line by the broker. It is the
+ * only field a failed turn carries that the worker itself wrote, so it is
+ * optional, bounded, control-character free, and admitted only for the
+ * statuses where a worker actually ran and spoke.
+ */
+export interface EngineBrokerFailureDiagnostic { status:string;stage:string;failureClass:string;profileApplied:boolean;reason?:string;exitCode:number;termSignal:number;workerPid:number;workerUid:number;startTicks:string }
+export const ENGINE_BROKER_MAX_DIAGNOSTIC_REASON_BYTES = 768;
 
 export type EngineBrokerResponse =
   | Readonly<{ version: typeof VERSION; kind: "ready"; requestId: string; brokerUid: 2100; providerProxyPort: 43123; mcpFacadePort: 43124; registrations: number; credentialStale: false; realmLease: true; workerIsolation: true }>
@@ -105,7 +113,7 @@ function parseTerminal(input: JsonRecord, expected: typeof VERSION | typeof V1):
   const codes: readonly string[] = expected === VERSION ? ENGINE_BROKER_FAILURE_CODES : ENGINE_BROKER_FAILURE_CODES.filter((code) => code !== "limit_exceeded");
   if (!codes.includes(input.code as string)) throw new TypeError("invalid broker frame");
   let diagnostic:EngineBrokerFailureDiagnostic|undefined;
-  if(input.diagnostic!==undefined){const value=record(input.diagnostic);exact(value,["status","stage","failureClass","profileApplied","exitCode","termSignal","workerPid","workerUid","startTicks"]);const status=["prelaunch_failed","worker_failed","output_failed","cancelled"],stage=["peer","request","registration","executable","exec","wait","output","attestation"],failureClass=["peer","protocol","registration","executable","exec","wait","output_limit","cancelled","profile_missing","profile_invalid"];if(!status.includes(value.status as string)||!stage.includes(value.stage as string)||!failureClass.includes(value.failureClass as string)||typeof value.profileApplied!=="boolean"||![value.exitCode,value.termSignal,value.workerPid,value.workerUid].every(Number.isSafeInteger)||typeof value.startTicks!=="string"||!/^(0|[1-9][0-9]*)$/u.test(value.startTicks)||!closedDiagnostic(value))throw new TypeError("invalid broker frame");diagnostic=value as unknown as EngineBrokerFailureDiagnostic;}
+  if(input.diagnostic!==undefined){const value=record(input.diagnostic);const fields=["status","stage","failureClass","profileApplied","exitCode","termSignal","workerPid","workerUid","startTicks"];exact(value,value.reason===undefined?fields:[...fields,"reason"]);if(value.reason!==undefined&&(typeof value.reason!=="string"||value.reason.length===0||Buffer.byteLength(value.reason,"utf8")>ENGINE_BROKER_MAX_DIAGNOSTIC_REASON_BYTES||/[\u0000-\u001f\u007f]/u.test(value.reason)))throw new TypeError("invalid broker frame");const status=["prelaunch_failed","worker_failed","output_failed","cancelled"],stage=["peer","request","registration","executable","exec","wait","output","attestation"],failureClass=["peer","protocol","registration","executable","exec","wait","output_limit","cancelled","profile_missing","profile_invalid"];if(!status.includes(value.status as string)||!stage.includes(value.stage as string)||!failureClass.includes(value.failureClass as string)||typeof value.profileApplied!=="boolean"||![value.exitCode,value.termSignal,value.workerPid,value.workerUid].every(Number.isSafeInteger)||typeof value.startTicks!=="string"||!/^(0|[1-9][0-9]*)$/u.test(value.startTicks)||!closedDiagnostic(value))throw new TypeError("invalid broker frame");diagnostic=value as unknown as EngineBrokerFailureDiagnostic;}
   const base = { kind: "failed", requestId: id(input.requestId), turnId: id(input.turnId), code: input.code as EngineBrokerFailureCode, ...(diagnostic ? { diagnostic } : {}) } as const;
   if (expected === V1) return { version: V1, ...base } as V1Failed;
   const accountingValue = parseEngineBrokerTurnAccounting(input, "failed");
@@ -115,6 +123,9 @@ function parseTerminal(input: JsonRecord, expected: typeof VERSION | typeof V1):
 
 function closedDiagnostic(value:JsonRecord):boolean{
   if(value.profileApplied!==false||(value.workerPid as number)<0||(value.workerUid as number)<0)return false;
+  // Only a worker that ran and wrote something can have said why it failed:
+  // no prelaunch failure and no attestation refusal carries worker words.
+  if(value.reason!==undefined&&!((value.status==="worker_failed"&&value.stage==="wait")||value.status==="output_failed"||value.status==="cancelled"))return false;
   const noWorker=value.workerPid===0&&value.workerUid===0&&value.startTicks==="0";
   const worker=(value.workerPid as number)>0&&(value.workerUid as number)>=2200&&value.startTicks!=="0";
   if(value.status==="prelaunch_failed")return noWorker&&({peer:"peer",request:"protocol",registration:"registration",executable:"executable",exec:"exec"} as Record<string,string>)[value.stage as string]===value.failureClass;
