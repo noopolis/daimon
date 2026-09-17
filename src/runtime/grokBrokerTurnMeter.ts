@@ -1,8 +1,13 @@
 import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
 import { sumEngineBrokerTurnUsage, type EngineBrokerLimitReason, type EngineBrokerTurnLimits, type EngineBrokerTurnUsage } from "./engineBrokerTurnAccounting.js";
 
-/** `estimated` marks a request whose response carried no valid usage and was charged {@link estimateGrokRequestUsage}. */
-export type GrokBrokerRequestTiming = Readonly<{ startedAt: string; endedAt?: string; usage?: EngineBrokerTurnUsage; estimated?: true }>;
+/**
+ * `estimated` marks a request whose response carried no valid usage and was
+ * charged {@link estimateGrokRequestUsage}. `toolCalls` are the tool-call names
+ * that request's response carried, names only ({@link parseGrokResponseToolNames});
+ * absent means the response could not be decoded, `[]` that it called nothing.
+ */
+export type GrokBrokerRequestTiming = Readonly<{ startedAt: string; endedAt?: string; usage?: EngineBrokerTurnUsage; estimated?: true; toolCalls?: readonly string[] }>;
 export type GrokBrokerTurnMeterSnapshot = Readonly<{ requests: number; tokens: number; limitReason: EngineBrokerLimitReason; usage: EngineBrokerTurnUsage | null; estimatedRequests: number; timings: readonly GrokBrokerRequestTiming[] }>;
 
 /**
@@ -36,7 +41,7 @@ export type GrokBrokerTurnMeterSnapshot = Readonly<{ requests: number; tokens: n
  */
 export class GrokBrokerTurnMeter {
   private readonly startedAt: number;
-  private readonly timings: { startedAt: string; endedAt?: string; usage?: EngineBrokerTurnUsage; estimated?: true }[] = [];
+  private readonly timings: { startedAt: string; endedAt?: string; usage?: EngineBrokerTurnUsage; estimated?: true; toolCalls?: readonly string[] }[] = [];
   private tokens = 0;
   private reason: EngineBrokerLimitReason = "none";
   private inFlight: { index: number; controller: AbortController } | undefined;
@@ -60,18 +65,21 @@ export class GrokBrokerTurnMeter {
   }
 
   /**
-   * Records one admitted request's end and its usage. A response without valid
-   * usage (absent, malformed, implausible, or a failed/aborted call) is charged
-   * a conservative estimate from the request body size, so a missing `usage`
-   * can never silently disable the token ceiling.
+   * Records one admitted request's end, its usage, and the tool-call names its
+   * response carried. A response without valid usage (absent, malformed,
+   * implausible, or a failed/aborted call) is charged a conservative estimate
+   * from the request body size, so a missing `usage` can never silently disable
+   * the token ceiling. `toolCalls` is observation only: it never affects
+   * admission, the running total, or any limit.
    */
-  settle(index: number, usage: EngineBrokerTurnUsage | undefined, requestBytes: number): void {
+  settle(index: number, usage: EngineBrokerTurnUsage | undefined, requestBytes: number, toolCalls?: readonly string[]): void {
     const timing = this.timings[index];
     if (timing === undefined || timing.endedAt !== undefined) return;
     if (this.inFlight?.index === index) this.inFlight = undefined;
     timing.endedAt = new Date(this.now()).toISOString();
     if (usage === undefined) { timing.usage = estimateGrokRequestUsage(requestBytes); timing.estimated = true; }
     else timing.usage = usage;
+    if (toolCalls !== undefined) timing.toolCalls = toolCalls;
     this.tokens += timing.usage.total;
   }
 
@@ -118,20 +126,8 @@ const count = (value: unknown): number | undefined => typeof value === "number" 
  * zero-filled and never added — the meter charges an estimate instead.
  */
 export function parseGrokUpstreamUsage(body: Uint8Array, contentType: string | undefined): EngineBrokerTurnUsage | undefined {
-  const text = Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString("utf8");
-  const candidates: unknown[] = [];
-  if (contentType?.includes("text/event-stream") === true || text.startsWith("data:")) {
-    for (const line of text.split(/\r?\n/u)) {
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (payload === "[DONE]" || payload.length === 0) continue;
-      try { candidates.push(JSON.parse(payload)); } catch { /* a non-JSON event carries no usage */ }
-    }
-  } else {
-    try { candidates.push(JSON.parse(text)); } catch { return undefined; }
-  }
   let found: EngineBrokerTurnUsage | undefined;
-  for (const candidate of candidates) {
+  for (const candidate of decodeUpstreamResponse(body, contentType) ?? []) {
     if (!isRecord(candidate) || !isRecord(candidate.usage)) continue;
     // Last usage block wins even when invalid: an implausible final report
     // must not fall back to an earlier, smaller block (the request is then
@@ -139,6 +135,86 @@ export function parseGrokUpstreamUsage(body: Uint8Array, contentType: string | u
     found = decodeOpenAiUsage(candidate.usage);
   }
   return found;
+}
+
+/**
+ * Every decodable JSON object of one upstream response: each `data:` event of
+ * an SSE stream, or the single body of a JSON response.
+ *
+ * `undefined` means *nothing* decoded — an unparseable or non-JSON response.
+ * Callers must keep that distinct from a decoded response that said nothing,
+ * because the ledger never fabricates an observation it did not make.
+ */
+function decodeUpstreamResponse(body: Uint8Array, contentType: string | undefined): unknown[] | undefined {
+  const text = Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString("utf8");
+  const candidates: unknown[] = [];
+  if (contentType?.includes("text/event-stream") === true || text.startsWith("data:")) {
+    for (const line of text.split(/\r?\n/u)) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]" || payload.length === 0) continue;
+      try { candidates.push(JSON.parse(payload)); } catch { /* a non-JSON event carries neither usage nor a tool call */ }
+    }
+  } else {
+    try { candidates.push(JSON.parse(text)); } catch { return undefined; }
+  }
+  return candidates.length === 0 ? undefined : candidates;
+}
+
+/** At most this many names per request row; a longer list ends in {@link GROK_TOOL_CALL_TRUNCATED}. */
+export const GROK_REQUEST_TOOL_CALLS_MAX = 16;
+/** A `name` that is not a plain short identifier is counted, never passed through. */
+export const GROK_TOOL_CALL_INVALID = "<invalid>";
+export const GROK_TOOL_CALL_TRUNCATED = "<truncated>";
+const TOOL_CALL_NAME = /^[A-Za-z0-9_.-]{1,64}$/u;
+
+/**
+ * The tool-call NAMES one upstream response carried, and nothing else.
+ *
+ * Two live turns could not answer "did the model ever try `use_tool` or
+ * `search_tool`", because the per-request rows recorded timings and tokens but
+ * never an attempt. This is that answer, under four rules:
+ *
+ * - names only. No arguments, no message content, no tokens, no header. A
+ *   `name` that is not a plain short identifier is recorded as
+ *   {@link GROK_TOOL_CALL_INVALID} rather than passing provider bytes through;
+ * - bounded. At most {@link GROK_REQUEST_TOOL_CALLS_MAX} entries, the last being
+ *   {@link GROK_TOOL_CALL_TRUNCATED} when the response carried more, so a
+ *   pathological response cannot write an unbounded row;
+ * - absence stays absence. A decoded response that called nothing returns `[]`;
+ *   a response that could not be decoded returns `undefined` and the row records
+ *   no field at all;
+ * - one streaming call names itself in one delta and streams its arguments in
+ *   the rest, so a repeat of the same `(choice, call)` index is that same call,
+ *   not a second attempt.
+ */
+export function parseGrokResponseToolNames(body: Uint8Array, contentType: string | undefined): readonly string[] | undefined {
+  const candidates = decodeUpstreamResponse(body, contentType);
+  if (candidates === undefined) return undefined;
+  const names: string[] = [], seen = new Set<string>();
+  scan: for (const candidate of candidates) {
+    if (!isRecord(candidate) || !Array.isArray(candidate.choices)) continue;
+    for (const choice of candidate.choices) {
+      if (!isRecord(choice)) continue;
+      for (const source of [choice.delta, choice.message]) {
+        if (!isRecord(source) || !Array.isArray(source.tool_calls)) continue;
+        for (const call of source.tool_calls) {
+          if (!isRecord(call) || !isRecord(call.function)) continue;
+          const name = call.function.name;
+          // An arguments-only delta names nothing; it is not an attempt of its own.
+          if (typeof name !== "string" || name.length === 0) continue;
+          if (typeof choice.index === "number" && typeof call.index === "number") {
+            const key = `${choice.index}:${call.index}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+          }
+          names.push(TOOL_CALL_NAME.test(name) ? name : GROK_TOOL_CALL_INVALID);
+          if (names.length > GROK_REQUEST_TOOL_CALLS_MAX) break scan;
+        }
+      }
+    }
+  }
+  return names.length > GROK_REQUEST_TOOL_CALLS_MAX ? [...names.slice(0, GROK_REQUEST_TOOL_CALLS_MAX - 1), GROK_TOOL_CALL_TRUNCATED] : names;
 }
 
 function decodeOpenAiUsage(usage: JsonRecord): EngineBrokerTurnUsage | undefined {

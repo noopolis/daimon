@@ -120,12 +120,22 @@ function streamOrMeterUsage(stream: GrokStreamUsage | undefined, snapshot: GrokB
   return snapshot.usage;
 }
 
-/** Per-request rows: stream usage with proxy timing when both describe the same requests, else the proxy's own measured requests. */
+/** Per-request rows: stream usage with the proxy's own observation when both describe the same requests, else the proxy's measured requests. */
 function requestRows(stream: GrokStreamUsage | undefined, snapshot: GrokBrokerTurnMeterSnapshot): BrokerTurnMeteringDetail["requests"] {
   if (stream !== undefined && stream.requests.length > 0) {
     const timed = snapshot.timings.length === stream.requests.length;
-    return stream.requests.map((value, index) => ({ ...value, usageSource: "stream" as const, ...(timed ? clock(snapshot.timings[index]!) : {}) }));
+    return stream.requests.map((value, index) => ({ ...value, usageSource: "stream" as const, ...(timed ? observed(snapshot.timings[index]!) : {}) }));
   }
-  return snapshot.timings.flatMap((timing, index) => timing.usage === undefined ? [] : [{ index, ...usageOf(timing.usage), usageSource: timing.estimated === true ? "estimated" as const : "upstream" as const, ...clock(timing) }]);
+  return snapshot.timings.flatMap((timing, index) => timing.usage === undefined ? [] : [{ index, ...usageOf(timing.usage), usageSource: timing.estimated === true ? "estimated" as const : "upstream" as const, ...observed(timing) }]);
 }
-const clock = (timing: GrokBrokerTurnMeterSnapshot["timings"][number]) => ({ startedAt: timing.startedAt, ...(timing.endedAt === undefined ? {} : { endedAt: timing.endedAt }) });
+/**
+ * What only the proxy saw of one request: its clock, and the tool-call names the
+ * response carried. Both are attached on the stream path only when the two
+ * descriptions are request-for-request aligned, because an unaligned index would
+ * credit one request's attempt to another.
+ */
+const observed = (timing: GrokBrokerTurnMeterSnapshot["timings"][number]) => ({
+  startedAt: timing.startedAt,
+  ...(timing.endedAt === undefined ? {} : { endedAt: timing.endedAt }),
+  ...(timing.toolCalls === undefined ? {} : { toolCalls: timing.toolCalls })
+});

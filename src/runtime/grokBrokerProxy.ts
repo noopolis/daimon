@@ -5,7 +5,7 @@ import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
 import { DEFAULT_GROK_BROKER_MODEL_POLICY, parseGrokBrokerModelPolicy, type GrokBrokerModelPolicy } from "./grokBrokerModelPolicy.js";
 import { authorizeGrokBrokerProxyRequest } from "./grokBrokerProxyRequest.js";
 import { GROK_SESSION_TITLE_SINK_KEY } from "./grokBrokerWorkerConfig.js";
-import { parseGrokUpstreamUsage, type GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
+import { parseGrokResponseToolNames, parseGrokUpstreamUsage, type GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
 import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
 import { serveGrokInferenceGrant } from "./grokInferenceProxy.js";
 import type { GrokInferenceGrants } from "./grokInferenceGrants.js";
@@ -49,7 +49,7 @@ export class GrokBrokerProxyRefusal extends Error {
 }
 
 async function serve(request: IncomingMessage, response: ServerResponse, authority: GrokBrokerCredentialAuthority, upstream: GrokBrokerUpstream, capabilities: EngineBrokerCapabilities,guards:Map<string,()=>Promise<void>>,turns:Map<string,GrokBrokerProxyTurn>,fallback:GrokBrokerModelPolicy,grants?:GrokInferenceGrants): Promise<void> {
-  let settle:((usage:ReturnType<typeof parseGrokUpstreamUsage>)=>void)|undefined;
+  let settle:((usage:ReturnType<typeof parseGrokUpstreamUsage>,toolCalls?:readonly string[])=>void)|undefined;
   let titleSink = false;
   try {
     const body = await readBody(request); const headers = Object.fromEntries(Object.entries(request.headers).map(([key, value]) => [key, Array.isArray(value) ? value[0] : value]));
@@ -64,10 +64,14 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     const admission=turn.meter.admit();
     if("refused" in admission){response.writeHead(429,{"content-type":"application/json","cache-control":"no-store"});response.end(JSON.stringify({error:"turn limit reached",limit:admission.refused}));return;}
     if("busy" in admission){response.writeHead(429,{"content-type":"application/json","cache-control":"no-store"});response.end('{"error":"turn request in flight"}');return;}
-    settle=(usage)=>{turn.meter.settle(admission.index,usage,body.byteLength);settle=undefined;};
+    settle=(usage,toolCalls)=>{turn.meter.settle(admission.index,usage,body.byteLength,toolCalls);settle=undefined;};
     let result = await upstream(prepared,admission.signal);
     if (result.status === 401) { token = authority.refreshAfterRejection?await authority.refreshAfterRejection(rejectedDigest):await authority.accessToken(true);const refreshedDigest=createHash("sha256").update(token).digest("hex"); prepared = { ...prepared, headers: { ...prepared.headers, authorization: `Bearer ${token}` } }; token = ""; result = await upstream(prepared,admission.signal);if(result.status===401)await authority.markRejected(refreshedDigest); }
-    settle?.(parseGrokUpstreamUsage(result.body,result.headers["content-type"]));
+    // Names only, bounded, and never a reason to fail the request: the response
+    // is already buffered here for its usage block, so what the model tried to
+    // call is in hand. A decoder fault records no attempt rather than a false
+    // empty one, and never disturbs the turn.
+    settle?.(parseGrokUpstreamUsage(result.body,result.headers["content-type"]),toolCallsOrNothing(result.body,result.headers["content-type"]));
     response.writeHead(result.status, { "content-type": result.headers["content-type"] ?? "application/json", "cache-control": "no-store" }); response.end(result.body);
   } catch (error) {
     settle?.(undefined);
@@ -111,6 +115,11 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
 const expectedWorkerProbe = (request: IncomingMessage): boolean =>
   request.headers.authorization === undefined && (request.method ?? "") === "GET" &&
   new URL(request.url ?? "/", "http://127.0.0.1").pathname === "/";
+
+/** Instrumentation must never fail a turn: a throwing decoder records nothing, exactly as an undecodable response does. */
+const toolCallsOrNothing = (body: Uint8Array, contentType: string | undefined): readonly string[] | undefined => {
+  try { return parseGrokResponseToolNames(body, contentType); } catch { return undefined; }
+};
 
 /** The body gate, refused non-retryably: a rejected body is a policy miss, never a transient fault. */
 function authorizeRequestOrRefuse(...args: Parameters<typeof authorizeGrokBrokerProxyRequest>): ReturnType<typeof authorizeGrokBrokerProxyRequest> {

@@ -110,7 +110,12 @@ const requestClockFields = (request: Readonly<{ startedAt?: string; endedAt?: st
  * (the provider response the proxy saw), or `estimated` (no valid usage; the
  * proxy's conservative charge, see `grokBrokerTurnMeter.ts`).
  */
-export type GrokTurnRequest = Readonly<{ index: number; input: number; cacheRead: number; cacheWrite: number; output: number; total: number; startedAt?: string; endedAt?: string; usageSource?: "stream" | "upstream" | "estimated" }>;
+/**
+ * `toolCalls` are the tool-call names that request's response carried, as the
+ * proxy read them (`grokBrokerTurnMeter.ts`): names only, bounded, `[]` for a
+ * response that called nothing, and absent when no response could be decoded.
+ */
+export type GrokTurnRequest = Readonly<{ index: number; input: number; cacheRead: number; cacheWrite: number; output: number; total: number; startedAt?: string; endedAt?: string; usageSource?: "stream" | "upstream" | "estimated"; toolCalls?: readonly string[] }>;
 /**
  * `requestCount` is the turn's admitted request count when it exceeds the rows:
  * a killed turn's in-flight request was sent upstream but never reported usage,
@@ -125,6 +130,22 @@ export type GrokTurnRequestEntry = Readonly<{ agent: string; wake: string; turn:
  * reasoning tokens, so `reasoning` is absent rather than zero. `turn` is the
  * broker idempotency key and `thread` the Grok session id when the stream
  * named one.
+ *
+ * `tool_calls` is what a turn's rows could not say before: whether the model
+ * ever *tried* to call anything. Two live turns ended with correctly mounted
+ * tools and no visible attempt, and the rows recorded timings and tokens only,
+ * so the question could not be answered after the fact. It is names only —
+ * never arguments, never message content, never a bearer — bounded, `[]` for a
+ * response that called nothing, and absent for a response that could not be
+ * decoded, because a fabricated empty list is byte-identical to a measured one.
+ *
+ * It is an additive field inside the unchanged
+ * `noopolis.daimon.turn-requests.v1` row, deliberately without a version bump:
+ * Spawnfile's usage reader (`spawnfile/src/runtime/usageLedger.ts`) drops every
+ * line whose `v` it does not recognise while ignoring fields it does not know,
+ * and Paideia only relocates this stream's path
+ * (`DAIMON_TURN_REQUESTS_LEDGER_PATH`). A bump is what would blind them; a new
+ * field is not.
  */
 export const renderGrokTurnRequestLines = (entry: GrokTurnRequestEntry): string => {
   const at = entry.at ?? new Date().toISOString();
@@ -146,6 +167,7 @@ export const renderGrokTurnRequestLines = (entry: GrokTurnRequestEntry): string 
     output: request.output,
     total: request.total,
     ...(request.usageSource === undefined ? {} : { usage_source: request.usageSource }),
+    ...(request.toolCalls === undefined ? {} : { tool_calls: request.toolCalls }),
     ...requestClockFields(request)
   })}\n`).join("");
 };

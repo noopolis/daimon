@@ -47,10 +47,19 @@ const untilAborted = (signal: AbortSignal): Promise<never> => new Promise((_reso
  * talks to the proxy exactly as the native worker does (capability bearer,
  * pinned client version, lean body). Only the launcher and attestation are fakes.
  */
-const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId: string, worker: Worker, overrides?: Parameters<typeof runGrokEngineBrokerTurn>[6], limits?: EngineBrokerServiceRegistration["limits"], turnStore?: string, syncDirectory?: (directory: string) => Promise<void>) => ReturnType<typeof runGrokEngineBrokerTurn>; usageRows: () => Promise<Record<string, unknown>[]>; requestRows: () => Promise<Record<string, unknown>[]>; upstreamCalls: () => number; upstreamAborts: () => number }>) => Promise<void>, usageLedgerPath?: string, upstreamDelayMs: (call: number) => number = () => 15): Promise<void> => {
+/** The stub provider's own SSE response: usage only, and no tool call, unless a test says otherwise. */
+const upstreamResponse = (): string => `data: ${JSON.stringify({ choices: [], usage: upstreamUsage })}\n\ndata: [DONE]\n\n`;
+/** One streaming tool call per name, arguments in a following delta, then the usage event. */
+const upstreamToolCallResponse = (names: readonly string[]): string => [
+  ...names.map((name, index) => ({ choices: [{ index: 0, delta: { tool_calls: [{ index, id: `call-${index}`, type: "function", function: { name, arguments: "" } }] } }] })),
+  ...names.map((_name, index) => ({ choices: [{ index: 0, delta: { tool_calls: [{ index, function: { arguments: '{"tool_name":"daimon__moltnet_read"}' } }] } }] })),
+  { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: upstreamUsage }
+].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
+
+const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId: string, worker: Worker, overrides?: Parameters<typeof runGrokEngineBrokerTurn>[6], limits?: EngineBrokerServiceRegistration["limits"], turnStore?: string, syncDirectory?: (directory: string) => Promise<void>) => ReturnType<typeof runGrokEngineBrokerTurn>; usageRows: () => Promise<Record<string, unknown>[]>; requestRows: () => Promise<Record<string, unknown>[]>; upstreamCalls: () => number; upstreamAborts: () => number }>) => Promise<void>, usageLedgerPath?: string, upstreamDelayMs: (call: number) => number = () => 15, upstreamBody: (call: number) => string = upstreamResponse): Promise<void> => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-broker-usage-"));
   let calls = 0, aborted = 0;
-  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async (_request, signal) => { calls++; await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, upstreamDelayMs(calls)); signal?.addEventListener("abort", () => { clearTimeout(timer); aborted++; reject(new Error("aborted")); }, { once: true }); }); return { status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from(`data: ${JSON.stringify({ choices: [], usage: upstreamUsage })}\n\ndata: [DONE]\n\n`) }; }, undefined, 0);
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async (_request, signal) => { calls++; await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, upstreamDelayMs(calls)); signal?.addEventListener("abort", () => { clearTimeout(timer); aborted++; reject(new Error("aborted")); }, { once: true }); }); return { status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from(upstreamBody(calls)) }; }, undefined, 0);
   const ledger = usageLedgerPath ?? path.join(root, "usage.jsonl");
   const rows = async (file: string) => (await readFile(file, "utf8").catch(() => "")).split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
   try {
@@ -244,3 +253,41 @@ test("the broker meters only through the single sealing helper, on both terminal
   assert.equal((body.match(/finishBrokerTurnWithUsage\(/gu) ?? []).length, 2);
   assert.ok(body.indexOf("return replay(") < body.indexOf("finishBrokerTurnWithUsage("), "a replay returns before any metering");
 });
+
+/**
+ * The question two live turns could not answer: did the model ever *try* to
+ * call a tool? The rows carried timings and tokens and nothing about an
+ * attempt, so a turn with zero tool calls and a turn whose calls all failed
+ * read identically after the fact.
+ */
+test("each per-request row records the tool-call names that request's response carried, names only", async () => {
+  await withBroker(async ({ turn, requestRows }) => {
+    await turn("wake-tools", twoRequests);
+    const rows = await requestRows();
+    // Mutation guard: without the field these are `[undefined, undefined]`.
+    assert.deepEqual(rows.map((row) => row.tool_calls), [["use_tool", "search_tool"], ["use_tool", "search_tool"]]);
+    const text = JSON.stringify(rows);
+    // Names only: no arguments, no message content, no bearer.
+    assert.equal(text.includes("daimon__moltnet_read"), false, "an argument value must never reach the ledger");
+    assert.equal(text.includes("arguments"), false);
+    assert.equal(text.includes("provider-token"), false);
+  }, undefined, () => 1, () => upstreamToolCallResponse(["use_tool", "search_tool"]));
+});
+
+test("a response that called nothing records an empty list, and one that cannot be decoded records no field at all", async () => {
+  await withBroker(async ({ turn, requestRows }) => {
+    await turn("wake-silent", twoRequests);
+    // Decoded, and it called nothing: that is an observation, not a gap.
+    assert.deepEqual((await requestRows()).map((row) => row.tool_calls), [[], []]);
+  }, undefined, () => 1);
+  await withBroker(async ({ turn, requestRows }) => {
+    await turn("wake-undecodable", twoRequests);
+    const rows = await requestRows();
+    // Mutation guard: a fabricated `[]` here would be byte-identical to the
+    // measured empty list above, and the ledger would claim an observation the
+    // proxy never made.
+    assert.deepEqual(rows.map((row) => Object.hasOwn(row, "tool_calls")), [false, false]);
+    assert.deepEqual(rows.map((row) => row.request), [0, 1], "the rows themselves are still written");
+  }, undefined, () => 1, () => "<html>bad gateway</html>");
+});
+

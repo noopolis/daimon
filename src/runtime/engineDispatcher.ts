@@ -187,11 +187,13 @@ function grokBrokerTurnFor(agent: OrganizationRuntimeAgentConfig, grokBroker: En
  * caller's own configuration, not engine-supplied text.
  *
  * On Grok the bare names are not the callable ones: every Daimon tool is a
- * deferred MCP tool of server `daimon`, reached through `use_tool` with
- * `tool_name` = `daimon__<name>`. That rule is not restated here — it is
- * rendered by `grokMountedToolNamingRule` in the same contract module that
- * renders the worker's pinned system prompt, so this envelope can no longer
- * contradict it. Every other engine's sentence is unchanged, byte for byte.
+ * deferred MCP tool of server `daimon`, and Grok 1.0.34 refuses an unqualified
+ * name before any HTTP ("Tool names must be qualified as `server__tool`"). This
+ * envelope used to instruct exactly that refused form. The correct rule is not
+ * restated here — it is rendered by `grokMountedToolNamingRule` in the same
+ * contract module that renders the worker's pinned system prompt, so the two
+ * texts cannot contradict each other again. Every other engine's sentence is
+ * unchanged, byte for byte.
  */
 export function identityEnvelope(agent: OrganizationRuntimeAgentConfig, mountedToolNames: readonly string[] = []): string {
   return [
