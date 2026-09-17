@@ -14,6 +14,8 @@ export { GROK_INFERENCE_CLIENT_MODEL_ID, GROK_INFERENCE_GRANT_ENV, grokInference
 export { GROK_INFERENCE_PROXY_BASE_URL, ENGINE_BROKER_INFERENCE_FAILURE_CODES, type EngineBrokerInferenceFailureCode } from "./engineBrokerInferenceProtocol.js";
 export { dedupeInferenceUsageRows, INFERENCE_USAGE_LEDGER_VERSION, GROK_INFERENCE_PURPOSES, type GrokInferencePurpose } from "./inferenceUsageLedger.js";
 export { GROK_INFERENCE_AUTH_STALE_BODY } from "./grokInferenceProxy.js";
+export { assertGrokWorkerDenyPathPlacement, assertGrokWorkerDenyPathShape, assertGrokWorkerDenyPathsPlaceable, GROK_WORKER_BASE_PROFILE_GRANTS, grokWorkerCanSearch, grokWorkerDenyPathChain, GrokWorkerDenyPlacementError, readGrokWorkerDenyPathChain } from "./grokWorkerDenyPlacement.js";
+export type { GrokWorkerDenyPathEntry, GrokWorkerDenyPathStep, GrokWorkerDenyPathWorker } from "./grokWorkerDenyPlacement.js";
 export { grokWorkerSandboxProfileSha256, renderGrokWorkerSandboxProfile } from "./grokWorkerSandboxProfile.js";
 export { engineBrokerRequestLedgerPathFor, parseEngineBrokerServiceConfig, type EngineBrokerServiceConfig, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
 export { DEFAULT_GROK_BROKER_TURN_LIMITS, ENGINE_BROKER_LIMIT_REASONS, type EngineBrokerLimitReason, type EngineBrokerTurnAccounting,

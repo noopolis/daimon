@@ -160,6 +160,34 @@ every profile inside bubblewrap, where a non-empty `deny` list is enforced;
 `grokWorkerSandboxProfile.ts` renders those profile bytes. A worker-uid process
 can neither write, rename, nor unlink any of the root-owned files.
 
+Deny-path placement (`grokWorkerDenyPlacement.ts`). Grok 1.0.34 materializes
+every `deny` entry inside bubblewrap **as the worker uid**, bind-mounting
+`$GROK_HOME/sandbox-blocked-{file,dir}` over the target, so an entry is
+placeable only when every ancestor directory is searchable by that uid and the
+target already exists and is not a symlink. One unplaceable entry makes Grok
+refuse the *whole* profile (`bwrap: Can't create file at …: Permission
+denied`), so every turn of that worker fails, not just that path. Matrix:
+`.runtime/grok-deny-placement/EVIDENCE.md` in the ecosystem folder. The rule
+therefore has two halves:
+- shape, decidable without a filesystem and asserted by the renderer: canonical,
+  and strictly below every base-profile grant (`GROK_WORKER_BASE_PROFILE_GRANTS`);
+- placement, asserted by whoever provisions the paths — root provisioning and
+  every slot recycle on the Spawnfile side, `prepareGrokWorkerAttestation`
+  before every brokered turn, and `prepareAndVerifyGrokSandbox` on the direct
+  path, which runs as the worker uid itself. The broker (uid 2100) cannot
+  descend into a `2000:<worker> 0710` runtime home, so an `EACCES` below an
+  ancestor the worker *can* search is left undecided there; root, which holds
+  `CAP_DAC_READ_SEARCH`, decides every entry.
+
+When a protected path is not placeable, the deny entry is **lifted** to the
+nearest ancestor that is — never adding `o+x` to a private directory, because a
+lift masks a superset and never widens the worker's reach. The durable
+wake-acceptance store is exactly that case: it lives under the organization's
+`state` directory, which the ownership guard secures `2000:2000 0700`, so the
+mask goes on that directory (`acceptanceStoreDenyPath` in
+`grokBrokerProjection.ts`, which refuses a mask that does not contain the
+store).
+
 Temp and spill isolation (`grokWorkerTmpAttestation.ts`, checked before every
 turn; `GROK_ENGINE_BROKER.worker.home.{privateTmp,sharedTmp,spillDirectory}`).
 Grok 1.0.34's strict profile grants shared `/tmp` and `/var/tmp` read-write

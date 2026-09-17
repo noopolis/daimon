@@ -55,6 +55,19 @@ export type OrganizationGrokBrokerProjectionOptions = Readonly<{
   limits: EngineBrokerTurnLimits;
   /** The wake-acceptance store, always denied like the Codex projection's. */
   acceptanceStorePath: string;
+  /**
+   * The deny entry that covers the acceptance store, when the store itself
+   * cannot be one.
+   *
+   * Grok 1.0.34 materializes every deny target inside bubblewrap as the worker
+   * uid, so a target whose parent directory the worker cannot search is
+   * unplaceable and makes Grok refuse the whole profile. The durable store sits
+   * under the organization's private `state` directory (`2000:2000 0700`), so a
+   * deployment that secures it that way declares the mask on that directory
+   * instead — strictly stronger, since nothing else lives there. Must contain
+   * the store; defaults to the store itself.
+   */
+  acceptanceStoreDenyPath?: string;
   /** Evaluator and host-bind paths the deployment must keep from the worker (R4). */
   denyPaths?: readonly string[];
   /** sha256 of the seccomp profile bytes the deployment runs the worker under. */
@@ -79,21 +92,26 @@ export type OrganizationGrokBrokerProjectionOptions = Readonly<{
  *
  * The agent must be a Grok agent that *declares* its model and reasoning
  * effort; nothing is defaulted. The deny list is Daimon's own protected set for
- * this agent (realm, bootstrap, peers, acceptance store) plus the caller's
- * evaluator paths, sorted and deduplicated exactly as the profile renderer
- * does. A supplied `profileSha256` that differs is refused.
+ * this agent (realm, bootstrap, peers, and the mask covering the acceptance
+ * store) plus the caller's evaluator paths, sorted and deduplicated exactly as
+ * the profile renderer does. A supplied `profileSha256` that differs is
+ * refused.
  */
 export function resolveOrganizationGrokBrokerProjection(config: unknown, agentId: string, options: OrganizationGrokBrokerProjectionOptions): OrganizationGrokBrokerProjection {
   const parsed = parseOrganizationRuntimeConfig(config);
   const agent = parsed.agents.find((entry) => entry.id === agentId);
   if (agent === undefined || agent.engine.kind !== "grok") throw new Error("Grok broker projection requires a known Grok agent");
   if (agent.engine.model === undefined || agent.engine.reasoningEffort === undefined) throw new Error("Grok broker projection requires a declared model and reasoning effort");
-  for (const [label, value] of [["workerHomePath", options.workerHomePath], ["acceptanceStorePath", options.acceptanceStorePath]] as const) {
+  const acceptanceStoreDenyPath = options.acceptanceStoreDenyPath ?? options.acceptanceStorePath;
+  for (const [label, value] of [["workerHomePath", options.workerHomePath], ["acceptanceStorePath", options.acceptanceStorePath], ["acceptanceStoreDenyPath", acceptanceStoreDenyPath]] as const) {
     if (!path.posix.isAbsolute(value) || path.posix.normalize(value) !== value || value === "/" || value.endsWith("/")) throw new Error(`Grok broker projection requires a canonical absolute ${label}`);
+  }
+  if (options.acceptanceStorePath !== acceptanceStoreDenyPath && !options.acceptanceStorePath.startsWith(`${acceptanceStoreDenyPath}/`)) {
+    throw new Error("Grok broker projection acceptance store deny path must contain the acceptance store");
   }
   if (!/^[a-f0-9]{64}$/u.test(options.seccompProfileSha256)) throw new Error("Grok broker projection requires a seccomp profile sha256");
   const model = agent.engine.model as GrokBrokerModel, reasoningEffort = agent.engine.reasoningEffort as GrokBrokerReasoningEffort;
-  const denyPaths = [...new Set([...grokSandboxProtectedPaths(agent.id, parsed.agents, [options.acceptanceStorePath]), ...(options.denyPaths ?? [])])].sort();
+  const denyPaths = [...new Set([...grokSandboxProtectedPaths(agent.id, parsed.agents, [acceptanceStoreDenyPath]), ...(options.denyPaths ?? [])])].sort();
   renderGrokWorkerSandboxProfile(denyPaths);
   const profileSha256 = grokWorkerSandboxProfileSha256(denyPaths);
   if (options.profileSha256 !== undefined && options.profileSha256 !== profileSha256) throw new Error("Grok broker projection profile digest mismatch");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, link, mkdir, mkdtemp, open, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, link, mkdir, mkdtemp, open, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { mock } from "node:test";
@@ -121,4 +121,36 @@ test("prepare refuses the current turn when a sibling registered worker's privat
   await assert.rejects(prepareGrokWorkerAttestation({ ...input, brokerGid: self.gid }, seams), (error: Error) => error.message === "Grok worker isolation attestation unavailable");
   await chmod(path.join(sibling.home, "tmp"), 0o777);
   await assert.rejects(prepareGrokWorkerAttestation({ ...input, brokerGid: self.gid }, seams), /temp isolation attestation unavailable/u);
+});
+
+test("prepare refuses a deny entry bubblewrap could not materialize, before any other leg", async (t) => {
+  // The production defect: the wake-acceptance store sits under a `0700` organization state directory,
+  // so bubblewrap — which materializes every deny target as the worker uid — could not create it and
+  // Grok refused the whole profile, failing every turn with `bwrap: Can't create file at …`.
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "daimon-guard-deny-")));
+  t.after(async () => { await chmod(path.join(root, "state"), 0o700); await rm(root, { recursive: true, force: true }); });
+  const grokHome = path.join(root, ".grok");
+  await mkdir(path.join(grokHome, "sessions"), { recursive: true });
+  await mkdir(path.join(root, "tmp"), { mode: 0o700 });
+  await mkdir(path.join(root, "state", "wake-acceptance"), { recursive: true });
+  const profile = path.join(grokHome, "sandbox.toml");
+  const events = path.join(grokHome, "sessions", "sandbox-events.jsonl");
+  await writeFile(events, ""); await chmod(events, 0o640);
+  const owner = { uid: self.uid, gid: Number((await stat(path.join(root, "tmp"))).gid) };
+  const withDeny = async (denied: string) => {
+    const text = `[profiles.daimon-strict]\nextends = "strict"\nrestrict_network = true\ndeny = ["${denied}"]\n`;
+    await chmod(profile, 0o644).catch(() => undefined);
+    await writeFile(profile, text); await chmod(profile, 0o444);
+    return { profilePath: profile, eventsPath: events, profileSha256: createHash("sha256").update(text).digest("hex"), workerUid: self.uid, brokerGid: self.gid, configSha256: "0".repeat(64) };
+  };
+  await chmod(path.join(root, "state"), 0o600);
+  await assert.rejects(
+    prepareGrokWorkerAttestation(await withDeny(path.join(root, "state", "wake-acceptance")), owner),
+    (error: Error) => /is not placeable/u.test(error.message) && error.message.includes(`cannot search ${path.join(root, "state")}`)
+  );
+  // The lift: the private directory itself is placeable, so this leg passes and a later one refuses.
+  await assert.rejects(
+    prepareGrokWorkerAttestation(await withDeny(path.join(root, "state")), owner),
+    (error: Error) => !/is not placeable/u.test(error.message)
+  );
 });
