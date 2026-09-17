@@ -78,7 +78,13 @@ export const GROK_ENGINE_BROKER = {
     bounds: { maxRequests: [1, GROK_WORKER_MAX_TURNS], maxTokens: [1, 10_000_000], timeoutMs: [1_000, 3_600_000] },
     limitReasons: ["tokens", "requests", "timeout", "none"],
     wakeMayOnlyLower: true,
-    tokenCeilingOvershoot: "at-most-one-request"
+    tokenCeilingOvershoot: "at-most-one-request",
+    maxInFlightRequests: 1,
+    // A per-request usage block above this is implausible (beyond the model
+    // context window) and treated as invalid rather than added to any total.
+    requestUsageMaxTokens: 500_000,
+    // A request whose response carries no valid usage is charged this estimate.
+    missingUsageEstimate: { inputBytesPerToken: 2, outputTokens: 4_096 }
   },
   wakeLimitEnvironment: { timeoutMs: "DAIMON_ENGINE_WAKE_TIMEOUT_MS", maxTokens: "DAIMON_ENGINE_WAKE_TOKEN_CEILING" },
   projectionVersion: "noopolis.daimon.grok-broker-projection.v1",

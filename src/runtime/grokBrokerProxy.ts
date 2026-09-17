@@ -37,7 +37,7 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     const admission=turn.meter.admit();
     if("refused" in admission){response.writeHead(429,{"content-type":"application/json","cache-control":"no-store"});response.end(JSON.stringify({error:"turn limit reached",limit:admission.refused}));return;}
     if("busy" in admission){response.writeHead(429,{"content-type":"application/json","cache-control":"no-store"});response.end('{"error":"turn request in flight"}');return;}
-    settle=(usage)=>{turn.meter.settle(admission.index,usage);settle=undefined;};
+    settle=(usage)=>{turn.meter.settle(admission.index,usage,body.byteLength);settle=undefined;};
     let result = await upstream(prepared,admission.signal);
     if (result.status === 401) { token = authority.refreshAfterRejection?await authority.refreshAfterRejection(rejectedDigest):await authority.accessToken(true);const refreshedDigest=createHash("sha256").update(token).digest("hex"); prepared = { ...prepared, headers: { ...prepared.headers, authorization: `Bearer ${token}` } }; token = ""; result = await upstream(prepared,admission.signal);if(result.status===401)await authority.markRejected(refreshedDigest); }
     settle?.(parseGrokUpstreamUsage(result.body,result.headers["content-type"]));

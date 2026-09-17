@@ -136,9 +136,9 @@ test("the wall-clock limit aborts a worker that is mid-request", async () => {
     await assert.rejects(turn("wake-4", worker, { timeoutMs: 1_000 }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.code === "limit_exceeded" && error.accounting?.limitReason === "timeout" && error.accounting.requests === 2);
     assert.ok(Date.now() - started < 1_400, "the turn ends at the deadline, not when the in-flight request returns");
     assert.equal(upstreamAborts(), 1, "the stuck upstream call is aborted, not left running");
-    assert.deepEqual((await usageRows()).map((row) => [row.reason, row.limit_reason, row.total, row.calls]), [["wake_timeout", "timeout", 2_775, 2]]);
-    // One measured row, but both admitted requests count: the killed one was sent upstream.
-    assert.deepEqual((await requestRows()).map((row) => [row.request, row.requests]), [[0, 2]]);
+    // The aborted request reported nothing, so it is charged the estimate and says so.
+    assert.deepEqual((await usageRows()).map((row) => [row.reason, row.limit_reason, row.total, row.calls, row.estimated_requests]), [["wake_timeout", "timeout", 2_775 + 4_297, 2, 1]]);
+    assert.deepEqual((await requestRows()).map((row) => [row.request, row.requests, row.usage_source, row.total]), [[0, 2, "upstream", 2_775], [1, 2, "estimated", 4_297]]);
   }, undefined, (call) => call === 2 ? 1_500 : 15);
 });
 

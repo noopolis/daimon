@@ -78,8 +78,11 @@ test("a request after the elapsed deadline is refused, and every admitted reques
   });
   const snapshot = meter.snapshot();
   assert.equal(snapshot.limitReason, "timeout");
-  assert.equal(snapshot.usage, null, "a body without usage contributes no invented zero");
-  assert.deepEqual(snapshot.timings, [{ startedAt: new Date(1_000_000).toISOString(), endedAt: new Date(1_000_000).toISOString() }]);
+  // A body without usage is never a zero: it is charged the conservative estimate (402-byte body).
+  const estimate = { input: 201, cacheRead: 0, cacheWrite: 0, output: 4_096, total: 4_297 };
+  assert.deepEqual(snapshot.usage, estimate);
+  assert.equal(snapshot.estimatedRequests, 1);
+  assert.deepEqual(snapshot.timings, [{ startedAt: new Date(1_000_000).toISOString(), endedAt: new Date(1_000_000).toISOString(), usage: estimate, estimated: true }]);
 });
 
 test("a turn without a registered meter is never forwarded", async () => {
@@ -110,7 +113,7 @@ test("at most one upstream request is in flight per turn: an overlapping request
   assert.ok("index" in first);
   assert.deepEqual(meter.admit(), { busy: true });
   assert.equal(meter.snapshot().requests, 1);
-  meter.settle(first.index, { input: 60, cacheRead: 0, cacheWrite: 0, output: 60, total: 120 });
+  meter.settle(first.index, { input: 60, cacheRead: 0, cacheWrite: 0, output: 60, total: 120 }, 0);
   assert.deepEqual(meter.admit(), { refused: "tokens" }, "once settled, the next request sees the reported total");
 
   let release!: () => void; let calls = 0;
@@ -154,4 +157,24 @@ test("tripping a limit aborts the in-flight upstream call instead of letting it 
     assert.equal((await pending).status, 503);
     assert.deepEqual(meter.admit(), { refused: "timeout" });
   } finally { await proxy.close(); }
+});
+
+test("an implausible per-request usage block is never added, and missing usage still trips the token ceiling", async () => {
+  // Mutation guard: without the plausibility bound this adds 400 billion tokens to the total.
+  assert.equal(parseGrokUpstreamUsage(sse({ prompt_tokens: 400_000_000_000, completion_tokens: 1 }), "text/event-stream"), undefined);
+  assert.equal(parseGrokUpstreamUsage(sse({ prompt_tokens: 499_990, completion_tokens: 11 }), "text/event-stream"), undefined);
+  assert.equal(parseGrokUpstreamUsage(sse({ prompt_tokens: 499_990, completion_tokens: 10 }), "text/event-stream")?.total, 500_000);
+  const huge = new GrokBrokerTurnMeter({ maxRequests: 32, maxTokens: 1_000_000, timeoutMs: 60_000 });
+  await withProxy({ prompt_tokens: 400_000_000_000, completion_tokens: 1 }, huge, async (send) => { assert.equal((await send()).status, 200); });
+  assert.deepEqual([huge.snapshot().tokens, huge.snapshot().estimatedRequests], [4_297, 1]);
+
+  // Mutation guard: settling a usage-less response as zero lets this turn run to maxRequests.
+  const blind = new GrokBrokerTurnMeter({ maxRequests: 32, maxTokens: 10_000, timeoutMs: 60_000 });
+  await withProxy(undefined, blind, async (send, calls) => {
+    const statuses = [];
+    for (let index = 0; index < 5; index++) statuses.push((await send()).status);
+    assert.deepEqual(statuses, [200, 200, 200, 429, 429]);
+    assert.equal(calls(), 3);
+  });
+  assert.deepEqual([blind.snapshot().limitReason, blind.snapshot().tokens, blind.snapshot().estimatedRequests], ["tokens", 12_891, 3]);
 });

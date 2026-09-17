@@ -38,3 +38,10 @@ test("frames repeating one message id are one request, and a torn line is skippe
 test("the captured fixture carries no capturing machine's environment", async () => {
   assert.doesNotMatch(await fixture(), /\/Users\/|\/private\/|scratchpad|\/home\//u);
 });
+
+test("a per-request stream block beyond the context-window bound is invalid, not counted", async () => {
+  const lines = (await fixture()).split("\n");
+  const index = lines.findIndex((line) => line.includes('"msg_1"'));
+  lines[index] = lines[index]!.replace('"input_tokens":109', '"input_tokens":900000000');
+  assert.deepEqual(decodeGrokStreamUsage(lines.join("\n")).requests, []);
+});

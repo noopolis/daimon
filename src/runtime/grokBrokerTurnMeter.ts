@@ -1,7 +1,9 @@
+import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
 import { sumEngineBrokerTurnUsage, type EngineBrokerLimitReason, type EngineBrokerTurnLimits, type EngineBrokerTurnUsage } from "./engineBrokerTurnAccounting.js";
 
-export type GrokBrokerRequestTiming = Readonly<{ startedAt: string; endedAt?: string; usage?: EngineBrokerTurnUsage }>;
-export type GrokBrokerTurnMeterSnapshot = Readonly<{ requests: number; tokens: number; limitReason: EngineBrokerLimitReason; usage: EngineBrokerTurnUsage | null; timings: readonly GrokBrokerRequestTiming[] }>;
+/** `estimated` marks a request whose response carried no valid usage and was charged {@link estimateGrokRequestUsage}. */
+export type GrokBrokerRequestTiming = Readonly<{ startedAt: string; endedAt?: string; usage?: EngineBrokerTurnUsage; estimated?: true }>;
+export type GrokBrokerTurnMeterSnapshot = Readonly<{ requests: number; tokens: number; limitReason: EngineBrokerLimitReason; usage: EngineBrokerTurnUsage | null; estimatedRequests: number; timings: readonly GrokBrokerRequestTiming[] }>;
 
 /**
  * The proxy's per-turn spend gate.
@@ -34,7 +36,7 @@ export type GrokBrokerTurnMeterSnapshot = Readonly<{ requests: number; tokens: n
  */
 export class GrokBrokerTurnMeter {
   private readonly startedAt: number;
-  private readonly timings: { startedAt: string; endedAt?: string; usage?: EngineBrokerTurnUsage }[] = [];
+  private readonly timings: { startedAt: string; endedAt?: string; usage?: EngineBrokerTurnUsage; estimated?: true }[] = [];
   private tokens = 0;
   private reason: EngineBrokerLimitReason = "none";
   private inFlight: { index: number; controller: AbortController } | undefined;
@@ -57,15 +59,20 @@ export class GrokBrokerTurnMeter {
     return { index: this.inFlight.index, signal: controller.signal };
   }
 
-  /** Records one admitted request's end and its upstream-reported usage, when the body carried any. */
-  settle(index: number, usage: EngineBrokerTurnUsage | undefined): void {
+  /**
+   * Records one admitted request's end and its usage. A response without valid
+   * usage (absent, malformed, implausible, or a failed/aborted call) is charged
+   * a conservative estimate from the request body size, so a missing `usage`
+   * can never silently disable the token ceiling.
+   */
+  settle(index: number, usage: EngineBrokerTurnUsage | undefined, requestBytes: number): void {
     const timing = this.timings[index];
     if (timing === undefined || timing.endedAt !== undefined) return;
     if (this.inFlight?.index === index) this.inFlight = undefined;
     timing.endedAt = new Date(this.now()).toISOString();
-    if (usage === undefined) return;
-    timing.usage = usage;
-    this.tokens += usage.total;
+    if (usage === undefined) { timing.usage = estimateGrokRequestUsage(requestBytes); timing.estimated = true; }
+    else timing.usage = usage;
+    this.tokens += timing.usage.total;
   }
 
   /** Trips a limit from outside the request path (the broker's wall-clock timer). */
@@ -81,9 +88,17 @@ export class GrokBrokerTurnMeter {
 
   snapshot(): GrokBrokerTurnMeterSnapshot {
     const measured = this.timings.flatMap((timing) => timing.usage === undefined ? [] : [timing.usage]);
-    return { requests: this.timings.length, tokens: this.tokens, limitReason: this.reason, usage: sumEngineBrokerTurnUsage(measured), timings: this.timings.map((timing) => Object.freeze({ ...timing })) };
+    return { requests: this.timings.length, tokens: this.tokens, limitReason: this.reason, usage: sumEngineBrokerTurnUsage(measured), estimatedRequests: this.timings.filter((timing) => timing.estimated === true).length, timings: this.timings.map((timing) => Object.freeze({ ...timing })) };
   }
 }
+
+const { requestUsageMaxTokens, missingUsageEstimate } = GROK_ENGINE_BROKER.turnLimits;
+
+/** The charge for a request without valid usage: `ceil(bodyBytes / 2)` input plus a fixed output allowance. */
+export const estimateGrokRequestUsage = (requestBytes: number): EngineBrokerTurnUsage => {
+  const input = Math.ceil(Math.max(0, requestBytes) / missingUsageEstimate.inputBytesPerToken), output = missingUsageEstimate.outputTokens;
+  return { input, cacheRead: 0, cacheWrite: 0, output, total: input + output };
+};
 
 type JsonRecord = Record<string, unknown>;
 const isRecord = (value: unknown): value is JsonRecord => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -98,7 +113,9 @@ const count = (value: unknown): number | undefined => typeof value === "number" 
  * include cached tokens; they are split into disjoint buckets here, and any
  * reasoning tokens reported outside `completion_tokens` (visible as
  * `total_tokens` above prompt + completion) are folded into `output` so the
- * total invariant holds. A malformed block is ignored, never zero-filled.
+ * total invariant holds. A malformed block, or one whose total exceeds
+ * `GROK_ENGINE_BROKER.turnLimits.requestUsageMaxTokens`, is invalid: never
+ * zero-filled and never added — the meter charges an estimate instead.
  */
 export function parseGrokUpstreamUsage(body: Uint8Array, contentType: string | undefined): EngineBrokerTurnUsage | undefined {
   const text = Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString("utf8");
@@ -133,5 +150,6 @@ function decodeOpenAiUsage(usage: JsonRecord): EngineBrokerTurnUsage | undefined
   const completionDetails = isRecord(usage.completion_tokens_details) ? usage.completion_tokens_details : {};
   const reasoning = count(completionDetails.reasoning_tokens);
   const output = total - prompt;
+  if (total > requestUsageMaxTokens) return undefined;
   return { input: prompt - cached, cacheRead: cached, cacheWrite: 0, output, total, ...(reasoning === undefined || reasoning > output ? {} : { reasoning }) };
 }

@@ -76,7 +76,7 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     const usage = decoded.usage === undefined ? streamOrMeterUsage(stream, snapshot) : usageOf(decoded.usage);
     const accounting = { outcome: "completed", usage, model: declared, requests: requestCount(stream, snapshot), limitReason: "none" } as const;
     const completed = { version: request.version, kind: "completed", requestId: request.requestId, turnId, text: decoded.text, workerPid: result.workerPid, workerUid: result.workerUid, workerStartTime: result.startTicks.toString(), ...accounting } as const;
-    await finishBrokerTurnWithUsage(deps.turns, request, completed, metering, { notionalUsd: decoded.usage?.notionalUsd ?? 0, complete: decoded.usage?.complete ?? false, requests: requestRows(stream, snapshot), ...(stream.sessionId === undefined ? {} : { session: stream.sessionId }) });
+    await finishBrokerTurnWithUsage(deps.turns, request, completed, metering, { notionalUsd: decoded.usage?.notionalUsd ?? 0, complete: decoded.usage?.complete ?? false, estimatedRequests: snapshot.estimatedRequests, requests: requestRows(stream, snapshot), ...(stream.sessionId === undefined ? {} : { session: stream.sessionId }) });
     return { text: completed.text, workerPid: completed.workerPid, workerUid: completed.workerUid, workerStartTime: completed.workerStartTime, ...accounting };
   } catch (error) {
     const snapshot = meter.snapshot();
@@ -86,7 +86,7 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     const accounting = { outcome: "failed", usage: streamOrMeterUsage(stream, snapshot), model: declared, requests: requestCount(stream, snapshot), limitReason: snapshot.limitReason } as const;
     const failed: EngineBrokerTerminalResponse = { version: request.version, kind: "failed", requestId: request.requestId, turnId, code, ...(diagnostic ? { diagnostic } : {}), ...accounting };
     const reason = snapshot.limitReason !== "none" ? limitReasonFor[snapshot.limitReason] : rejected ? "turn_rejected" : "unknown";
-    await finishBrokerTurnWithUsage(deps.turns, request, failed, metering, { notionalUsd: 0, complete: false, reason, requests: requestRows(stream, snapshot), ...(stream?.sessionId === undefined ? {} : { session: stream.sessionId }) });
+    await finishBrokerTurnWithUsage(deps.turns, request, failed, metering, { notionalUsd: 0, complete: false, reason, estimatedRequests: snapshot.estimatedRequests, requests: requestRows(stream, snapshot), ...(stream?.sessionId === undefined ? {} : { session: stream.sessionId }) });
     throw new EngineBrokerTurnFailure(code, diagnostic, accounting);
   } finally {
     clearTimeout(timer); signal?.removeEventListener("abort", onAbort); meter.abortInFlight();
@@ -117,8 +117,8 @@ function streamOrMeterUsage(stream: GrokStreamUsage | undefined, snapshot: GrokB
 function requestRows(stream: GrokStreamUsage | undefined, snapshot: GrokBrokerTurnMeterSnapshot): BrokerTurnMeteringDetail["requests"] {
   if (stream !== undefined && stream.requests.length > 0) {
     const timed = snapshot.timings.length === stream.requests.length;
-    return stream.requests.map((value, index) => ({ ...value, ...(timed ? clock(snapshot.timings[index]!) : {}) }));
+    return stream.requests.map((value, index) => ({ ...value, usageSource: "stream" as const, ...(timed ? clock(snapshot.timings[index]!) : {}) }));
   }
-  return snapshot.timings.flatMap((timing, index) => timing.usage === undefined ? [] : [{ index, ...usageOf(timing.usage), ...clock(timing) }]);
+  return snapshot.timings.flatMap((timing, index) => timing.usage === undefined ? [] : [{ index, ...usageOf(timing.usage), usageSource: timing.estimated === true ? "estimated" as const : "upstream" as const, ...clock(timing) }]);
 }
 const clock = (timing: GrokBrokerTurnMeterSnapshot["timings"][number]) => ({ startedAt: timing.startedAt, ...(timing.endedAt === undefined ? {} : { endedAt: timing.endedAt }) });

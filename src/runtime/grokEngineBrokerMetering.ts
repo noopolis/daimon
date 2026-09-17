@@ -9,7 +9,7 @@ export type BrokerTurnMetering = Readonly<{
   agentId: string;
   wakeId: string;
 }>;
-export type BrokerTurnMeteringDetail = Readonly<{ notionalUsd: number; complete: boolean; reason?: TurnUsageFailureReason; requests: readonly GrokTurnRequest[]; session?: string }>;
+export type BrokerTurnMeteringDetail = Readonly<{ notionalUsd: number; complete: boolean; reason?: TurnUsageFailureReason; requests: readonly GrokTurnRequest[]; session?: string; estimatedRequests: number }>;
 
 /**
  * Seal a terminal turn, then meter it. The broker is the single writer.
@@ -37,7 +37,7 @@ export async function finishBrokerTurnWithUsage(turns: EngineBrokerTurnRegistry,
     agent: metering.agentId, wake: metering.wakeId, engine: "grok",
     usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, total: usage.total, calls: terminal.requests, notionalUsd: detail.notionalUsd, complete: detail.complete },
     outcome: terminal.kind === "completed" ? { status: "completed" } : { status: "failed", reason: detail.reason ?? "unknown" },
-    turn: terminal.turnId, limitReason: terminal.limitReason, model: terminal.model
+    turn: terminal.turnId, limitReason: terminal.limitReason, model: terminal.model, estimatedRequests: detail.estimatedRequests
   });
   await recordGrokTurnRequests(metering.requestLedgerPath, { agent: metering.agentId, wake: metering.wakeId, turn: terminal.turnId, model: terminal.model, requests: detail.requests, requestCount: terminal.requests, ...(detail.session === undefined ? {} : { session: detail.session }) });
 }

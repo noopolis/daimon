@@ -105,7 +105,12 @@ const requestClockFields = (request: Readonly<{ startedAt?: string; endedAt?: st
 });
 
 /** One Grok broker model request: usage from the worker stream, timing from the proxy. */
-export type GrokTurnRequest = Readonly<{ index: number; input: number; cacheRead: number; cacheWrite: number; output: number; total: number; startedAt?: string; endedAt?: string }>;
+/**
+ * `usageSource`: `stream` (the worker's own per-request frame), `upstream`
+ * (the provider response the proxy saw), or `estimated` (no valid usage; the
+ * proxy's conservative charge, see `grokBrokerTurnMeter.ts`).
+ */
+export type GrokTurnRequest = Readonly<{ index: number; input: number; cacheRead: number; cacheWrite: number; output: number; total: number; startedAt?: string; endedAt?: string; usageSource?: "stream" | "upstream" | "estimated" }>;
 /**
  * `requestCount` is the turn's admitted request count when it exceeds the rows:
  * a killed turn's in-flight request was sent upstream but never reported usage,
@@ -140,6 +145,7 @@ export const renderGrokTurnRequestLines = (entry: GrokTurnRequestEntry): string 
     cache_write: request.cacheWrite,
     output: request.output,
     total: request.total,
+    ...(request.usageSource === undefined ? {} : { usage_source: request.usageSource }),
     ...requestClockFields(request)
   })}\n`).join("");
 };

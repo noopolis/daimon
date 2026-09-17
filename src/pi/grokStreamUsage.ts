@@ -1,3 +1,5 @@
+import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
+
 /**
  * Per-request token accounting read off a Grok `streaming-messages-json`
  * stream.
@@ -27,7 +29,10 @@ const decodeUsage = (usage: unknown): Omit<GrokRequestUsage, "index"> | undefine
   if (!isRecord(usage)) return undefined;
   const input = tokenCount(usage.input_tokens), output = tokenCount(usage.output_tokens), cacheRead = tokenCount(usage.cache_read_input_tokens), cacheWrite = tokenCount(usage.cache_creation_input_tokens);
   if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined) return undefined;
-  return { input, cacheRead, cacheWrite, output, total: input + cacheRead + cacheWrite + output };
+  const total = input + cacheRead + cacheWrite + output;
+  // Beyond the model context window one request cannot have spent it: invalid, like a malformed block.
+  if (total > GROK_ENGINE_BROKER.turnLimits.requestUsageMaxTokens) return undefined;
+  return { input, cacheRead, cacheWrite, output, total };
 };
 
 export const decodeGrokStreamUsage = (output: string): GrokStreamUsage => {
