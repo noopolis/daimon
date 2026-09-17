@@ -2,9 +2,26 @@ import { constants, type Stats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
 
+import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
 import type { OrganizationRuntimeAgentConfig } from "./organizationRuntime.js";
 
 type Identity = Readonly<{ dev: number; ino: number; uid: number; mode: number }>;
+/**
+ * `private` is every engine's runtime home: 0700, nothing but the runtime user.
+ *
+ * `worker-traversable` is the brokered Grok shape, and only that shape: the
+ * agent's own sandboxed worker runs as another uid and must be able to *walk
+ * into* this home to read the setgid `tool-output/` spill directory the
+ * truncation notice sends it to (`GROK_ENGINE_BROKER.worker.home.organizationRuntimeHome`).
+ * Traverse-only means `0710`: no group read (the worker cannot list the home or
+ * see the acceptance store, telemetry, memory or credential names) and no group
+ * write. Anything wider — `0711`, `0750`, `0770`, any world bit — is refused,
+ * as is a group that is not a worker group. Daimon cannot tell *which* worker
+ * gid belongs to this agent; the per-slot mapping is the deployment's
+ * provisioning contract, re-checked by the slot preflight receipt's worker-uid
+ * canaries.
+ */
+type DirectoryShape = "safe" | "private" | "worker-traversable";
 type Directory = { readonly configured: string; readonly real: string; readonly fd: Awaited<ReturnType<typeof open>>; readonly identity: Identity; closed: boolean };
 
 /**
@@ -20,6 +37,11 @@ export type OrganizationRuntimePathAuthority = Readonly<{
   close(): Promise<void>;
 }>;
 
+/** Only a brokered Grok agent's home is worker-traversable; every other engine keeps 0700. */
+function runtimeHomeShape(agent: OrganizationRuntimeAgentConfig): DirectoryShape {
+  return agent.engine.kind === "grok" ? "worker-traversable" : "private";
+}
+
 export async function prepareOrganizationRuntimePaths(
   agents: readonly OrganizationRuntimeAgentConfig[]
 ): Promise<OrganizationRuntimePathAuthority> {
@@ -28,7 +50,7 @@ export async function prepareOrganizationRuntimePaths(
   try {
     for (const agent of agents) {
       workspaces.set(agent.id, await verifyDirectory(agent.workspacePath, "workspacePath", "safe"));
-      homes.set(agent.id, await verifyDirectory(agent.runtimeHomePath, "runtimeHomePath", "private"));
+      homes.set(agent.id, await verifyDirectory(agent.runtimeHomePath, "runtimeHomePath", runtimeHomeShape(agent)));
     }
     const roots = [...workspaces.values(), ...homes.values()];
     for (let left = 0; left < roots.length; left += 1) for (let right = left + 1; right < roots.length; right += 1) {
@@ -51,7 +73,7 @@ export async function prepareOrganizationRuntimePaths(
     if (workspace === undefined || home === undefined) throw new Error(`no runtime path authority for ${agent.id}`);
     await Promise.all([
       verifyIdentity(workspace, "workspacePath", "safe"),
-      verifyIdentity(home, "runtimeHomePath", "private")
+      verifyIdentity(home, "runtimeHomePath", runtimeHomeShape(agent))
     ]);
   };
   return {
@@ -70,10 +92,10 @@ export async function prepareOrganizationRuntimePaths(
   };
 }
 
-async function verifyDirectory(configured: string, label: string, mode: "safe" | "private"): Promise<Directory> {
+async function verifyDirectory(configured: string, label: string, shape: DirectoryShape): Promise<Directory> {
   await assertNoSymlinkComponents(configured);
   const before = await lstat(configured);
-  assertDirectory(before, label, mode);
+  assertDirectory(before, label, shape);
   const fd = await open(configured, constants.O_RDONLY | directoryFlag() | noFollow());
   try {
     const opened = await fd.stat();
@@ -89,7 +111,7 @@ async function verifyDirectory(configured: string, label: string, mode: "safe" |
   }
 }
 
-async function verifyIdentity(directory: Directory, label: string, mode: "safe" | "private"): Promise<void> {
+async function verifyIdentity(directory: Directory, label: string, shape: DirectoryShape): Promise<void> {
   if (directory.closed) throw new Error(`${label} authority is closed`);
   await assertNoSymlinkComponents(directory.configured);
   const entry = await lstat(directory.configured);
@@ -97,7 +119,7 @@ async function verifyIdentity(directory: Directory, label: string, mode: "safe" 
   if (!sameIdentity(identity(entry), directory.identity) || !sameIdentity(identity(opened), directory.identity)) {
     throw new Error(`${label} changed after readiness validation`);
   }
-  assertDirectory(entry, label, mode);
+  assertDirectory(entry, label, shape);
   if (await realpath(directory.configured) !== directory.real) throw new Error(`${label} changed after readiness validation`);
 }
 
@@ -112,12 +134,28 @@ async function assertNoSymlinkComponents(target: string): Promise<void> {
   }
 }
 
-function assertDirectory(entry: Stats, label: string, mode: "safe" | "private"): void {
+/** Identity of the process Daimon runs as; a seam so every refusal is testable unprivileged. */
+export type RuntimeIdentity = Readonly<{ uid: number; gid: number; firstWorkerUid?: number }>;
+type DirectoryEntry = Readonly<{ uid: number; gid: number; mode: number; isDirectory(): boolean; isSymbolicLink(): boolean }>;
+
+/** Pure shape check for a caller-prepared runtime root. */
+export function assertRuntimeDirectory(entry: DirectoryEntry, label: string, shape: DirectoryShape, runtime: RuntimeIdentity): void {
   if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error(`${label} must be an existing real directory`);
-  if (entry.uid !== process.getuid?.()) throw new Error(`${label} must be owned by the runtime user`);
-  const permissions = entry.mode & 0o777;
-  if (mode === "private" && permissions !== 0o700) throw new Error(`${label} must have mode 0700`);
-  if (mode === "safe" && (permissions & 0o022) !== 0) throw new Error(`${label} must not grant group or other write access`);
+  if (entry.uid !== runtime.uid) throw new Error(`${label} must be owned by the runtime user`);
+  const permissions = Number(entry.mode) & 0o7777;
+  if (shape === "private" && permissions !== 0o700) throw new Error(`${label} must have mode 0700`);
+  if (shape === "worker-traversable") {
+    const home = GROK_ENGINE_BROKER.worker.home.organizationRuntimeHome;
+    if (permissions !== home.mode) throw new Error(`${label} must have mode 0710 for a brokered Grok agent`);
+    if (entry.gid < (runtime.firstWorkerUid ?? GROK_ENGINE_BROKER.identities.firstWorkerUid) || entry.gid === runtime.gid) {
+      throw new Error(`${label} must be group-owned by the agent's Grok worker group`);
+    }
+  }
+  if (shape === "safe" && (permissions & 0o022) !== 0) throw new Error(`${label} must not grant group or other write access`);
+}
+
+function assertDirectory(entry: Stats, label: string, shape: DirectoryShape): void {
+  assertRuntimeDirectory(entry, label, shape, { uid: process.getuid?.() ?? -1, gid: process.getgid?.() ?? -1 });
 }
 
 function identity(entry: Stats): Identity { return { dev: entry.dev, ino: entry.ino, uid: entry.uid, mode: entry.mode & 0o7777 }; }

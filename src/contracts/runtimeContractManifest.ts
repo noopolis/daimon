@@ -71,6 +71,10 @@ export const GROK_ENGINE_BROKER = {
       // denied, so the deployment keeps them from every worker by mode: root-owned, a non-worker
       // group (< 2200), others read-only (Grok needs to open the directory) and no search/write.
       sharedTmp: { paths: ["/tmp", "/var/tmp"], uid: 0, maxGroupExclusive: 2_200, otherMode: 0o4, mode: 0o1774 },
+      // The organization runtime home of a brokered Grok agent: traverse-only for the
+      // worker group so the worker can reach `tool-output/` and nothing else (no group
+      // read, no group write, no world bits; `physicalReadiness.ts` refuses anything else).
+      organizationRuntimeHome: { owner: "organization", group: "worker", mode: 0o710 },
       // Spilled tool output the worker reads with read_file: setgid directory in the worker's group,
       // files written 0640 by the runtime, never other-readable.
       spillDirectory: { relativeToRuntimeHome: "tool-output", owner: "organization", group: "worker", mode: 0o2750, fileMode: 0o640 }

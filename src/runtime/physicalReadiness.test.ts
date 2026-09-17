@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { prepareOrganizationRuntimePaths } from "./physicalReadiness.js";
+import { assertRuntimeDirectory, prepareOrganizationRuntimePaths } from "./physicalReadiness.js";
 import type { OrganizationRuntimeAgentConfig } from "./organizationRuntime.js";
 
 const agent = (workspacePath: string, runtimeHomePath: string): OrganizationRuntimeAgentConfig => ({
@@ -45,4 +45,69 @@ test("preflight requires safe workspace and private runtime roots, and proves ph
     await chmod(workspace, 0o700);
     await assert.rejects(prepareOrganizationRuntimePaths([agent(workspace, workspace)]), /overlap/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+const withRoots = async (body: (root: string) => Promise<void>): Promise<void> => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-physical-"));
+  try { await body(root); } finally { await rm(root, { force: true, recursive: true }); }
+};
+
+const runtime = { uid: 2000, gid: 2000, firstWorkerUid: 2200 };
+const entry = (mode: number, uid = 2000, gid = 2000, kind: "dir" | "link" = "dir") => ({
+  uid, gid, mode: (kind === "dir" ? 0o040000 : 0o120000) | mode,
+  isDirectory: () => kind === "dir", isSymbolicLink: () => kind === "link"
+});
+
+test("a brokered Grok runtime home is accepted at exactly 2000:<worker gid> 0710 and nothing wider", () => {
+  assert.doesNotThrow(() => assertRuntimeDirectory(entry(0o710, 2000, 2200), "runtimeHomePath", "worker-traversable", runtime));
+  assert.doesNotThrow(() => assertRuntimeDirectory(entry(0o710, 2000, 2201), "runtimeHomePath", "worker-traversable", runtime));
+  const refusals: Record<string, ReturnType<typeof entry>> = {
+    "0700 (no worker traversal, pre-P1b layout)": entry(0o700, 2000, 2200),
+    "0711 (world traverse)": entry(0o711, 2000, 2200),
+    "0712": entry(0o712, 2000, 2200),
+    "0714": entry(0o714, 2000, 2200),
+    "0730 (group write)": entry(0o730, 2000, 2200),
+    "0750 (group read)": entry(0o750, 2000, 2200),
+    "0770": entry(0o770, 2000, 2200),
+    "0777": entry(0o777, 2000, 2200),
+    "2710 (setgid)": entry(0o2710, 2000, 2200),
+    "owned by a worker": entry(0o710, 2200, 2200),
+    "owned by root": entry(0o710, 0, 2200),
+    "group is the runtime's own": entry(0o710, 2000, 2000),
+    "group below the worker range": entry(0o710, 2000, 2100),
+    "a symlink": entry(0o710, 2000, 2200, "link")
+  };
+  for (const [label, candidate] of Object.entries(refusals)) {
+    assert.throws(() => assertRuntimeDirectory(candidate, "runtimeHomePath", "worker-traversable", runtime), /runtimeHomePath/u, label);
+  }
+});
+
+test("every other engine's runtime home stays exactly 0700, and a workspace stays group/other-write free", () => {
+  assert.doesNotThrow(() => assertRuntimeDirectory(entry(0o700), "runtimeHomePath", "private", runtime));
+  for (const mode of [0o710, 0o701, 0o750, 0o770, 0o711, 0o755, 0o2700]) {
+    assert.throws(() => assertRuntimeDirectory(entry(mode, 2000, 2200), "runtimeHomePath", "private", runtime), /must have mode 0700/u, mode.toString(8));
+  }
+  // The brokered Grok workspace contract (2000:<worker> 0750) passes the workspace shape.
+  assert.doesNotThrow(() => assertRuntimeDirectory(entry(0o750, 2000, 2200), "workspacePath", "safe", runtime));
+  assert.doesNotThrow(() => assertRuntimeDirectory(entry(0o700), "workspacePath", "safe", runtime));
+  for (const mode of [0o770, 0o720, 0o702, 0o777]) {
+    assert.throws(() => assertRuntimeDirectory(entry(mode, 2000, 2200), "workspacePath", "safe", runtime), /must not grant group or other write/u, mode.toString(8));
+  }
+});
+
+test("the engine kind decides the runtime home shape on a real filesystem", async () => {
+  await withRoots(async (root) => {
+    const workspace = path.join(root, "workspace"), home = path.join(root, "home");
+    await mkdir(workspace, { mode: 0o700 });
+    await mkdir(home, { mode: 0o710 });
+    const grok = { ...agent(workspace, home), engine: { kind: "grok" as const, model: "grok-4.6" as const, reasoningEffort: "low" as const } };
+    // 0710 reaches the Grok branch: only the worker-group requirement is left to refuse it here.
+    await assert.rejects(prepareOrganizationRuntimePaths([grok]), /group-owned by the agent's Grok worker group/u);
+    // The same home refuses a Codex agent for being wider than 0700.
+    await assert.rejects(prepareOrganizationRuntimePaths([agent(workspace, home)]), /must have mode 0700/u);
+    await chmod(home, 0o700);
+    const authority = await prepareOrganizationRuntimePaths([agent(workspace, home)]);
+    await authority.close();
+    await assert.rejects(prepareOrganizationRuntimePaths([grok]), /must have mode 0710 for a brokered Grok agent/u);
+  });
 });
