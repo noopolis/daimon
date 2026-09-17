@@ -175,7 +175,8 @@ async function forward(
   const stream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
   try {
     for await (const chunk of stream) {
-      if (!response.write(chunk as Uint8Array)) await new Promise<void>((resolve) => response.once("drain", resolve));
+      if (response.destroyed || response.writableEnded) throw new Error("MCP tunnel closed");
+      if (!response.write(chunk as Uint8Array)) await awaitMcpTunnelDrain(response, signal);
     }
     response.end();
   } catch {
@@ -185,6 +186,38 @@ async function forward(
   } finally {
     stream.destroy();
   }
+}
+
+/**
+ * Waits for a backpressured tunnel to drain, or for the tunnel to end —
+ * whichever happens first, but always one of them.
+ *
+ * A bare `once("drain")` never settles for a client that hung up mid-write:
+ * `drain` cannot fire on a socket nobody is reading, and neither the
+ * response's own `close` nor the turn's abort woke that await. The GET SSE
+ * tunnel stays open for a whole session, so the handler — and the upstream
+ * call it was relaying — leaked for the life of the broker process, with no
+ * refusal, no status and no line anywhere to read. Every outcome settles this
+ * now, and every outcome but an actual drain *rejects*, so the caller tears
+ * the tunnel down instead of writing into a socket that is gone.
+ *
+ * Exported for its own test: a hang is only observable from inside.
+ */
+export function awaitMcpTunnelDrain(response: ServerResponse, signal: AbortSignal): Promise<void> {
+  if (response.destroyed || response.writableEnded) return Promise.reject(new Error("MCP tunnel closed"));
+  if (signal.aborted) return Promise.reject(new Error("MCP tunnel aborted"));
+  return new Promise<void>((resolve, reject) => {
+    const settle = (finish: () => void) => (): void => {
+      response.off("drain", onDrain); response.off("close", onClosed); response.off("error", onClosed);
+      signal.removeEventListener("abort", onAborted);
+      finish();
+    };
+    const onDrain = settle(resolve);
+    const onClosed = settle(() => reject(new Error("MCP tunnel closed")));
+    const onAborted = settle(() => reject(new Error("MCP tunnel aborted")));
+    response.once("drain", onDrain); response.once("close", onClosed); response.once("error", onClosed);
+    signal.addEventListener("abort", onAborted, { once: true });
+  });
 }
 
 async function bounded(request: AsyncIterable<unknown>): Promise<Buffer> {
