@@ -353,6 +353,28 @@ is swallowed, because instrumentation must never fail a wake. The existing
 ledger's version, path, and field list are untouched, so Spawnfile's
 `v`-pinned reader is unaffected.
 
+Each Grok row also carries `tool_calls`: the tool-call NAMES that request's
+response carried, read by the proxy from the body it already buffers for usage
+(`parseGrokResponseToolNames` in `grokBrokerTurnMeter.ts`). Timings and tokens
+alone cannot answer "did the model ever *try* to call `use_tool` or
+`search_tool`", which is exactly the question two live turns left open. Names
+only — never arguments, never message content, never a bearer; a `name` that is
+not a plain short identifier is recorded as `<invalid>` rather than passed
+through, and the list is bounded at `GROK_REQUEST_TOOL_CALLS_MAX` (16) entries
+with a `<truncated>` last entry, so a pathological response cannot write an
+unbounded row. Absence stays absence, as everywhere in these ledgers: a decoded
+response that called nothing records `[]`, and a response that could not be
+decoded records *no field at all*, because a fabricated empty list is
+byte-identical to a measured one. On the stream row path the names are attached
+only when the proxy's timings and the worker's stream requests are aligned
+request-for-request, since an unaligned index would credit one request's attempt
+to another. It is an additive field inside the unchanged
+`noopolis.daimon.turn-requests.v1` row and deliberately not a version bump:
+Spawnfile's reader pins `v` and ignores fields it does not know, and Paideia
+only relocates this stream's path. The whole path is advisory — the parse is
+wrapped, and nothing it does can refuse, delay, or fail a turn, or reach the
+spend gate.
+
 `testRuntimeSubprocess.ts` is an unexported, explicit-test-only JSONL process
 surface for exercising the real control, schedule, and acceptance paths with a
 controlled clock and deterministic scripted cognition. Its ephemeral loopback

@@ -224,6 +224,12 @@ test("a response's tool-call names are read, bounded, and stripped of everything
   // A name that is not a plain short identifier is counted, never passed through.
   assert.deepEqual(parseGrokResponseToolNames(events(callDeltas(["ok_tool", "a b/c", "x".repeat(65), "inject\nline"])), "text/event-stream"), ["ok_tool", GROK_TOOL_CALL_INVALID, GROK_TOOL_CALL_INVALID, GROK_TOOL_CALL_INVALID]);
 
+  // A hostile but decodable shape yields no attempt instead of throwing:
+  // instrumentation must never be able to fail the turn it observes.
+  assert.deepEqual(parseGrokResponseToolNames(events([
+    { choices: "not-an-array" }, { choices: [null, 7, { delta: { tool_calls: "no" } }, { message: { tool_calls: [null, { function: null }, { function: { name: 42 } }, { function: { name: "" } }] } }] }
+  ]), "text/event-stream"), []);
+
   // Mutation guard: unbounded, a pathological response writes 400 names into one row.
   const many = parseGrokResponseToolNames(events(callDeltas(Array.from({ length: 400 }, (_value, index) => `tool_${index}`))), "text/event-stream");
   assert.equal(many!.length, GROK_REQUEST_TOOL_CALLS_MAX);
