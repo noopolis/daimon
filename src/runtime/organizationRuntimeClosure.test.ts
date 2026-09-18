@@ -137,12 +137,19 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5_000): Pr
 }
 
 /**
- * The other half, and the one that keeps the field trustworthy. A dispatcher halted
- * mid-turn reclaims the same way, and has no wake outcome to name: the record must
- * stay silent rather than borrow `host_stopping`, which reads as an account of the
- * cause and would be acted on as one. Absence is the honest answer here.
+ * The other half, and the one the reclaim path kept getting wrong. A wake that
+ * COMPLETED is a wake outcome; the dispatcher happening to be halting when it
+ * lands is not. Keying the reclaim on the host's own `stopping` latch discarded
+ * that outcome and wrote `accepted, deferred: false, execution retained, no code`
+ * — a record byte-identical to "never ran" and to "ran but forgotten". Production
+ * survived it because a restart re-delivers and the agent redoes the work; a
+ * one-shot isolated trial has no restart, so the evidence was simply lost and a
+ * subject that really ran and made a choice reported as infrastructure failure.
+ * An agent that read a delivery and declined to dispose of it is DEFERRED,
+ * whichever way the host is heading, and a restart must not re-deliver it as
+ * fresh work.
  */
-test("a reclaim with no wake outcome of its own records no code at all", async () => {
+test("a completed wake under a halting dispatcher is deferred, not reclaimed for restart", async () => {
   const root = await privateRoot();
   const attention = { version: ORGANIZATION_RUNTIME_VERSION, host: config.host,
     agents: [{ ...config.agents[0]!, attention: { maxBatchMessages: 4, maxBatchBytes: 4096, maxExecutions: 8, maxTokens: 100_000 } }] };
@@ -162,13 +169,19 @@ test("a reclaim with no wake outcome of its own records no code at all", async (
     await control.start();
     await control.accept(delivery("halted-delivery"));
     await waking;
+    // The halt lands while the wake is in flight; the wake then completes anyway.
     const stopping = control.stop();
     release();
     await stopping;
     const item = (await control.activityV2(token))?.items.find((row) => row.delivery_id === "halted-delivery");
-    // Reclaimed exactly as above — and saying nothing it cannot know.
     assert.equal(item?.state, "accepted");
-    assert.equal(item?.deferred, false);
+    // The wake's own outcome decides the record: read, undisposed, deferred.
+    assert.equal(item?.deferred, true);
+    // A completed wake releases its execution, so a restart waits for new input
+    // instead of replaying the delivery as work nobody has seen.
+    assert.equal(item?.execution_id, undefined);
+    // Still silent: a completed wake is no more a named reclaim outcome than a
+    // halt is, and a plausible name for an undetermined cause gets acted on.
     assert.equal(item?.code, undefined);
   } finally { await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); }
 });
