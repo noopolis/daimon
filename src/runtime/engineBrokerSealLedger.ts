@@ -56,7 +56,7 @@ export const TURN_SEAL_LEDGER = {
   fileMode: TURN_USAGE_LEDGER.fileMode
 } as const;
 
-/** A rendered seal line is bounded by its own contents: a 768-byte reason plus 16 bounded names. */
+/** A rendered seal line is bounded by its own contents: a 768-byte reason, 16 bounded names and 8 tunnel timings. */
 export const TURN_SEAL_MAX_LINE_BYTES = 8_192;
 
 export type BrokerTurnSealEntry = Readonly<{ agent: string; wake: string; at: string }>;
