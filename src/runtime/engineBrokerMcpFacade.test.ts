@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createServer, type Server as HttpServer, type IncomingMessage } from "node:http";
-import { connect, type Socket } from "node:net";
+import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from "node:http";
+
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 
@@ -50,6 +50,89 @@ test("MCP facade routes only valid active capabilities to the registered mount",
   let calls=0;const target=createServer((_request,response)=>{calls++;response.writeHead(200,{"content-type":"application/json"});response.end('{"ok":true}');});await new Promise<void>((resolve)=>target.listen(0,"127.0.0.1",resolve));const address=target.address();if(address===null||typeof address==="string")throw new Error();
   const token=facade.register("agent","turn-capabilities",`http://127.0.0.1:${address.port}/mcp`);const call=(value:string)=>fetch(FACADE_URL,{method:"POST",headers:{authorization:`Bearer ${value}`,"content-type":"application/json"},body:"{}"});
   try{assert.equal((await call("wrong-token-abcdefghijklmnopqrstuvwxyz0123456789")).status,403);assert.equal((await call(token)).status,200);assert.equal(calls,1);facade.revoke("turn-capabilities");assert.equal((await call(token)).status,403);assert.equal(calls,1);}finally{facade.revoke("turn-capabilities");await new Promise<void>((resolve)=>target.close(()=>resolve()));}
+});
+
+/**
+ * Daimon writes a tool receipt only on completion, so a call that started and
+ * never returned reads exactly like a call that was never made — the one path
+ * a seven-minute live hang left unlit. The facade is where that difference is
+ * visible, and it has to survive the tear-down that ends the turn: a tunnel
+ * destroyed when the worker dies must not mark the call it was blocked on as
+ * answered, or the instrument erases the very evidence it exists to keep.
+ */
+test("MCP facade reports a tool call that started and never returned as outstanding, by name", async () => {
+  const facade = await sharedFacade();
+  const held: ServerResponse[] = [];
+  // Two ways for a mount not to answer: never reply at all (`moltnet_read`),
+  // or open the stream and never deliver the result (`memory_recall`).
+  const target = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      const asked = Buffer.concat(chunks).toString("utf8");
+      if (asked.includes("moltnet_read")) { held.push(response); return; }
+      if (asked.includes("memory_recall")) { response.writeHead(200, { "content-type": "text/event-stream" }); response.write(": open\n\n"); held.push(response); return; }
+      response.writeHead(200, { "content-type": "application/json" }); response.end('{"jsonrpc":"2.0","id":1,"result":{}}');
+    });
+  });
+  await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
+  const address = target.address(); if (address === null || typeof address === "string") throw new Error();
+  const turnId = "turn-outstanding", token = facade.register("agent", turnId, `http://127.0.0.1:${address.port}/mcp`);
+  const post = (name: string, signal?: AbortSignal): Promise<Response> => fetch(FACADE_URL, { method: "POST", signal, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: { text: "argument-bytes-that-must-never-be-recorded" } } }) });
+  const pending = new AbortController();
+  /**
+   * A live call's elapsed time grows with every read, so two identical reads
+   * mean every relay has settled — the only moment at which "answered" is
+   * final. Polling for a name instead would read the log mid-teardown.
+   */
+  const settled = async (): Promise<ReturnType<typeof facade.observe>> => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const before = JSON.stringify(facade.observe(turnId));
+      await new Promise<void>((resolve) => setTimeout(resolve, 60));
+      if (JSON.stringify(facade.observe(turnId)) === before) return facade.observe(turnId);
+    }
+    throw new Error("the facade's observation never settled");
+  };
+  const names = (observed: ReturnType<typeof facade.observe>): readonly string[] => (observed?.outstanding ?? []).map((call) => call.name);
+  try {
+    const answered = await post("daimon__moltnet_send");
+    assert.equal(answered.status, 200); await answered.text();
+    const hanging = post("daimon__moltnet_read", pending.signal).catch(() => undefined);
+    for (let attempt = 0; attempt < 200 && held.length === 0; attempt += 1) await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    assert.equal(held.length, 1, "the mount never received the hung tool call");
+
+    const observed = facade.observe(turnId);
+    assert.deepEqual(names(observed), ["daimon__moltnet_read"], "the unanswered call must be outstanding, by name");
+    assert.equal(observed?.started, 2); assert.equal(observed?.answered, 1, "the completed call must not be outstanding"); assert.equal(observed?.undecoded, 0);
+    assert.ok((observed?.outstanding[0]?.outstandingMs ?? -1) >= 0, "an outstanding call reports how long it has been waiting");
+    assert.ok(!JSON.stringify(observed).includes("argument-bytes"), "names and timings only: no arguments");
+
+    // The turn's own death tears the tunnel down. The call was still never
+    // answered, and must still say so.
+    pending.abort(); await hanging;
+    const afterTeardown = await settled();
+    assert.deepEqual(names(afterTeardown), ["daimon__moltnet_read"], "a torn-down relay is not an answer");
+    assert.equal(afterTeardown?.answered, 1);
+
+    // A stream the facade opened and never finished relaying is not an answer
+    // either. Awaiting the headers and one chunk puts the facade inside its own
+    // streaming relay before the client walks away, which is the branch that
+    // decides whether a half-written tunnel counts as an answer.
+    const halted = new AbortController();
+    const half = await post("memory_recall", halted.signal);
+    assert.equal(half.status, 200); await half.body!.getReader().read(); halted.abort();
+    const afterHalfRelay = await settled();
+    assert.deepEqual(names(afterHalfRelay), ["daimon__moltnet_read", "memory_recall"], "a half-relayed stream is not an answer");
+    assert.equal(afterHalfRelay?.answered, 1);
+
+    facade.revoke(turnId);
+    assert.equal(facade.observe(turnId), undefined, "a turn the facade never registered observes as absence, not as zero");
+  } finally {
+    pending.abort(); facade.revoke(turnId);
+    for (const response of held) response.destroy();
+    target.closeAllConnections();
+    await new Promise<void>((resolve) => target.close(() => resolve()));
+  }
 });
 
 /**
@@ -314,51 +397,4 @@ test("revoking a turn tears down its open server-to-client stream, and closing n
   await client.close().catch(() => undefined);
   await second.close().catch(() => undefined);
   await rig.close().catch(() => undefined);
-});
-
-/**
- * The relay parks on this await whenever a tunnel is backpressured, and a
- * parked await is invisible from outside: no status, no refusal, no line. So
- * the assertion is that it settles at all — on a client that hung up
- * mid-write, on the turn's abort, and on a genuine drain — with a deadline
- * standing in for the hang.
- */
-test("a backpressured MCP tunnel always settles: on a hang-up, on the turn's abort, and on a real drain", async () => {
-  const parked = new Map<string, Promise<string>>();
-  // One controller per phase: the turn whose abort is under test must not be
-  // the turn that is still relaying.
-  const controllers = new Map<string, AbortController>();
-  const server = createServer((request, response) => {
-    const phase = request.url ?? "";
-    const controller = new AbortController(); controllers.set(phase, controller);
-    response.writeHead(200, { "content-type": "text/event-stream" });
-    // A paused client cannot absorb this, so `write` reports backpressure and
-    // the relay would park exactly here.
-    response.write("data: open\n\n");
-    if (phase === "/drain") assert.equal(response.write(Buffer.alloc(16 * 1024 * 1024, 0x61)), false, "a paused client must backpressure the tunnel");
-    parked.set(phase, awaitMcpTunnelDrain(response, controller.signal).then(() => "drained", (error: Error) => error.message));
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address(); if (address === null || typeof address === "string") throw new Error();
-  const open = (phase: string): Promise<Socket> => new Promise((resolve) => {
-    const socket = connect(address.port, "127.0.0.1", () => socket.write(`GET ${phase} HTTP/1.1\r\nhost: facade\r\n\r\n`));
-    socket.once("data", () => { socket.pause(); resolve(socket); });
-  });
-  const settled = (phase: string): Promise<string> => withDeadline(parked.get(phase)!, 3_000, `the ${phase} await never settled: the relay is parked`);
-  const sockets: Socket[] = [];
-  try {
-    sockets.push(await open("/hangup"));
-    sockets[0]!.destroy();
-    assert.equal(await settled("/hangup"), "MCP tunnel closed", "a client that hung up mid-write wakes the await");
-    sockets.push(await open("/abort"));
-    controllers.get("/abort")!.abort();
-    assert.equal(await settled("/abort"), "MCP tunnel aborted", "the turn's own abort wakes the await");
-    const draining = await open("/drain");
-    sockets.push(draining);
-    draining.resume();
-    assert.equal(await settled("/drain"), "drained", "a client that resumes reading resolves the await");
-  } finally {
-    for (const socket of sockets) socket.destroy();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
 });

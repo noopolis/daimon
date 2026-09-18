@@ -77,3 +77,28 @@ test("a failed worker's redacted reason is an optional bounded member of its dia
     {...failed,diagnostic:{...prelaunch,reason:"no worker ran"}}
   ])assert.throws(()=>parseEngineBrokerResponse(bad),/invalid broker frame/u);
 });
+
+/**
+ * The in-flight tool-call observation (`engineBrokerMcpCallLog.ts`) rides the
+ * sealed failed frame, so the seam that carries the worker's last words and
+ * its accounting carries this too — nothing new on a tmpfs that dies with the
+ * container. It is names and timings, bounded, and internally consistent: a
+ * frame that claims more answered than started, or more outstanding than
+ * started minus answered, is a fabrication and is refused rather than clamped.
+ */
+test("a failed frame carries the broker's in-flight MCP tool-call observation, bounded and consistent", () => {
+  const value = { version: start.version, kind: "failed", requestId: "request-1", turnId: "turn-1", code: "limit_exceeded", mcpCalls: { started: 3, answered: 2, undecoded: 0, outstanding: [{ name: "daimon__moltnet_read", outstandingMs: 419_000 }] }, outcome: "failed", usage: null, model: "grok-4.6", requests: 8, limitReason: "timeout" } as const;
+  assert.deepEqual(parseEngineBrokerResponse(value), value);
+  for (const mcpCalls of [
+    { ...value.mcpCalls, answered: 4 },
+    { ...value.mcpCalls, started: 2 },
+    { ...value.mcpCalls, outstanding: [{ name: "daimon__moltnet_read", outstandingMs: 1 }, { name: "memory_recall", outstandingMs: 1 }] },
+    { ...value.mcpCalls, outstanding: [{ name: "daimon__moltnet_read", outstandingMs: -1 }] },
+    { ...value.mcpCalls, outstanding: [{ name: "moltnet read; Bearer sk-live", outstandingMs: 1 }] },
+    { ...value.mcpCalls, outstanding: [{ name: "daimon__moltnet_read", outstandingMs: 1, arguments: { text: "secret" } }] },
+    { ...value.mcpCalls, outstanding: Array.from({ length: 17 }, () => ({ name: "tool", outstandingMs: 1 })) },
+    { started: 3, answered: 2, outstanding: [] }
+  ]) assert.throws(() => parseEngineBrokerResponse({ ...value, mcpCalls }), /invalid broker frame/u, JSON.stringify(mcpCalls));
+  // A v1 record predates the instrument; a v1 frame that carries it is forged.
+  assert.throws(() => parseEngineBrokerV1TerminalResponse({ version: "noopolis.daimon.engine-broker.v1", kind: "failed", requestId: "request-1", turnId: "turn-1", code: "engine_failed", mcpCalls: value.mcpCalls }), /invalid broker frame/u);
+});

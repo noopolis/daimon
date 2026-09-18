@@ -54,7 +54,7 @@ function failed(socket:Socket,request:Extract<ReturnType<typeof parseEngineBroke
   const accounting=error instanceof EngineBrokerTurnFailure?error.accounting:undefined;
   if(accounting===undefined){socket.destroy();return;}
   const code=error instanceof EngineBrokerTurnFailure?error.code:aborted?"cancelled":"engine_failed";
-  send(socket,{version:request.version,kind:"failed",requestId:request.requestId,turnId:request.turnId,code,...(error instanceof EngineBrokerTurnFailure&&error.diagnostic?{diagnostic:error.diagnostic}:{}),outcome:"failed",usage:accounting.usage,model:accounting.model,requests:accounting.requests,limitReason:accounting.limitReason});
+  send(socket,{version:request.version,kind:"failed",requestId:request.requestId,turnId:request.turnId,code,...(error instanceof EngineBrokerTurnFailure&&error.diagnostic?{diagnostic:error.diagnostic}:{}),...(error instanceof EngineBrokerTurnFailure&&error.mcpCalls?{mcpCalls:error.mcpCalls}:{}),outcome:"failed",usage:accounting.usage,model:accounting.model,requests:accounting.requests,limitReason:accounting.limitReason});
 }
 /** One grant verb per connection, answered and closed; any failure becomes a closed-code refusal and never touches turn state. */
 function serveInferenceGrant(socket:Socket,broker:EngineBrokerServiceEngine,request:EngineBrokerInferenceRequest):void{

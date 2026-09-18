@@ -288,6 +288,32 @@ outcome but a real drain rejects, so the relay tears the tunnel down instead
 of writing into a socket that is gone. Never widen it into a transparent proxy: the
 whole point of the boundary is that the allowlist is closed.
 
+The facade is also the only place an MCP tool call is observable *while it is
+still running*. Daimon writes a tool receipt on completion, so a call that
+started and never returned is byte-identical, in every artifact, to a call that
+was never made — and that was the last unlit path under a live hang where the
+worker stopped acting after its eighth provider response, the per-request
+ledger published `open: 0`, and the trial deadline killed it seven minutes
+later. `engineBrokerMcpCallLog.ts` records each relayed `tools/call` POST and
+whether the facade ever answered it, and the observation rides the *sealed
+terminal response* of a failed turn (`mcpCalls`, optional and v2-only) —
+the seam the worker's redacted last words and the sealed usage already take,
+because the slot's control root is tmpfs that dies with the container. It
+replays with the record and reaches the operator through
+`engineBrokerControlClient.ts` as `mcp=<answered>/<started> answered` plus
+`mcp_outstanding=<tool>@<ms>ms`. Its rules are the per-request ledger's: names
+and timings only (never arguments, never a result, never a session id or
+bearer; a name that is not a plain short identifier is `<invalid>`, and the
+list is bounded with a `<truncated>` last entry); absence stays absence (a turn
+the facade never registered observes as *nothing*, a turn that called nothing
+observes `started: 0`, and a POST body the facade could not read counts in
+`undecoded` rather than inventing a name); and it can never fail, delay or
+refuse a turn. "Answered" means one thing and it is load bearing: the relay
+reached its own `end()`. A tunnel torn down when the worker dies did not
+answer, so the call it was blocked on stays outstanding with the elapsed time
+it had reached — otherwise the turn's death would erase the evidence the
+instrument exists to keep.
+
 Worker `GROK_HOME` layout the deployment must provision (attested before every
 turn by `grokWorkerHomeAttestation.ts`, recorded in `GROK_ENGINE_BROKER.worker.home`):
 `$GROK_HOME` and `$GROK_HOME/sessions` `root:<worker> 1771`; `config.toml`,

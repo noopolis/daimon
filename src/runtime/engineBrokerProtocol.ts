@@ -1,4 +1,5 @@
 import { isEngineBrokerInferenceRequestKind, isEngineBrokerInferenceResponseKind, parseEngineBrokerInferenceRequest, parseEngineBrokerInferenceResponse, type EngineBrokerInferenceRequest, type EngineBrokerInferenceResponse } from "./engineBrokerInferenceProtocol.js";
+import { ENGINE_BROKER_MCP_CALL_NAME, ENGINE_BROKER_MCP_OUTSTANDING_MAX, type EngineBrokerMcpCallObservation } from "./engineBrokerMcpCallLog.js";
 import { parseEngineBrokerTurnAccounting, parseEngineBrokerTurnLimitOverrides, type EngineBrokerTurnAccounting, type EngineBrokerTurnLimitOverrides } from "./engineBrokerTurnAccounting.js";
 
 /**
@@ -34,7 +35,7 @@ export type EngineBrokerResponse =
   | Readonly<{ version: typeof VERSION; kind: "ready"; requestId: string; brokerUid: 2100; providerProxyPort: 43123; mcpFacadePort: 43124; registrations: number; credentialStale: false; realmLease: true; workerIsolation: true }>
   | Readonly<{ version: typeof VERSION; kind: "accepted"; requestId: string; turnId: string }>
   | (Readonly<{ version: typeof VERSION; kind: "completed"; requestId: string; turnId: string; text: string; workerPid: number; workerUid: number; workerStartTime: string }> & EngineBrokerTurnAccounting)
-  | (Readonly<{ version: typeof VERSION; kind: "failed"; requestId: string; turnId: string; code: EngineBrokerFailureCode; diagnostic?: EngineBrokerFailureDiagnostic }> & EngineBrokerTurnAccounting)
+  | (Readonly<{ version: typeof VERSION; kind: "failed"; requestId: string; turnId: string; code: EngineBrokerFailureCode; diagnostic?: EngineBrokerFailureDiagnostic; mcpCalls?: EngineBrokerMcpCallObservation }> & EngineBrokerTurnAccounting)
   | EngineBrokerInferenceResponse;
 /**
  * The one name for a fenced credential realm. The turn's failure code, the
@@ -115,8 +116,12 @@ function parseTerminal(input: JsonRecord, expected: typeof VERSION | typeof V1):
     const base = { kind: "completed", requestId: id(input.requestId), turnId: id(input.turnId), text: text(input.text, 262_144), workerPid: input.workerPid as number, workerUid: input.workerUid as number, workerStartTime: id(input.workerStartTime) } as const;
     return expected === VERSION ? { version: VERSION, ...base, ...parseEngineBrokerTurnAccounting(input, "completed") } : { version: V1, ...base };
   }
-  const fields = ["version", "kind", "requestId", "turnId", "code", ...accounting];
-  exact(input, input.diagnostic === undefined ? fields : [...fields, "diagnostic"]);
+  // `mcpCalls` is the broker's own observation of the worker's tool calls
+  // (`engineBrokerMcpCallLog.ts`), additive in v2 and never part of a v1
+  // record, which predates the instrument entirely.
+  if (expected === V1 && input.mcpCalls !== undefined) throw new TypeError("invalid broker frame");
+  const fields = ["version", "kind", "requestId", "turnId", "code", ...accounting, ...(input.diagnostic === undefined ? [] : ["diagnostic"]), ...(input.mcpCalls === undefined ? [] : ["mcpCalls"])];
+  exact(input, fields);
   const codes: readonly string[] = expected === VERSION ? ENGINE_BROKER_FAILURE_CODES : ENGINE_BROKER_FAILURE_CODES.filter((code) => code !== "limit_exceeded");
   if (!codes.includes(input.code as string)) throw new TypeError("invalid broker frame");
   let diagnostic:EngineBrokerFailureDiagnostic|undefined;
@@ -125,7 +130,32 @@ function parseTerminal(input: JsonRecord, expected: typeof VERSION | typeof V1):
   if (expected === V1) return { version: V1, ...base } as V1Failed;
   const accountingValue = parseEngineBrokerTurnAccounting(input, "failed");
   if ((input.code === "limit_exceeded") !== (accountingValue.limitReason !== "none")) throw new TypeError("invalid broker frame");
-  return { version: VERSION, ...base, ...accountingValue };
+  const mcpCalls = input.mcpCalls === undefined ? undefined : parseMcpCallObservation(input.mcpCalls);
+  return { version: VERSION, ...base, ...(mcpCalls === undefined ? {} : { mcpCalls }), ...accountingValue };
+}
+
+/**
+ * Names and timings, bounded, and internally consistent: a report can never
+ * claim more answered calls than started ones, nor more outstanding ones than
+ * started minus answered. Every count is its own measurement, so a missing
+ * field is refused rather than defaulted — a zero the broker did not measure
+ * would read exactly like one it did.
+ */
+function parseMcpCallObservation(value: unknown): EngineBrokerMcpCallObservation {
+  const input = record(value);
+  exact(input, ["started", "answered", "undecoded", "outstanding"]);
+  const started = input.started, answered = input.answered, undecoded = input.undecoded;
+  if (![started, answered, undecoded].every((count) => Number.isSafeInteger(count) && (count as number) >= 0)) throw new TypeError("invalid broker frame");
+  if (!Array.isArray(input.outstanding) || input.outstanding.length > ENGINE_BROKER_MCP_OUTSTANDING_MAX) throw new TypeError("invalid broker frame");
+  const outstanding = input.outstanding.map((entry) => {
+    const call = record(entry);
+    exact(call, ["name", "outstandingMs"]);
+    if (typeof call.name !== "string" || !ENGINE_BROKER_MCP_CALL_NAME.test(call.name)) throw new TypeError("invalid broker frame");
+    if (!Number.isSafeInteger(call.outstandingMs) || (call.outstandingMs as number) < 0) throw new TypeError("invalid broker frame");
+    return { name: call.name, outstandingMs: call.outstandingMs as number };
+  });
+  if ((answered as number) > (started as number) || outstanding.length > (started as number) - (answered as number)) throw new TypeError("invalid broker frame");
+  return { started: started as number, answered: answered as number, undecoded: undecoded as number, outstanding };
 }
 
 function closedDiagnostic(value:JsonRecord):boolean{

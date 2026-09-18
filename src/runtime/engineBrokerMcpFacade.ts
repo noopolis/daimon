@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
+import { EngineBrokerMcpCallLog, type EngineBrokerMcpCallObservation } from "./engineBrokerMcpCallLog.js";
 
 /**
  * The brokered worker's only route to its own per-wake Daimon MCP mount. The
@@ -53,6 +54,12 @@ export async function startEngineBrokerMcpFacade() {
   const targets = new Map<string, string>();
   /** In-flight upstream calls per turn, so a revoke or a close tears down any open SSE tunnel. */
   const inflight = new Map<string, Set<AbortController>>();
+  /**
+   * What the facade saw of each turn's tool calls. A tool receipt is written
+   * only on completion, so without this a call that started and never returned
+   * and a call never made are the same absence (`engineBrokerMcpCallLog.ts`).
+   */
+  const calls = new EngineBrokerMcpCallLog();
 
   const server = createServer((request, response) => {
     void route(request, response).catch((error: unknown) => {
@@ -76,8 +83,13 @@ export async function startEngineBrokerMcpFacade() {
 
     // Only POST carries a JSON-RPC body; drain anything else so the socket
     // never stalls waiting for a body the facade will not forward.
-    const body = method === "POST" ? await bounded(request) : (request.resume(), undefined);
+    let body: Buffer | undefined;
+    // A body refused for size is a call the log can never name, and counting
+    // it keeps "no tool call started" an honest reading rather than a gap.
+    try { body = method === "POST" ? await bounded(request) : (request.resume(), undefined); }
+    catch (error) { calls.undecodable(scope.turnId); throw error; }
     const payload = body === undefined ? undefined : (body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer);
+    const call = calls.begin(scope.turnId, body);
 
     const controller = new AbortController();
     const open = inflight.get(scope.turnId) ?? new Set<AbortController>();
@@ -86,8 +98,12 @@ export async function startEngineBrokerMcpFacade() {
     const abort = (): void => controller.abort();
     response.on("close", abort);
     try {
-      await forward(target, method, headersFor(method, request), payload, controller.signal, response);
+      // Answered only on a relay that reached its own end: a tunnel torn down
+      // by the worker's death must not mark the call it was blocked on as
+      // finished.
+      if (await forward(target, method, headersFor(method, request), payload, controller.signal, response)) call.answer();
     } finally {
+      call.close();
       response.off("close", abort);
       open.delete(controller);
       if (open.size === 0) inflight.delete(scope.turnId);
@@ -110,13 +126,20 @@ export async function startEngineBrokerMcpFacade() {
       if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.pathname !== "/mcp") throw new TypeError("invalid scoped MCP mount");
       if (targets.has(turnId)) throw new Error("MCP turn already registered");
       targets.set(turnId, url.href);
+      calls.open(turnId);
       return capabilities.issue(agentId, turnId, 15 * 60_000, 128);
     },
     revoke(turnId: string): void {
       targets.delete(turnId);
       capabilities.revoke(turnId);
       endTurnStreams(turnId);
+      calls.close(turnId);
     },
+    /**
+     * What the facade saw of this turn's tool calls, or `undefined` for a turn
+     * it never registered. Read on the failure path, before `revoke`.
+     */
+    observe: (turnId: string): EngineBrokerMcpCallObservation | undefined => calls.observe(turnId),
     close: async (): Promise<void> => {
       for (const turnId of [...inflight.keys()]) endTurnStreams(turnId);
       await new Promise<void>((resolve, reject) => {
@@ -157,7 +180,7 @@ async function forward(
   body: ArrayBuffer | undefined,
   signal: AbortSignal,
   response: ServerResponse
-): Promise<void> {
+): Promise<boolean> {
   const upstream = await fetch(target, { method, headers, body, signal, redirect: "manual" });
   // MCP never redirects, and following one would let the mount aim the facade
   // at a host the capability was never scoped to. `manual` also reports an
@@ -171,7 +194,7 @@ async function forward(
   }
   outbound["content-type"] ??= "application/json";
   response.writeHead(upstream.status, outbound);
-  if (upstream.body === null) { response.end(); return; }
+  if (upstream.body === null) { response.end(); return true; }
   const stream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
   try {
     for await (const chunk of stream) {
@@ -179,10 +202,12 @@ async function forward(
       if (!response.write(chunk as Uint8Array)) await awaitMcpTunnelDrain(response, signal);
     }
     response.end();
+    return true;
   } catch {
     // The client hung up or the mount's stream broke: tear the tunnel down
     // rather than leaving a half-written response open.
     response.destroy();
+    return false;
   } finally {
     stream.destroy();
   }

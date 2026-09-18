@@ -2,9 +2,19 @@ import { createHash, randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import { ENGINE_BROKER_VERSION, encodeEngineBrokerFrame,EngineBrokerFrameDecoder,parseEngineBrokerResponse } from "./engineBrokerProtocol.js";
 import type { EngineBrokerInferenceFailureCode, EngineBrokerInferenceRequest, EngineBrokerInferenceResponse } from "./engineBrokerInferenceProtocol.js";
+import type { EngineBrokerMcpCallObservation } from "./engineBrokerMcpCallLog.js";
 import type { EngineBrokerTurnLimitOverrides } from "./engineBrokerTurnAccounting.js";
 import type { GrokBrokerModel, GrokBrokerReasoningEffort } from "./grokBrokerModelPolicy.js";
 import type { GrokInferencePurpose } from "./inferenceUsageLedger.js";
+
+/**
+ * What the broker saw of the worker's MCP tool calls on a failed turn
+ * (`engineBrokerMcpCallLog.ts`). Absent for a turn with no observation at all;
+ * `outstanding` names every call that started and was never answered, with how
+ * long it had been waiting — the one thing a completion-only tool receipt can
+ * never say.
+ */
+const renderMcpCalls=(calls:EngineBrokerMcpCallObservation|undefined):string=>calls===undefined?"":`; mcp=${calls.answered}/${calls.started} answered${calls.undecoded===0?"":`; mcp_undecoded=${calls.undecoded}`}${calls.outstanding.length===0?"":`; mcp_outstanding=${calls.outstanding.map((call)=>`${call.name}@${call.outstandingMs}ms`).join(",")}`}`;
 
 export type EngineBrokerInferenceGrant = Omit<Extract<EngineBrokerInferenceResponse, { kind: "inference_grant" }>, "version" | "kind" | "requestId">;
 /** A refused grant request; `code` is closed (`auth_stale` is the stale shared realm, `grant_limit` the live-grant cap). */
@@ -45,6 +55,6 @@ export class EngineBrokerControlClient implements EngineBrokerTurnClient {
     const turnId=createHash("sha256").update(`${agentId}\0${wakeId}`).digest("hex"),requestId=randomUUID();const request={version:ENGINE_BROKER_VERSION,kind:"start_turn",requestId,turnId,agentId,wakeId,prompt,mcpEndpoint,...(options.limits===undefined?{}:{limits:options.limits})} as const;const socket=createConnection({path:this.socketPath});const decoder=new EngineBrokerFrameDecoder();
     return new Promise<string>((resolve,reject)=>{let accepted=false,settled=false;const fail=()=>{if(settled)return;settled=true;cleanup();reject(new Error("engine broker unavailable"));};const cleanup=()=>{signal?.removeEventListener("abort",abort);socket.destroy();};const abort=()=>fail();signal?.addEventListener("abort",abort,{once:true});if(signal?.aborted)return abort();socket.once("connect",()=>socket.write(encodeEngineBrokerFrame(request)));socket.on("data",(chunk)=>{try{for(const value of decoder.push(chunk)){const response=parseEngineBrokerResponse(value);if((response.kind!=="accepted"&&response.kind!=="completed"&&response.kind!=="failed")||response.requestId!==requestId||response.turnId!==turnId)throw new Error();if(response.kind==="accepted"){if(accepted)throw new Error();accepted=true;continue;}if(!accepted||settled)throw new Error();settled=true;cleanup();
       if(options.model!==undefined&&response.model!==options.model){reject(new Error(`engine broker turn used model ${response.model}, not the declared ${options.model}`));return;}
-      if(response.kind==="completed")resolve(response.text);else reject(new Error(`engine broker turn failed (${response.code}${response.limitReason==="none"?"":`; limit=${response.limitReason}`}${response.diagnostic ? `; ${response.diagnostic.stage}/${response.diagnostic.failureClass}; exit=${response.diagnostic.exitCode}; signal=${response.diagnostic.termSignal}${response.diagnostic.reason===undefined?"":`; reason=${response.diagnostic.reason}`}` : ""})`));}}catch{fail();}});socket.once("error",fail);socket.once("close",()=>{if(!settled)fail();});});
+      if(response.kind==="completed")resolve(response.text);else reject(new Error(`engine broker turn failed (${response.code}${response.limitReason==="none"?"":`; limit=${response.limitReason}`}${response.diagnostic ? `; ${response.diagnostic.stage}/${response.diagnostic.failureClass}; exit=${response.diagnostic.exitCode}; signal=${response.diagnostic.termSignal}${response.diagnostic.reason===undefined?"":`; reason=${response.diagnostic.reason}`}` : ""}${renderMcpCalls(response.mcpCalls)})`));}}catch{fail();}});socket.once("error",fail);socket.once("close",()=>{if(!settled)fail();});});
   }
 }

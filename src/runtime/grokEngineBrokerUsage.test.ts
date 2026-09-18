@@ -11,6 +11,7 @@ import { decodeNativeBrokerResult, ENGINE_BROKER_NATIVE_RESULT_BYTES, type Nativ
 import type { EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
 import { EngineBrokerTurnRegistry } from "./engineBrokerTurnRegistry.js";
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
+import type { EngineBrokerMcpCallObservation } from "./engineBrokerMcpCallLog.js";
 import { EngineBrokerTurnFailure, runGrokEngineBrokerTurn, type GrokEngineBrokerTurnDependencies } from "./grokEngineBrokerTurn.js";
 import { TURN_REQUEST_LEDGER_VERSION } from "./turnRequestLedger.js";
 import { dedupeTurnUsageRows, TURN_USAGE_LEDGER_VERSION } from "./turnUsageLedger.js";
@@ -69,7 +70,7 @@ const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId
         const registration: EngineBrokerServiceRegistration = { agentId: "foreman", slot: 0, workerUid: 2_200, workspace: "/workspace", profilePath: "/workers/0/.grok/sandbox.toml", eventsPath: "/workers/0/.grok/sessions/sandbox-events.jsonl", profileSha256: "a".repeat(64), usageLedgerPath: ledger, limits, model: { model: "grok-4.6", reasoningEffort: "low" } };
         const deps: GrokEngineBrokerTurnDependencies = {
           turns: syncDirectory === undefined ? new EngineBrokerTurnRegistry(turnStore) : new EngineBrokerTurnRegistry(turnStore, undefined, syncDirectory), proxy, credentialStale: () => false,
-          mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => undefined },
+          mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => undefined, observe: () => mcpObservation },
           prepareIsolation: async () => async () => undefined,
           runNative: async (input: NativeBrokerTurn, signal: AbortSignal) => nativeResult(await worker(() => post(proxy.port, input.providerCapability), signal))
         };
@@ -82,6 +83,9 @@ const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId
     });
   } finally { await proxy.close(); await rm(root, { recursive: true, force: true }); }
 };
+
+/** What the facade would have seen of this turn's tool calls; the turn only reads it. */
+let mcpObservation: EngineBrokerMcpCallObservation | undefined;
 
 const twoRequests: Worker = async (send) => { assert.equal(await send(), 200); assert.equal(await send(), 200); return stream(); };
 
@@ -342,5 +346,37 @@ test("a worker whose work succeeded but whose output crossed the launcher bound 
     await assert.rejects(turn("wake-output-limit", twoRequests), (error: unknown) =>
       error instanceof EngineBrokerTurnFailure && error.accounting?.usage?.total === 5_550);
     assert.equal((await usageRows()).length, 1, "the replayed failure is not metered again");
+  });
+});
+
+/**
+ * The hang this instrument was built for: the worker stops acting with every
+ * provider request closed, the deadline kills it, and the only remaining
+ * question is whether it was waiting on a tool call. The answer has to reach
+ * the host, and the slot's control root is tmpfs that dies with the container —
+ * so it rides the seam the worker's last words and the sealed usage already
+ * ride: the sealed terminal response, which a replay hands back unchanged.
+ */
+test("a failed turn carries the facade's in-flight tool-call observation, and its replay still does", async () => {
+  await withBroker(async ({ turn }) => {
+    mcpObservation = { started: 3, answered: 2, undecoded: 0, outstanding: [{ name: "daimon__moltnet_read", outstandingMs: 419_000 }] };
+    const worker: Worker = async (send) => { assert.equal(await send(), 200); assert.equal(await send(), 200); throw new Error("engine broker turn failed"); };
+    const carried = (error: unknown): boolean => {
+      assert.ok(error instanceof EngineBrokerTurnFailure);
+      assert.deepEqual(error.mcpCalls, { started: 3, answered: 2, undecoded: 0, outstanding: [{ name: "daimon__moltnet_read", outstandingMs: 419_000 }] });
+      return true;
+    };
+    await assert.rejects(turn("wake-mcp-outstanding", worker), carried);
+    // The replay reads the durable record back through the frame parser, so
+    // this is the sealed bytes answering, not the live facade.
+    mcpObservation = undefined;
+    await assert.rejects(turn("wake-mcp-outstanding", worker), carried);
+  });
+});
+
+test("a turn whose facade observed nothing seals no observation at all", async () => {
+  await withBroker(async ({ turn }) => {
+    mcpObservation = undefined;
+    await assert.rejects(turn("wake-mcp-absent", async (send) => { await send(); throw new Error("engine broker turn failed"); }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.mcpCalls === undefined);
   });
 });
