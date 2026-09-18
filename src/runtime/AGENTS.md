@@ -117,6 +117,22 @@ so it replays with the sealed record and reaches the operator through
 `engineBrokerControlClient.ts`'s failure message. Nothing new is written to
 disk: the reason travels inside the response the broker already seals.
 
+A turn whose worker said nothing still records what it spent. The launcher can
+refuse to publish a worker's output (`DBL_MAX_OUTPUT`, `native/AGENTS.md`) and
+the native transport can fail outright, and in both cases `result.text` never
+exists, so there are no stream frames to read usage from. `streamOrMeterUsage`
+then falls to the proxy's own per-request measurements — the meter admitted and
+settled every forwarded request, so the broker knows the spend even when the
+worker never speaks — and `finishBrokerTurnWithUsage` seals and appends it with
+`outcome: "failed"`. That is the whole of the guarantee and it is pinned by
+"a worker whose work succeeded but whose output crossed the launcher bound"
+(`grokEngineBrokerUsage.test.ts`), which builds the launcher's own
+output-limit frame at the ABI offsets and decodes it with the shipped client.
+Deleting the meter fallback, or refusing that frame shape in
+`decodeNativeBrokerResult`, both turn it red. The one window that stays open is
+the documented one: a crash before the turn record's rename, which the next
+boot seals `usage: null`.
+
 Evaluator inference grants (`grokInferenceGrants.ts`) let Paideia judges and
 the DSPy optimizer — uid 2000, the trusted evaluator side — spend the broker's
 Grok credential without holding it. `request_inference_grant {model,

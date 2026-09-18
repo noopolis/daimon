@@ -67,6 +67,26 @@ reports the capacity it actually got, and writes four times that in one
 `write`, so it straddles the buffer on any host without assuming 64 KiB while
 staying under `DBL_MAX_OUTPUT`.
 
+**Crossing `DBL_MAX_OUTPUT` is a reported status, not a lost turn.** This is
+worth stating because it has been guessed at twice: a trip sets
+`output_limited`, stops reading, `SIGKILL`s the worker's process group, reaps
+it, and then — `disconnected` is still 0, so the branch at the end of
+`supervise` runs — writes the complete 128-byte result frame with
+`DBL_STATUS_OUTPUT_FAILED`, `DBL_STAGE_OUTPUT`, `DBL_FAILURE_OUTPUT_LIMIT` and
+`output_length = 0`. `closed_result` admits exactly that shape, the client
+relays it, and `decodeNativeBrokerResult` raises a named
+`NativeBrokerTurnFailure`. So a trip costs the turn its *text* and nothing
+else: the broker still seals the turn and still meters the spend the proxy
+measured. A lost terminal frame, an unnamed transport failure or an unmetered
+turn therefore cannot be explained by this bound, and the only branch that
+sends nothing at all is a client that already disconnected.
+
+The bound is the whole turn's stdout, not one frame. A live single-tool-call
+brokered turn already emitted 26,486 bytes, 23,320 of them one tool-result
+frame (`.runtime/grok-p1b/worker-a2-output.jsonl`), against a `--max-turns` of
+48 and a 16 KiB tool-result spill bound, so 64 KiB is reachable by an ordinary
+working turn rather than only by a runaway one.
+
 The result frame's last word is `diagnostic_length`, not padding: on
 `DBL_STATUS_WORKER_FAILED` the supervisor keeps the last `DBL_MAX_DIAGNOSTIC`
 bytes of the worker's merged stdout/stderr and sends them after the fixed

@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import type { NativeBrokerTurn, NativeBrokerTurnResult } from "./engineBrokerNativeClient.js";
+import { decodeNativeBrokerResult, ENGINE_BROKER_NATIVE_RESULT_BYTES, type NativeBrokerTurn, type NativeBrokerTurnResult } from "./engineBrokerNativeClient.js";
 import type { EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
 import { EngineBrokerTurnRegistry } from "./engineBrokerTurnRegistry.js";
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
@@ -291,3 +291,56 @@ test("a response that called nothing records an empty list, and one that cannot 
   }, undefined, () => 1, () => "<html>bad gateway</html>");
 });
 
+
+/**
+ * The exact 128-byte frame `supervise()` emits when a worker crosses
+ * `DBL_MAX_OUTPUT`: it stops reading, SIGKILLs the process group, and publishes
+ * `output_length = 0` with `DBL_STATUS_OUTPUT_FAILED`. Built here at the wire
+ * offsets the header's `_Static_assert`s pin, so the test drives the real
+ * decoder rather than a hand-made exception.
+ */
+function outputLimitFrame(turnId: string): Buffer {
+  const frame = Buffer.alloc(ENGINE_BROKER_NATIVE_RESULT_BYTES);
+  frame.writeUInt32LE(2, 0); frame.writeUInt32LE(3, 4); frame.writeUInt32LE(2_200, 8); frame.writeUInt32LE(0, 12);
+  frame.writeInt32LE(4_242, 16); frame.writeInt32LE(0, 20); frame.writeInt32LE(9, 24);
+  frame.writeBigUInt64LE(99n, 32); frame.write(turnId, 40, "utf8");
+  frame.writeUInt32LE(7, 108); frame.writeUInt32LE(7, 112); frame.writeUInt32LE(0, 116); frame.writeUInt32LE(0, 120);
+  return frame;
+}
+
+test("a worker whose work succeeded but whose output crossed the launcher bound still seals the spend the proxy measured", async () => {
+  await withBroker(async ({ turn, usageRows, requestRows, upstreamCalls }) => {
+    // The worker does its real work through the real proxy — two admitted,
+    // metered upstream requests — and only then loses its whole output: the
+    // launcher refused to publish it and the turn's text never exists. The
+    // frame is decoded by the shipped client, so the failure reaches the turn
+    // exactly as the native transport delivers it.
+    const worker: Worker = async (send) => {
+      assert.equal(await send(), 200);
+      assert.equal(await send(), 200);
+      throw decodeNativeBrokerResult(outputLimitFrame(turnIdFor("foreman", "wake-output-limit")), turnIdFor("foreman", "wake-output-limit"), []) as never;
+    };
+    await assert.rejects(turn("wake-output-limit", worker), (error: unknown) => {
+      assert.ok(error instanceof EngineBrokerTurnFailure);
+      // No limit tripped and the credential is live: this is the worker's
+      // transport failing, not the turn being refused.
+      assert.equal(error.code, "engine_failed");
+      assert.equal(error.diagnostic?.failureClass, "output_limit");
+      // Mutation guard: the turn has no stream to read usage from, so this can
+      // only come from the proxy's own per-request measurements. Falling back
+      // to `null` here would report a fabricated zero for real spend.
+      assert.deepEqual(error.accounting, { outcome: "failed", usage: { input: 5_136, cacheRead: 256, cacheWrite: 0, output: 158, total: 5_550 }, model: "grok-4.6", requests: 2, limitReason: "none" });
+      return true;
+    });
+    assert.equal(upstreamCalls(), 2);
+    const [row, extra] = await usageRows();
+    assert.equal(extra, undefined);
+    assert.deepEqual([row?.outcome, row?.reason, row?.total, row?.calls, row?.complete], ["failed", "unknown", 5_550, 2, false]);
+    assert.notEqual(row?.total, 0, "a zero row would be byte-identical to a measured zero");
+    assert.deepEqual((await requestRows()).map((value) => value.request), [0, 1], "every request the proxy answered keeps its own row");
+    // The sealed record is the durable truth: a replay returns that spend and never meters again.
+    await assert.rejects(turn("wake-output-limit", twoRequests), (error: unknown) =>
+      error instanceof EngineBrokerTurnFailure && error.accounting?.usage?.total === 5_550);
+    assert.equal((await usageRows()).length, 1, "the replayed failure is not metered again");
+  });
+});
