@@ -63,3 +63,16 @@ test("v2 may declare an evaluator inference ledger that is never a subject ledge
   }
   assert.throws(() => parseEngineBrokerServiceConfig({ ...config("v1", [reg("agent-a", 0)]), inferenceLedgerPath: "/run/paideia-inference/inference.jsonl" }), /invalid engine broker service config/u);
 });
+
+test("registration paths must be canonical, matching the native launcher's registration check", () => {
+  const good = reg("agent-a", 0);
+  for (const [field, value] of [
+    ["workspace", "/workspace/0/../1"], ["workspace", "/workspace//0"], ["workspace", "/workspace/0/"], ["workspace", "/workspace/./0"],
+    ["profilePath", "/workers/0/../1/.grok/sandbox.toml"], ["profilePath", "/workers//0/.grok/sandbox.toml"]
+  ] as const) {
+    const registration = { ...good, [field]: value, ...(field === "profilePath" ? { eventsPath: value.replace(/sandbox\.toml$/u, "sessions/sandbox-events.jsonl") } : {}) };
+    assert.throws(() => parseEngineBrokerServiceConfig(config("v1", [registration])), /invalid engine broker service config/u, `${field}=${value}`);
+  }
+  assert.throws(() => parseEngineBrokerServiceConfig({ ...config("v1", [good]), turnStore: "/var/lib/turns/" }));
+  assert.doesNotThrow(() => parseEngineBrokerServiceConfig(config("v1", [good])));
+});

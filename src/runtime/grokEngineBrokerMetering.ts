@@ -7,6 +7,8 @@ import type { TurnUsageFailureReason } from "./turnUsageLedger.js";
 export type BrokerTurnMetering = Readonly<{
   usageLedgerPath: string;
   requestLedgerPath: string;
+  /** Where the sealed response's operator-visible projection is appended (`engineBrokerSealLedger.ts`). */
+  sealLedgerPath: string;
   agentId: string;
   wakeId: string;
 }>;
@@ -31,8 +33,9 @@ export type BrokerTurnMeteringDetail = Readonly<{ notionalUsd: number; complete:
  *
  * Both terminal kinds meter: a failed turn spent real tokens, so its partial
  * usage is written with `outcome: failed` and its closed `limitReason`. A turn
- * with no usage at all (`usage: null`) writes nothing — a zero row is
- * byte-identical to a measured zero.
+ * with no usage at all (`usage: null`) writes no *usage* row — a zero row is
+ * byte-identical to a measured zero — but it still writes its seal row, which
+ * is a record of what the turn did rather than of what it spent.
  *
  * Appends never reject, so an append failure cannot escape into the caller's
  * `catch` and rewrite a completed turn as failed; the caller also refuses to

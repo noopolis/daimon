@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 import { renderMcpToolResult, MCP_TOOL_RESULT_MAX_BYTES, type McpUpstreamResult } from "./mcpToolResult.js";
 import {
+  assertSpillDirectoryStat,
   capToolResult,
   DEFAULT_TOOL_RESULT_MAX_BYTES,
   MIN_TOOL_RESULT_MAX_BYTES,
@@ -149,4 +150,92 @@ test("the bound and the exemption list come from the environment, and a nonsense
   assert.throws(() => resolveToolResultMaxBytes({ [TOOL_RESULT_MAX_BYTES_ENV]: "lots" }), /must be an integer/u);
   assert.deepEqual([...resolveExemptToolNames({})], []);
   assert.deepEqual([...resolveExemptToolNames({ [TOOL_RESULT_EXEMPT_ENV]: " mcp_a_b , mcp_c_d ," })], ["mcp_a_b", "mcp_c_d"]);
+});
+
+test("spilled files are readable by the directory's (worker) group and never by other users", async () => {
+  await withDirectory(async (directory) => {
+    // What a deployment provisions for a brokered worker: setgid tool-output in a group that is not the runtime's own.
+    const workerGroup = (process.getgroups?.() ?? []).find((gid) => gid !== process.getgid?.());
+    if (workerGroup !== undefined) { await chown(directory, process.getuid?.() ?? -1, workerGroup); await chmod(directory, 0o2750); } else await chmod(directory, 0o700);
+    const previous = process.umask(0o077);
+    let capped;
+    try { capped = await cap({ content: [{ type: "text", text: "x".repeat(200_000) }] }, { spillDirectory: directory }); } finally { process.umask(previous); }
+    assert.ok(capped.spillPath, "the spill was written");
+    const file = await stat(capped.spillPath);
+    assert.equal(file.mode & 0o777, 0o640, "group-readable even under a restrictive umask, never other-readable");
+    assert.equal(file.gid, (await stat(directory)).gid, "the file carries the directory's group");
+  });
+});
+
+const big = { content: [{ type: "text" as const, text: `HEAD${"y".repeat(100_000)}TAIL` }] };
+const spillName = "daimon-abc123.mcp_desk_archive_dump.log";
+
+test("a symlinked, world-open, or group-open-without-setgid spill directory is refused and nothing is written", async () => {
+  await withDirectory(async (root) => {
+    const target = path.join(root, "target"); await mkdir(target, { mode: 0o700 });
+    const linked = path.join(root, "linked"); await symlink(target, linked);
+    const capped = await cap(big, { spillDirectory: linked });
+    assert.equal(capped.spillPath, undefined);
+    assert.equal(capped.details.full_output_saved, false);
+    assert.deepEqual(await readdir(target), [], "nothing written through the symlink");
+    const workerGroup = (process.getgroups?.() ?? []).find((gid) => gid !== process.getgid?.());
+    if (workerGroup !== undefined) {
+      // A foreign group without setgid: files would not inherit it, so it is refused.
+      const noSetgid = path.join(root, "foreign-group-no-setgid"); await mkdir(noSetgid); await chown(noSetgid, process.getuid?.() ?? -1, workerGroup); await chmod(noSetgid, 0o750);
+      assert.equal((await cap(big, { spillDirectory: noSetgid })).spillPath, undefined, "0750 foreign group without setgid");
+    }
+    // 2750 in the runtime's own group is not a worker grant; 0701/0704 exceed 2750.
+    for (const mode of [0o777, 0o755, 0o750, 0o2770, 0o2757, 0o2750, 0o701, 0o704]) {
+      const directory = path.join(root, `mode-${mode.toString(8)}`); await mkdir(directory); await chmod(directory, mode);
+      const refused = await cap(big, { spillDirectory: directory });
+      assert.equal(refused.spillPath, undefined, mode.toString(8));
+      assert.deepEqual((await readdir(directory)).filter((name) => !name.startsWith(".")), [], mode.toString(8));
+    }
+  });
+});
+
+test("a destination symlink or a pre-existing 0666 file is replaced by a 0640 regular file without touching the target", async () => {
+  await withDirectory(async (root) => {
+    const directory = path.join(root, "tool-output"); await mkdir(directory, { mode: 0o700 });
+    const victim = path.join(root, "victim.txt"); await writeFile(victim, "VICTIM", { mode: 0o644 });
+    await symlink(victim, path.join(directory, spillName));
+    const first = await cap(big, { spillDirectory: directory });
+    assert.equal(first.spillPath, path.join(directory, spillName));
+    const replaced = await lstat(first.spillPath!);
+    assert.ok(replaced.isFile() && !replaced.isSymbolicLink());
+    assert.equal(replaced.mode & 0o777, 0o640);
+    assert.equal(await readFile(victim, "utf8"), "VICTIM", "the symlink target is untouched");
+
+    await rm(first.spillPath!); await writeFile(first.spillPath!, "stale", { mode: 0o666 }); await chmod(first.spillPath!, 0o666);
+    const second = await cap(big, { spillDirectory: directory });
+    const rewritten = await lstat(second.spillPath!);
+    assert.equal(rewritten.mode & 0o777, 0o640);
+    assert.equal(await readFile(second.spillPath!, "utf8"), big.content[0].text);
+  });
+});
+
+test("the spill directory must be owned by the runtime itself", () => {
+  const runtime = { uid: 2000, gid: 2000 };
+  const entry = (uid: number, gid: number, mode: number) => ({ uid, gid, mode: 0o040000 | mode, isDirectory: () => true });
+  assert.doesNotThrow(() => assertSpillDirectoryStat(entry(2000, 2000, 0o700), runtime));
+  assert.doesNotThrow(() => assertSpillDirectoryStat(entry(2000, 2200, 0o2750), runtime));
+  for (const [label, candidate] of [["owned by a worker", entry(2200, 2200, 0o700)], ["owned by root", entry(0, 2200, 0o2750)], ["not a directory", { ...entry(2000, 2000, 0o700), isDirectory: () => false }]] as const) {
+    assert.throws(() => assertSpillDirectoryStat(candidate, runtime), /spill directory/u, label);
+  }
+});
+
+test("a spill directory whose opened inode differs from the named one is refused", async () => {
+  await withDirectory(async (directory) => {
+    const probe = await open(directory, "r");
+    const prototype = Object.getPrototypeOf(probe) as { stat: (...args: unknown[]) => Promise<{ ino: number }> };
+    await probe.close();
+    const original = prototype.stat; let calls = 0;
+    const swapped = mock.method(prototype, "stat", async function (this: unknown, ...args: unknown[]) {
+      const real = await original.apply(this, args);
+      calls += 1;
+      return calls === 1 ? Object.assign(Object.create(Object.getPrototypeOf(real)), real, { ino: Number(real.ino) + 1 }) : real;
+    });
+    try { assert.equal((await cap(big, { spillDirectory: directory })).spillPath, undefined); } finally { swapped.mock.restore(); }
+    assert.deepEqual(await readdir(directory), []);
+  });
 });

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 
+import { assertGrokWorkerDenyPathShape } from "./grokWorkerDenyPlacement.js";
+
 export const GROK_WORKER_SANDBOX_PROFILE = "daimon-strict" as const;
 export const GROK_WORKER_SANDBOX_EVENTS_RELATIVE_PATH = "sessions/sandbox-events.jsonl" as const;
 
@@ -17,7 +19,12 @@ export const GROK_WORKER_SANDBOX_EVENTS_RELATIVE_PATH = "sessions/sandbox-events
  *
  * Entries are sorted and deduplicated so equal sets render equal bytes (and the
  * same `profileSha256`). A path that is not absolute and canonical, or that
- * carries a character TOML or Grok would reinterpret, is refused.
+ * carries a character TOML or Grok would reinterpret, is refused — and so is
+ * one that equals or contains a base-profile grant, the first half of the
+ * deny-placement policy (`grokWorkerDenyPlacement.ts`). The other half —
+ * the entry exists and every ancestor is searchable by the worker uid — needs
+ * a filesystem, so it is asserted by whoever provisions the paths and, on the
+ * direct path, before every turn.
  */
 export function renderGrokWorkerSandboxProfile(denyPaths: readonly string[] = []): string {
   const denied = [...new Set(denyPaths)].sort();
@@ -25,6 +32,7 @@ export function renderGrokWorkerSandboxProfile(denyPaths: readonly string[] = []
     if (!path.posix.isAbsolute(entry) || path.posix.normalize(entry) !== entry || entry === "/" || entry.endsWith("/") || /["\\\u0000-\u001f\u007f*?[\]]/u.test(entry)) {
       throw new TypeError("invalid Grok worker sandbox deny path");
     }
+    assertGrokWorkerDenyPathShape(entry);
   }
   return [
     `[profiles.${GROK_WORKER_SANDBOX_PROFILE}]`,

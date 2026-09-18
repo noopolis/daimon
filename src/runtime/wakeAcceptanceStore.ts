@@ -198,7 +198,13 @@ export class WakeAcceptanceStore {
         await this.afterFinalLockAssertion?.();
         await this.assertTransitionLock(record, lock);
         const target = this.fileFor(record.agent_id, record.delivery_id);
-        const next: Stored = { ...record, state, updated_at: new Date().toISOString(), claim_generation: claim.generation, ...(code === undefined ? {} : { code }), ...(completedText === undefined ? {} : { text: sanitizeWakeCompletionText(completedText) }), ...(attention === undefined ? {} : { execution_id: attention.clear_execution ? undefined : attention.execution_id ?? record.execution_id, deferred: attention.deferred ?? record.deferred, execution_error: attention.execution_error === null ? undefined : attention.execution_error === undefined ? record.execution_error : sanitizeExecutionError(attention.execution_error) || undefined }) };
+        // The code explains the transition that produced the CURRENT state, so a
+        // transition that names none clears it. While codes existed only on terminal
+        // records this could not matter — a terminal record returns above and is never
+        // rewritten — but a delivery reclaimed to `accepted` with its wake's outcome is
+        // claimed again later, and a carried-over code would describe the wrong state.
+        const { code: _replaced, ...carried } = record;
+        const next: Stored = { ...carried, state, updated_at: new Date().toISOString(), claim_generation: claim.generation, ...(code === undefined ? {} : { code }), ...(completedText === undefined ? {} : { text: sanitizeWakeCompletionText(completedText) }), ...(attention === undefined ? {} : { execution_id: attention.clear_execution ? undefined : attention.execution_id ?? record.execution_id, deferred: attention.deferred ?? record.deferred, execution_error: attention.execution_error === null ? undefined : attention.execution_error === undefined ? record.execution_error : sanitizeExecutionError(attention.execution_error) || undefined }) };
         await this.replace(target, next);
         if (claim.acceptance_ids === undefined && (isTerminal(state) || state === "accepted")) {
           const currentClaim = await this.readClaimOptional(this.claimFor(record));

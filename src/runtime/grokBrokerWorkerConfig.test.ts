@@ -35,6 +35,21 @@ test("worker config disables every bundled 1.0.34 skill, workflows, and the per-
   assert.match(section(config, "[cli]"), /auto_update = false\nuse_leader = false/u);
 });
 
+test("every model the worker can reach fails fast rather than retrying a refusal blindly", () => {
+  // Grok 1.0.34's default retries a refused request with backoff past 45 s.
+  // The sink and the evaluator client always pinned this; the worker's own
+  // model — the one path that spends money — did not, so a refusal there could
+  // stall a turn for minutes after its work was done with nothing logged.
+  for (const model of GROK_BROKER_MODELS) {
+    for (const reasoningEffort of GROK_BROKER_REASONING_EFFORTS) {
+      const config = renderGrokBrokerWorkerConfig({ model, reasoningEffort });
+      for (const block of ["[model.daimon-broker-grok]", "[model.daimon-session-title-disabled]"]) {
+        assert.match(section(config, block), /\nmax_retries = 0\n/u, `${block} ${model}/${reasoningEffort}`);
+      }
+    }
+  }
+});
+
 test("the declared model and effort reach the worker's only model as its sole allowed effort", () => {
   const config = renderGrokBrokerWorkerConfig({ model: "grok-build", reasoningEffort: "medium" });
   assert.match(section(config, "[model.daimon-broker-grok]"), /\nmodel = "grok-build"\n/u);

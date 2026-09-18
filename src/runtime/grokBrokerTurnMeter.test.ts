@@ -3,7 +3,7 @@ import { request as httpRequest } from "node:http";
 import test from "node:test";
 
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
-import { GrokBrokerTurnMeter, parseGrokUpstreamUsage } from "./grokBrokerTurnMeter.js";
+import { GROK_REQUEST_TOOL_CALLS_MAX, GROK_TOOL_CALL_INVALID, GROK_TOOL_CALL_TRUNCATED, GrokBrokerTurnMeter, parseGrokResponseToolNames, parseGrokUpstreamUsage } from "./grokBrokerTurnMeter.js";
 
 const lean = ["run_terminal_command", "read_file", "list_dir", "grep", "search_tool", "use_tool"].map((name) => ({ type: "function", function: { name } }));
 const body = JSON.stringify({ model: "grok-4.6", reasoning_effort: "low", stream: true, messages: [], tools: lean });
@@ -85,13 +85,21 @@ test("a request after the elapsed deadline is refused, and every admitted reques
   assert.deepEqual(snapshot.timings, [{ startedAt: new Date(1_000_000).toISOString(), endedAt: new Date(1_000_000).toISOString(), usage: estimate, estimated: true }]);
 });
 
-test("a turn without a registered meter is never forwarded", async () => {
+// A live capability with no registered meter means the turn is already over: the
+// launcher registers a turn before it starts the worker, so nothing can arrive
+// before the meter exists, and nothing can make a finished turn live again. The
+// answer is therefore 400 (a named, non-retryable refusal) rather than the 503 it
+// once was — a retryable shape here bought only Grok's blind retry storm, which
+// spent ~141k tokens re-asking a question that could never start being answerable.
+test("a turn without a registered meter is refused non-retryably and never forwarded", async () => {
   let calls = 0;
   const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async () => { calls++; return { status: 200, headers: {}, body: Buffer.from("{}") }; }, undefined, 0);
   try {
     const token = proxy.capabilities.issue("agent", "turn");
     proxy.registerIsolationGuard("turn", async () => undefined);
-    assert.equal((await post(proxy.port, token)).status, 503);
+    const answer = await post(proxy.port, token);
+    assert.equal(answer.status, 400);
+    assert.equal(JSON.parse(answer.text).reason, "no_active_turn");
     assert.equal(calls, 0);
   } finally { await proxy.close(); }
 });
@@ -180,4 +188,62 @@ test("an implausible per-request usage block is never added, and missing usage s
     assert.equal(calls(), 3);
   });
   assert.deepEqual([blind.snapshot().limitReason, blind.snapshot().tokens, blind.snapshot().estimatedRequests], ["tokens", 12_891, 3]);
+});
+
+const events = (chunks: readonly unknown[]): Uint8Array =>
+  Buffer.from(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n");
+/** One streaming tool call: the name arrives in one delta, the arguments in the next. */
+const callDeltas = (names: readonly string[]): unknown[] => [
+  ...names.map((name, index) => ({ choices: [{ index: 0, delta: { tool_calls: [{ index, id: `call-${index}`, type: "function", function: { name, arguments: "" } }] } }] })),
+  ...names.map((_name, index) => ({ choices: [{ index: 0, delta: { tool_calls: [{ index, function: { arguments: '{"query":"secret"}' } }] } }] }))
+];
+
+/**
+ * Two live turns ended with every tool correctly mounted and no way to tell
+ * whether the model had tried to call anything. These names are that answer,
+ * and nothing more than that answer.
+ */
+test("a response's tool-call names are read, bounded, and stripped of everything but the names", async () => {
+  // Mutation guard: passing the response through instead of the names leaks arguments here.
+  const names = parseGrokResponseToolNames(events([...callDeltas(["use_tool", "search_tool"]), { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }]), "text/event-stream");
+  assert.deepEqual(names, ["use_tool", "search_tool"]);
+  assert.equal(JSON.stringify(names).includes("secret"), false);
+
+  // A non-streaming body carries its calls on the message; one tool called
+  // twice is two attempts, because neither carries a streaming call index.
+  assert.deepEqual(parseGrokResponseToolNames(Buffer.from(JSON.stringify({ choices: [{ message: { tool_calls: [{ function: { name: "use_tool" } }, { function: { name: "use_tool" } }] } }] })), "application/json"), ["use_tool", "use_tool"]);
+
+  // Absence stays absence: a decoded response that called nothing is `[]`, and
+  // an undecodable one is nothing at all. A zero-length list must never be
+  // invented for a response nobody could read.
+  assert.deepEqual(parseGrokResponseToolNames(events([{ choices: [{ index: 0, delta: { content: "x" } }] }]), "text/event-stream"), []);
+  assert.equal(parseGrokResponseToolNames(Buffer.from("<html>gateway</html>"), "text/html"), undefined);
+  assert.equal(parseGrokResponseToolNames(Buffer.from(""), "text/event-stream"), undefined);
+  assert.equal(parseGrokResponseToolNames(Buffer.from("data: not-json\n\n"), "text/event-stream"), undefined);
+
+  // A name that is not a plain short identifier is counted, never passed through.
+  assert.deepEqual(parseGrokResponseToolNames(events(callDeltas(["ok_tool", "a b/c", "x".repeat(65), "inject\nline"])), "text/event-stream"), ["ok_tool", GROK_TOOL_CALL_INVALID, GROK_TOOL_CALL_INVALID, GROK_TOOL_CALL_INVALID]);
+
+  // A hostile but decodable shape yields no attempt instead of throwing:
+  // instrumentation must never be able to fail the turn it observes.
+  assert.deepEqual(parseGrokResponseToolNames(events([
+    { choices: "not-an-array" }, { choices: [null, 7, { delta: { tool_calls: "no" } }, { message: { tool_calls: [null, { function: null }, { function: { name: 42 } }, { function: { name: "" } }] } }] }
+  ]), "text/event-stream"), []);
+
+  // Mutation guard: unbounded, a pathological response writes 400 names into one row.
+  const many = parseGrokResponseToolNames(events(callDeltas(Array.from({ length: 400 }, (_value, index) => `tool_${index}`))), "text/event-stream");
+  assert.equal(many!.length, GROK_REQUEST_TOOL_CALLS_MAX);
+  assert.equal(many!.at(-1), GROK_TOOL_CALL_TRUNCATED);
+  assert.deepEqual(many!.slice(0, 2), ["tool_0", "tool_1"]);
+  // Exactly the bound is not truncated.
+  assert.equal(parseGrokResponseToolNames(events(callDeltas(Array.from({ length: GROK_REQUEST_TOOL_CALLS_MAX }, (_value, index) => `tool_${index}`))), "text/event-stream")!.includes(GROK_TOOL_CALL_TRUNCATED), false);
+});
+
+test("the meter carries each request's tool-call names without letting them touch the spend gate", async () => {
+  const meter = new GrokBrokerTurnMeter({ maxRequests: 32, maxTokens: 300_000, timeoutMs: 60_000 });
+  await withProxy({ prompt_tokens: 11, completion_tokens: 2 }, meter, async (send) => { assert.equal((await send()).status, 200); });
+  const [timing] = meter.snapshot().timings;
+  // The stub response carries no tool call, and says so rather than staying silent.
+  assert.deepEqual(timing!.toolCalls, []);
+  assert.deepEqual([meter.snapshot().tokens, meter.snapshot().limitReason, meter.snapshot().estimatedRequests], [13, "none", 0]);
 });

@@ -8,6 +8,7 @@ import { readChild } from "./cliChildOutput.js";
 import { cliChildEnvironment } from "./cliEnvironment.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import { renderGrokSandboxArgs } from "./cliEngineSpawn.js";
+import { assertGrokWorkerDenyPathsPlaceable } from "../runtime/grokWorkerDenyPlacement.js";
 import { GROK_WORKER_SANDBOX_EVENTS_RELATIVE_PATH, GROK_WORKER_SANDBOX_PROFILE, renderGrokWorkerSandboxProfile } from "../runtime/grokWorkerSandboxProfile.js";
 
 export const GROK_DAIMON_SANDBOX_PROFILE = GROK_WORKER_SANDBOX_PROFILE;
@@ -36,6 +37,11 @@ export async function prepareAndVerifyGrokSandbox(
   if (denied.some((entry) => overlaps(entry, cwd) || overlaps(entry, engineHome))) {
     throw unavailable();
   }
+  // Grok 1.0.34 materializes every deny target inside bubblewrap as the uid it
+  // runs Grok under — here, this process's own — and refuses the whole profile
+  // if one cannot be resolved. Refusing now names the path; letting it through
+  // would kill every turn with a bare `bwrap: Can't create file at …`.
+  await assertGrokWorkerDenyPathsPlaceable(denied, { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 });
   await writeProfile(engineHome, denied);
   const beforeBytes = await eventFileSize(path.join(engineHome, SANDBOX_EVENTS));
   const child = trackCliChild(spawn(authority.command, [

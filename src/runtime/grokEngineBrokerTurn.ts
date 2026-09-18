@@ -3,10 +3,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { decodeGrokHeadlessTurn } from "../pi/grokHeadlessResult.js";
 import { decodeGrokStreamUsage, type GrokStreamUsage } from "../pi/grokStreamUsage.js";
 import { ENGINE_BROKER_VERSION, type EngineBrokerFailureCode, type EngineBrokerTerminalResponse } from "./engineBrokerProtocol.js";
+import type { EngineBrokerMcpCallObservation } from "./engineBrokerMcpCallLog.js";
 import { lowerEngineBrokerTurnLimits, mapGrokReportedModel, type EngineBrokerTurnAccounting, type EngineBrokerTurnLimitOverrides, type EngineBrokerTurnUsage } from "./engineBrokerTurnAccounting.js";
 import { NativeBrokerTurnFailure, type NativeBrokerDiagnostic, type NativeBrokerTurn, type NativeBrokerTurnResult } from "./engineBrokerNativeClient.js";
 import type { EngineBrokerTurnRegistry } from "./engineBrokerTurnRegistry.js";
-import { engineBrokerRequestLedgerPathFor, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
+import { engineBrokerRequestLedgerPathFor, engineBrokerSealLedgerPathFor, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
 import { ensureBrokerTurnLedgered } from "./grokEngineBrokerLedger.js";
 import { finishBrokerTurnWithUsage, type BrokerTurnMetering, type BrokerTurnMeteringDetail } from "./grokEngineBrokerMetering.js";
 import type { GrokBrokerProxyTurn } from "./grokBrokerProxy.js";
@@ -15,14 +16,14 @@ import { GrokWorkerAttestationFailure } from "./grokWorkerAttestation.js";
 
 export type GrokEngineBrokerTurnResult = Readonly<{ text: string; workerPid: number; workerUid: number; workerStartTime: string }> & EngineBrokerTurnAccounting;
 export class EngineBrokerTurnFailure extends Error {
-  constructor(readonly code: Exclude<EngineBrokerFailureCode, "turn_conflict" | "unavailable">, readonly diagnostic?: NativeBrokerDiagnostic, readonly accounting?: EngineBrokerTurnAccounting) { super("engine broker turn failed"); }
+  constructor(readonly code: Exclude<EngineBrokerFailureCode, "turn_conflict" | "unavailable">, readonly diagnostic?: NativeBrokerDiagnostic, readonly accounting?: EngineBrokerTurnAccounting, readonly mcpCalls?: EngineBrokerMcpCallObservation) { super("engine broker turn failed"); }
 }
 
 /** Everything one broker turn touches, injected so the accounting and limit paths run under test without a native launcher. */
 export type GrokEngineBrokerTurnDependencies = Readonly<{
   turns: EngineBrokerTurnRegistry;
   proxy: Readonly<{ capabilities: Readonly<{ issue(agentId: string, turnId: string): string; revoke(turnId: string): void }>; registerIsolationGuard(turnId: string, guard: () => Promise<void>): void; revokeIsolationGuard(turnId: string): void; registerTurn(turnId: string, turn: GrokBrokerProxyTurn): void; revokeTurn(turnId: string): void }>;
-  mcp: Readonly<{ register(agentId: string, turnId: string, endpoint: string): string; revoke(turnId: string): void }>;
+  mcp: Readonly<{ register(agentId: string, turnId: string, endpoint: string): string; revoke(turnId: string): void; observe?(turnId: string): EngineBrokerMcpCallObservation | undefined }>;
   credentialStale(): boolean;
   prepareIsolation(registration: EngineBrokerServiceRegistration): Promise<() => Promise<void>>;
   runNative(input: NativeBrokerTurn, signal: AbortSignal): Promise<Readonly<NativeBrokerTurnResult>>;
@@ -52,7 +53,7 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
   const turnId = createHash("sha256").update(`${agentId}\0${wakeId}`).digest("hex");
   const request = { version: ENGINE_BROKER_VERSION, kind: "start_turn", requestId: randomUUID(), turnId, agentId, wakeId, prompt, mcpEndpoint, ...(overrides === undefined ? {} : { limits: overrides }) } as const;
   const begun = await deps.turns.begin(request, declared);
-  const metering: BrokerTurnMetering = { usageLedgerPath: registration.usageLedgerPath, requestLedgerPath: engineBrokerRequestLedgerPathFor(registration.usageLedgerPath), agentId, wakeId };
+  const metering: BrokerTurnMetering = { usageLedgerPath: registration.usageLedgerPath, requestLedgerPath: engineBrokerRequestLedgerPathFor(registration.usageLedgerPath), sealLedgerPath: engineBrokerSealLedgerPathFor(registration.usageLedgerPath), agentId, wakeId };
   if (begun !== "start") { await ensureBrokerTurnLedgered(begun.ledger, turnId, metering); return replay(begun.replay); }
   const controller = new AbortController();
   const meter = new GrokBrokerTurnMeter(limits, () => controller.abort());
@@ -91,10 +92,15 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     const diagnostic = error instanceof NativeBrokerTurnFailure ? error.diagnostic : nativeDiagnostic && !attested ? { ...nativeDiagnostic, status: "worker_failed" as const, stage: "attestation" as const, failureClass: error instanceof GrokWorkerAttestationFailure ? error.failureClass : "profile_invalid" as const, profileApplied: false } : undefined;
     const stream = output === undefined ? undefined : decodeGrokStreamUsage(output);
     const accounting = { outcome: "failed", usage: streamOrMeterUsage(stream, snapshot), model: declared, requests: requestCount(stream, snapshot), limitReason: snapshot.limitReason } as const;
-    const failed: EngineBrokerTerminalResponse = { version: request.version, kind: "failed", requestId: request.requestId, turnId, code, ...(diagnostic ? { diagnostic } : {}), ...accounting };
+    // Read before the `finally` revokes this turn's MCP registration, and
+    // swallowed like every other instrument here: it must never be the reason
+    // a turn reports something other than why it failed.
+    let mcpCalls: EngineBrokerMcpCallObservation | undefined;
+    try { mcpCalls = deps.mcp.observe?.(turnId); } catch { mcpCalls = undefined; }
+    const failed: EngineBrokerTerminalResponse = { version: request.version, kind: "failed", requestId: request.requestId, turnId, code, ...(diagnostic ? { diagnostic } : {}), ...(mcpCalls === undefined ? {} : { mcpCalls }), ...accounting };
     const reason = snapshot.limitReason !== "none" ? limitReasonFor[snapshot.limitReason] : rejected ? "turn_rejected" : "unknown";
     await finishBrokerTurnWithUsage(deps.turns, request, failed, metering, { notionalUsd: 0, complete: false, reason, estimatedRequests: snapshot.estimatedRequests, requests: requestRows(stream, snapshot), ...(stream?.sessionId === undefined ? {} : { session: stream.sessionId }) });
-    throw new EngineBrokerTurnFailure(code, diagnostic, accounting);
+    throw new EngineBrokerTurnFailure(code, diagnostic, accounting, mcpCalls);
   } finally {
     clearTimeout(timer); signal?.removeEventListener("abort", onAbort); meter.abortInFlight();
     deps.proxy.revokeTurn(turnId); deps.proxy.revokeIsolationGuard(turnId); deps.proxy.capabilities.revoke(turnId); deps.mcp.revoke(turnId);
@@ -105,7 +111,7 @@ function replay(response: EngineBrokerTerminalResponse): GrokEngineBrokerTurnRes
   const accounting = { outcome: response.outcome, usage: response.usage, model: response.model, requests: response.requests, limitReason: response.limitReason };
   if (response.kind === "completed") return { text: response.text, workerPid: response.workerPid, workerUid: response.workerUid, workerStartTime: response.workerStartTime, ...accounting, outcome: "completed" };
   const code = response.code === "turn_conflict" || response.code === "unavailable" ? "engine_failed" : response.code;
-  throw new EngineBrokerTurnFailure(code, response.diagnostic as NativeBrokerDiagnostic | undefined, accounting);
+  throw new EngineBrokerTurnFailure(code, response.diagnostic as NativeBrokerDiagnostic | undefined, accounting, response.mcpCalls);
 }
 
 /** The proxy saw every forwarded request; the stream is the fallback when no request crossed this proxy. */
@@ -120,12 +126,22 @@ function streamOrMeterUsage(stream: GrokStreamUsage | undefined, snapshot: GrokB
   return snapshot.usage;
 }
 
-/** Per-request rows: stream usage with proxy timing when both describe the same requests, else the proxy's own measured requests. */
+/** Per-request rows: stream usage with the proxy's own observation when both describe the same requests, else the proxy's measured requests. */
 function requestRows(stream: GrokStreamUsage | undefined, snapshot: GrokBrokerTurnMeterSnapshot): BrokerTurnMeteringDetail["requests"] {
   if (stream !== undefined && stream.requests.length > 0) {
     const timed = snapshot.timings.length === stream.requests.length;
-    return stream.requests.map((value, index) => ({ ...value, usageSource: "stream" as const, ...(timed ? clock(snapshot.timings[index]!) : {}) }));
+    return stream.requests.map((value, index) => ({ ...value, usageSource: "stream" as const, ...(timed ? observed(snapshot.timings[index]!) : {}) }));
   }
-  return snapshot.timings.flatMap((timing, index) => timing.usage === undefined ? [] : [{ index, ...usageOf(timing.usage), usageSource: timing.estimated === true ? "estimated" as const : "upstream" as const, ...clock(timing) }]);
+  return snapshot.timings.flatMap((timing, index) => timing.usage === undefined ? [] : [{ index, ...usageOf(timing.usage), usageSource: timing.estimated === true ? "estimated" as const : "upstream" as const, ...observed(timing) }]);
 }
-const clock = (timing: GrokBrokerTurnMeterSnapshot["timings"][number]) => ({ startedAt: timing.startedAt, ...(timing.endedAt === undefined ? {} : { endedAt: timing.endedAt }) });
+/**
+ * What only the proxy saw of one request: its clock, and the tool-call names the
+ * response carried. Both are attached on the stream path only when the two
+ * descriptions are request-for-request aligned, because an unaligned index would
+ * credit one request's attempt to another.
+ */
+const observed = (timing: GrokBrokerTurnMeterSnapshot["timings"][number]) => ({
+  startedAt: timing.startedAt,
+  ...(timing.endedAt === undefined ? {} : { endedAt: timing.endedAt }),
+  ...(timing.toolCalls === undefined ? {} : { toolCalls: timing.toolCalls })
+});

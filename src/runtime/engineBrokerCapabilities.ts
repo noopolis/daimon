@@ -23,6 +23,28 @@ export class EngineBrokerCapabilities {
     }
     return undefined;
   }
+  /**
+   * Which grant a token names and why it would be refused, *without* spending
+   * it.
+   *
+   * The facade needs this on its refusal path alone. A 403 it cannot attribute
+   * to a turn is a 403 that seals as nothing at all, and a turn whose every
+   * request was refused then reads exactly like a healthy one — the silence
+   * `engineBrokerMcpCallLog.ts` exists to end. A token no grant matches names
+   * no turn and stays unattributed; nothing here returns the token, the grant
+   * or the agent's capability, only the turn id and a closed reason.
+   */
+  classifyToken(token: string): Readonly<{ turnId: string; state: "live" | "expired" | "exhausted" }> | undefined {
+    const candidate = hash(token);
+    for (const grant of this.grants.values()) {
+      if (!timingSafeEqual(grant.digest, candidate)) continue;
+      // Budget before expiry: the TTL outlives every declared turn limit, so an
+      // exhausted grant is the reachable refusal and the actionable answer.
+      if (grant.requests >= grant.maxRequests) return { turnId: grant.turnId, state: "exhausted" };
+      return { turnId: grant.turnId, state: grant.expiresAt <= Date.now() ? "expired" : "live" };
+    }
+    return undefined;
+  }
   inspectToken(token:string):Readonly<{agentId:string;turnId:string}>|undefined{const candidate=hash(token);for(const grant of this.grants.values()){if(grant.expiresAt>Date.now()&&grant.requests<grant.maxRequests&&timingSafeEqual(grant.digest,candidate))return{agentId:grant.agentId,turnId:grant.turnId};}return undefined;}
   revoke(turnId: string): void { const grant = this.grants.get(turnId); grant?.digest.fill(0); this.grants.delete(turnId); }
 }

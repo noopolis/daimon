@@ -6,6 +6,7 @@ import { WakeAcceptanceStore, WakeExecutionClaimLostError, type WakeExecutionCla
 import type { StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
 import { WakeFuse } from "./wakeFuse.js";
 import { ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES } from "../contracts/organizationRuntimeContract.js";
+import { grokDaimonToolName } from "../contracts/grokWorkerContract.js";
 
 type Claimed = { record: StoredWakeAcceptanceRecord; claim: WakeExecutionClaim; done: boolean };
 type Options = Readonly<{ store: WakeAcceptanceStore; host: OrganizationRuntimeHost; fuse: WakeFuse; agents: readonly OrganizationRuntimeAgentConfig[]; registry: AttentionRegistry; token: string | undefined; onIdle(agentId: string): void }>;
@@ -111,7 +112,7 @@ export class AttentionDispatcher {
       result = await host.wake({ token, agentId: agent.id, event: {
         version: "noopolis.daimon.wake.v1", id: agent.attention === undefined ? first.delivery_id : executionId, kind: first.event.kind,
         occurredAt: first.event.occurred_at,
-        text: agent.attention === undefined ? first.event.text : inboxPrompt(messages, agent.attention.maxBatchBytes)
+        text: agent.attention === undefined ? first.event.text : inboxPrompt(messages, agent.engine.kind, agent.attention.maxBatchBytes)
       } });
     } catch (error) {
       result = { version: "noopolis.daimon.wake-result.v1", status: "failed", agentId: agent.id, wakeId: executionId, code: "engine_failed", detail: engineFailureDetail(error) };
@@ -121,7 +122,17 @@ export class AttentionDispatcher {
       const executionError = result.status === "rejected" ? `wake rejected: ${result.code}`
         : result.status === "failed" ? `engine_failed: ${result.detail ?? "engine execution failed"}` : null;
       for (const item of claimed.filter((value) => !value.done)) {
-        if (this.stopping || result.status === "stopped") await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
+        // Returned to the inbox for restart, and recording WHY. Only a WAKE OUTCOME
+        // decides this: `stopped` — which an aborted in-flight wake also carries, with
+        // its own code — is the runtime reclaiming work nobody read. The dispatcher's
+        // own halt is not an outcome and must not stand in for one; it guards the
+        // pre-wake path, where it belongs. Keying on it here discarded a completed
+        // wake's evidence because the host happened to be halting, leaving a record
+        // byte-identical to "never ran". Production tolerated it because a restart
+        // re-delivers; a one-shot isolated trial has no restart and simply lost it.
+        if (result.status === "stopped") {
+          await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted", result.code);
+        }
         else if (agent.attention !== undefined) {
           // Successful reading is not completion. A failed execution also keeps
           // unfinished deliveries, and its execution id for idempotent retry.
@@ -171,15 +182,56 @@ export function selectBatch(records: readonly StoredWakeAcceptanceRecord[], agen
   return selected.length ? selected : [first];
 }
 
-function inboxPrompt(messages: readonly unknown[], maxBytes = 12000): string {
+/** One claimed delivery, rendered as the task it is. */
+function deliveryBlock(message: unknown, index: number): string | undefined {
+  if (message === null || typeof message !== "object") return undefined;
+  const row = message as Record<string, unknown>;
+  const text = typeof row.text === "string" ? row.text : undefined;
+  if (text === undefined) return undefined;
+  const from = typeof row.from === "string" ? row.from : undefined;
+  const kind = typeof row.kind === "string" ? row.kind : "delivery";
+  const id = typeof row.delivery_id === "string" ? row.delivery_id : `#${index + 1}`;
+  return [`<delivery id="${id}" kind="${kind}"${from === undefined ? "" : ` from="${from}"`}>`, text, "</delivery>"].join("\n");
+}
+
+/**
+ * The inbox turn, task first.
+ *
+ * A delivery's own text *is* the work. Leading with bookkeeping and handing the
+ * model `JSON.stringify(messages)` buried the task: an agent read the JSON, did
+ * the accounting and deferred without doing the job (observed on Grok: nine
+ * model requests, no tool calls, nothing filed). The deliveries are therefore
+ * rendered as labelled blocks and the `daimon_inbox` accounting follows them as
+ * what to do *after* the work, with the machine-readable payload kept as a
+ * trailing appendix while it fits the same budget.
+ *
+ * Both tools are named the way the agent's own engine can call them. On Grok a
+ * Daimon tool is an MCP tool of server `daimon` and its bare name reaches
+ * nothing (`grokDaimonToolName`, the same contract module the worker's system
+ * prompt and identity envelope render from), so an agent handed the bare name
+ * cannot mark its work complete — and an unmarked, finished wake is recorded as
+ * deferred.
+ */
+export function inboxPrompt(messages: readonly unknown[], engine: OrganizationRuntimeAgentConfig["engine"]["kind"], maxBytes = 12000): string {
   const body = JSON.stringify(messages);
-  const prefix = "Handle this inbox turn. Use daimon_inbox for deliveries and remaining allowances. Explicitly call daimon_inbox_disposition for each handled delivery (complete) or unfinished delivery (defer). Reading or ending this turn never completes a delivery. Deferred work waits for a later external wake.\n";
+  const blocks = messages.map(deliveryBlock).filter((block): block is string => block !== undefined);
+  const tool = (name: string): string => engine === "grok" ? grokDaimonToolName(name) : name;
+  const accounting = `\nWhen the work above is done, record each delivery with ${tool("daimon_inbox_disposition")} (complete), or defer the ones you could not finish; use ${tool("daimon_inbox")} for deliveries and remaining allowances. Reading or ending this turn never completes a delivery, and deferred work waits for a later external wake.\n`;
+  const header = blocks.length === 1 ? "Carry out this delivery.\n" : `Carry out these ${blocks.length} deliveries.\n`;
+  const fits = (value: string): boolean => Buffer.byteLength(value) <= ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES
+    && [...value].length <= ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS;
+  if (blocks.length > 0 && Buffer.byteLength(blocks.join("\n\n")) <= maxBytes) {
+    const task = header + blocks.join("\n\n") + accounting;
+    const withPayload = `${task}\nMachine-readable payload: ${body}`;
+    // The inbox budget bounds selection; the v1 execution boundary independently
+    // bounds the complete prompt, including metadata, escaping, and instructions.
+    if (Buffer.byteLength(body) <= maxBytes && fits(withPayload)) return withPayload;
+    if (fits(task)) return task;
+  }
+  const prefix = `Handle this inbox turn. Use ${tool("daimon_inbox")} for deliveries and remaining allowances. Explicitly call ${tool("daimon_inbox_disposition")} for each handled delivery (complete) or unfinished delivery (defer). Reading or ending this turn never completes a delivery. Deferred work waits for a later external wake.\n`;
   const prompt = prefix + body;
-  // The inbox budget bounds selection; the v1 execution boundary independently
-  // bounds the complete prompt, including metadata, escaping, and instructions.
-  if (Buffer.byteLength(body) > maxBytes || Buffer.byteLength(prompt) > ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES
-      || [...prompt].length > ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS) {
-    return prefix + "The selected payload exceeds the prompt budget; read it with daimon_inbox.";
+  if (Buffer.byteLength(body) > maxBytes || !fits(prompt)) {
+    return prefix + `The selected payload exceeds the prompt budget; read it with ${tool("daimon_inbox")}.`;
   }
   return prompt;
 }

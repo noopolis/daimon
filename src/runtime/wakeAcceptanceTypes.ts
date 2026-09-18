@@ -25,12 +25,21 @@ export const WAKE_ACCEPTANCE_REQUEST_SCHEMA = {
 export const WAKE_RECEIPT_STATUS_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema", $id: WAKE_RECEIPT_STATUS_VERSION, type: "object", additionalProperties: false,
   required: ["version", "acceptance_id", "agent_id", "delivery_id", "request_digest", "state", "accepted_at", "updated_at"], properties: {
-    version: { const: WAKE_RECEIPT_STATUS_VERSION }, acceptance_id: { type: "string", pattern: "^[0-9a-f-]{36}$" }, agent_id: { type: "string" }, delivery_id: { type: "string" }, request_digest: { type: "string", pattern: "^[a-f0-9]{64}$" }, state: { enum: ["accepted", "running", "completed", "failed", "stopped"] }, accepted_at: { type: "string" }, updated_at: { type: "string" }, execution_id: { type: "string", pattern: "^[0-9a-f-]{36}$" }, deferred: { type: "boolean" }, code: { enum: ["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] }, text: { type: "string", maxLength: MAX_WAKE_COMPLETION_TEXT_BYTES }
+    version: { const: WAKE_RECEIPT_STATUS_VERSION }, acceptance_id: { type: "string", pattern: "^[0-9a-f-]{36}$" }, agent_id: { type: "string" }, delivery_id: { type: "string" }, request_digest: { type: "string", pattern: "^[a-f0-9]{64}$" }, state: { enum: ["accepted", "running", "completed", "failed", "stopped"] }, accepted_at: { type: "string" }, updated_at: { type: "string" }, execution_id: { type: "string", pattern: "^[0-9a-f-]{36}$" }, deferred: { type: "boolean" }, code: { enum: ["engine_failed", "host_stopped", "host_stopping", "queued_wake_stopped", "active_wake_aborted", "queue_full", "unknown_agent"] }, text: { type: "string", maxLength: MAX_WAKE_COMPLETION_TEXT_BYTES }
   }
 } as const;
 
 export type WakeReceiptState = "accepted" | "running" | "completed" | "failed" | "stopped";
-export type WakeReceiptCode = "engine_failed" | "host_stopped" | "host_stopping" | "queue_full" | "unknown_agent";
+/**
+ * Why a receipt reached its state, and every member is a state the runtime really
+ * produces: `queued_wake_stopped` and `active_wake_aborted` are the two shapes a
+ * shutdown gives a wake (`organizationRuntimeHost.ts` settles a queued job with the
+ * first and the in-flight one with the second), and a delivery reclaimed for restart
+ * used to record neither, because the only caller that could name them passed no
+ * code at all. A code that cannot be determined stays ABSENT: a plausible name for
+ * an undetermined cause is worse than no name, because it is acted on.
+ */
+export type WakeReceiptCode = "engine_failed" | "host_stopped" | "host_stopping" | "queued_wake_stopped" | "active_wake_aborted" | "queue_full" | "unknown_agent";
 export type OrganizationRuntimeWakeAcceptanceRequest = Readonly<{
   token: string | undefined;
   agent_id: string;
@@ -71,6 +80,12 @@ export type OrganizationRuntimeActivityV2Item = OrganizationRuntimeWakeReceiptSt
 }>;
 export type OrganizationRuntimeActivityV2 = Readonly<{
   version: typeof ACTIVITY_V2_VERSION;
+  /**
+   * Whether this projection was read from a live runtime or sealed as the host
+   * stopped. Optional on the wire because a projection published before the seal
+   * existed must still parse; its absence means "not stated", never "running".
+   */
+  state?: "running" | "stopped";
   items: readonly OrganizationRuntimeActivityV2Item[];
   executions?: readonly Readonly<{ agent_id: string; execution_id: string; state: "running"; delivery_ids: readonly string[] }>[];
 }>;

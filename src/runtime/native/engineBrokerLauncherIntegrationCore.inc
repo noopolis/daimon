@@ -215,7 +215,7 @@ static void client_case(void) {
       result_bytes == sizeof(result) && result_padding_zero(&result) &&
           result.status == DBL_STATUS_OK && result.stage == DBL_STAGE_OUTPUT &&
           result.failure_class == DBL_FAILURE_NONE && !result.profile_applied &&
-          !result.reserved && result.output_length < DBL_MAX_OUTPUT,
+          !result.diagnostic_length && result.output_length < DBL_MAX_OUTPUT,
       "client result");
   char *out = calloc(1, result.output_length + 1);
   check(read(output[0], out, result.output_length) ==
@@ -369,7 +369,7 @@ static void malformed_response_case(int truncated) {
   if (truncated)
     write(peer, &result, sizeof(result) / 2);
   else {
-    result.reserved = 1;
+    result.diagnostic_length = DBL_MAX_DIAGNOSTIC + 1;
     write(peer, &result, sizeof(result));
   }
   close(peer);
@@ -380,11 +380,11 @@ static void malformed_response_case(int truncated) {
             observed.status == DBL_STATUS_PRELAUNCH_FAILED &&
             observed.stage == DBL_STAGE_REQUEST &&
             observed.failure_class == DBL_FAILURE_PROTOCOL &&
-            !observed.reserved,
+            !observed.diagnostic_length,
         "fixed protocol diagnostic");
   close(output[0]);
   int status;
   waitpid(child, &status, 0);
   check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
-        truncated ? "truncated result" : "reserved result");
+        truncated ? "truncated result" : "over-bound diagnostic result");
 }

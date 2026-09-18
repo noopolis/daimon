@@ -60,8 +60,10 @@ test("a grant refuses any tools member, the session_title request, and undeclare
       judgeBody({ messages: [{ role: "tool", content: "x" }] }), judgeBody({ messages: [{ role: "assistant", content: null, tool_calls: [] }] }),
       judgeBody({ response_format: { type: "json_object" } })
     ];
-    for (const body of refused) assert.equal((await post(port, token, body)).status, 503, body.slice(0, 120));
-    assert.equal((await post(port, token, judgeBody(), "1.0.30")).status, 503);
+    // Policy misses are non-retryable: 400, so a judge fails fast instead of retrying a 503.
+    for (const body of refused) assert.equal((await post(port, token, body)).status, 400, body.slice(0, 120));
+    assert.equal((await post(port, token, judgeBody(), "1.0.30")).status, 400);
+    // The title sink keeps its transient 503 shape on the grant path too.
     assert.equal((await post(port, GROK_SESSION_TITLE_SINK_KEY, titleBody)).status, 503);
     assert.equal(bodies.length, 0); assert.equal(rows.length, 0);
   });
@@ -70,8 +72,8 @@ test("a grant refuses any tools member, the session_title request, and undeclare
 test("an expired, released or unknown grant is refused", async () => {
   await withProxy(async ({ port, grants, bodies }) => {
     const released = grants.issue({ model: "grok-4.6", reasoningEffort: "low", purpose: "judge" }); grants.release(released.grantId);
-    assert.equal((await post(port, released.token, judgeBody())).status, 503);
-    assert.equal((await post(port, `inference_${"A".repeat(43)}`, judgeBody())).status, 503);
+    assert.equal((await post(port, released.token, judgeBody())).status, 400);
+    assert.equal((await post(port, `inference_${"A".repeat(43)}`, judgeBody())).status, 400);
     assert.equal(bodies.length, 0);
   });
   let now = 5_000;
@@ -81,7 +83,7 @@ test("an expired, released or unknown grant is refused", async () => {
     const { token } = grants.issue({ model: "grok-4.6", reasoningEffort: "low", purpose: "judge" });
     assert.equal((await post(proxy.port, token, judgeBody())).status, 200);
     now += 600_000;
-    assert.equal((await post(proxy.port, token, judgeBody())).status, 503);
+    assert.equal((await post(proxy.port, token, judgeBody())).status, 400);
   } finally { grants.close(); await proxy.close(); }
 });
 
@@ -93,8 +95,9 @@ test("a grant token never authorizes a subject turn and a turn capability never 
     proxy.registerTurn("turn-a", { policy: { model: "grok-4.6", reasoningEffort: "low" }, meter: new GrokBrokerTurnMeter({ maxRequests: 4, maxTokens: 10_000, timeoutMs: 60_000 }) });
     const lean = ["run_terminal_command", "read_file", "list_dir", "grep", "search_tool", "use_tool"].map((name) => ({ type: "function", function: { name } }));
     const leanBody = JSON.stringify({ model: "grok-4.6", reasoning_effort: "low", stream: true, messages: [], tools: lean });
-    assert.equal((await post(port, grantToken, leanBody)).status, 503);
-    assert.equal((await post(port, turnToken, judgeBody())).status, 503);
+    // Cross-use is a policy miss on both paths: refused 400, never a retryable 503.
+    assert.equal((await post(port, grantToken, leanBody)).status, 400);
+    assert.equal((await post(port, turnToken, judgeBody())).status, 400);
     assert.equal(bodies.length, 0);
     assert.equal((await post(port, turnToken, leanBody)).status, 200);
     assert.equal((await post(port, grantToken, judgeBody())).status, 200);

@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir } from "node:fs/promises";
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -35,6 +34,7 @@ import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
 import type { PiSessionFactoryInput } from "./piHarness.js";
+import { ensureRuntimeHome, ensureRuntimeHomeDirectory } from "../runtime/runtimeHomeLayout.js";
 
 export type CliEngineKind = "agy" | "codex" | "grok";
 
@@ -138,14 +138,9 @@ type CliTurnEnd = Extract<SessionEvent, { type: "turn_end" }>;
 
 export const prepareCliRuntimeHome = async (runtimeHomePath: string | undefined): Promise<void> => {
   if (runtimeHomePath === undefined) return;
-  await Promise.all([
-    runtimeHomePath,
-    `${runtimeHomePath}/.config`,
-    `${runtimeHomePath}/.local/share`,
-    `${runtimeHomePath}/.local/state`,
-    `${runtimeHomePath}/.cache`,
-    `${runtimeHomePath}/.tmp`
-  ].map((directory) => mkdir(directory, { recursive: true })));
+  await ensureRuntimeHome(runtimeHomePath);
+  await Promise.all([".config", ".local/share", ".local/state", ".cache", ".tmp"]
+    .map((relative) => ensureRuntimeHomeDirectory(runtimeHomePath, relative)));
 };
 
 const childSecretValues = (redactedNames: readonly string[]): readonly string[] =>
@@ -188,7 +183,17 @@ const startMcp = async (
     await startupSettled;
     await transport.close().catch(() => undefined);
     await mcpServer.close().catch(() => undefined);
-    if (httpServer.listening) await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    // `close` only stops accepting and then waits for every open connection,
+    // including the ones the transport has no record of and so cannot end (a
+    // socket opened before `initialize`, or a client pool's idle keep-alive
+    // socket, which relaying a turn through the broker MCP facade leaves
+    // behind). That wait is unbounded and sits on the wake's own completion
+    // path: measured, one such connection parked a finished broker turn with
+    // its result in hand and published nothing. By here this one wake's engine
+    // has returned, failed or been cancelled, so anything still connected is a
+    // leftover — see `AGENTS.md`, and the facade, which bounds itself the same
+    // way.
+    if (httpServer.listening) await new Promise<void>((resolve) => { httpServer.close(() => resolve()); httpServer.closeAllConnections(); });
     lifecycle = "closed";
   })();
   const mount = { get endpoint(): string { return endpoint; }, close };

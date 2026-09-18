@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 
+import { renderBrokerTurnSealLine, TURN_SEAL_LEDGER_VERSION, TURN_SEAL_MAX_LINE_BYTES } from "./engineBrokerSealLedger.js";
 import { recordLedgerLines, renderGrokTurnRequestLines, TURN_REQUEST_LEDGER_VERSION, type GrokTurnRequest } from "./turnRequestLedger.js";
 import { renderTurnUsageLine, TURN_USAGE_LEDGER_VERSION, type TurnUsageFailureReason } from "./turnUsageLedger.js";
 import type { EngineBrokerTerminalResponse } from "./engineBrokerProtocol.js";
@@ -16,15 +17,23 @@ import type { EngineBrokerTerminalResponse } from "./engineBrokerProtocol.js";
  * normal append finds the row and writes nothing, and readers dedupe on `turn`
  * should two replays race.
  */
-export type BrokerTurnLedgerLines = Readonly<{ usage: string | null; requests: string }>;
+export type BrokerTurnLedgerLines = Readonly<{ usage: string | null; requests: string; seal?: string }>;
+/** A v1 record, or a replay with no sealed bytes at all: nothing to append, including no seal. */
 export const EMPTY_BROKER_TURN_LEDGER: BrokerTurnLedgerLines = Object.freeze({ usage: null, requests: "" });
 
 export type BrokerTurnLedgerDetail = Readonly<{ agentId: string; wakeId: string; notionalUsd: number; complete: boolean; reason?: TurnUsageFailureReason; requests: readonly GrokTurnRequest[]; session?: string; estimatedRequests: number }>;
 
 export function renderBrokerTurnLedger(terminal: EngineBrokerTerminalResponse, detail: BrokerTurnLedgerDetail): BrokerTurnLedgerLines {
-  if (terminal.usage === null) return EMPTY_BROKER_TURN_LEDGER;
-  const { usage } = terminal, at = new Date().toISOString();
+  const at = new Date().toISOString();
+  // The seal row is rendered for *every* terminal turn, including one whose
+  // usage is null. That is the whole point: a turn cancelled before any usage
+  // could be attributed is exactly the turn whose outstanding MCP call and
+  // redacted last words have no other route to the host.
+  const seal = renderBrokerTurnSealLine(terminal, { agent: detail.agentId, wake: detail.wakeId, at });
+  if (terminal.usage === null) return { usage: null, requests: "", seal };
+  const { usage } = terminal;
   return {
+    seal,
     usage: renderTurnUsageLine({
       agent: detail.agentId, wake: detail.wakeId, engine: "grok", at,
       usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, total: usage.total, calls: terminal.requests, notionalUsd: detail.notionalUsd, complete: detail.complete },
@@ -38,11 +47,20 @@ export function renderBrokerTurnLedger(terminal: EngineBrokerTerminalResponse, d
 const MAX_USAGE_LINE_BYTES = 4_096, MAX_REQUEST_LINES_BYTES = 262_144;
 const rows = (text: string): Record<string, unknown>[] => text.split("\n").filter((line) => line.length > 0).map((line) => { const value: unknown = JSON.parse(line); if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(); return value as Record<string, unknown>; });
 
-/** Strict check of stored ledger bytes: exactly the turn's own rows, newline-terminated, bounded. */
+/**
+ * Strict check of stored ledger bytes: exactly the turn's own rows,
+ * newline-terminated, bounded.
+ *
+ * `seal` is optional so a record sealed before this stream existed still
+ * replays; its absence means the turn owes no seal row, never that one was
+ * lost.
+ */
 export function parseBrokerTurnLedgerLines(value: unknown, turnId: string): BrokerTurnLedgerLines {
   const invalid = () => new Error("broker turn registry unavailable");
-  if (value === null || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== 2 || !Object.hasOwn(value, "usage") || !Object.hasOwn(value, "requests")) throw invalid();
-  const { usage, requests } = value as { usage: unknown; requests: unknown };
+  if (value === null || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "usage") || !Object.hasOwn(value, "requests")) throw invalid();
+  const sealed = Object.hasOwn(value, "seal");
+  if (Object.keys(value).length !== (sealed ? 3 : 2)) throw invalid();
+  const { usage, requests, seal } = value as { usage: unknown; requests: unknown; seal?: unknown };
   try {
     if (usage !== null) {
       if (typeof usage !== "string" || !usage.endsWith("\n") || Buffer.byteLength(usage) > MAX_USAGE_LINE_BYTES) throw invalid();
@@ -51,21 +69,32 @@ export function parseBrokerTurnLedgerLines(value: unknown, turnId: string): Brok
     }
     if (typeof requests !== "string" || (requests.length > 0 && (usage === null || !requests.endsWith("\n"))) || Buffer.byteLength(requests) > MAX_REQUEST_LINES_BYTES) throw invalid();
     if (rows(requests).some((row) => row.v !== TURN_REQUEST_LEDGER_VERSION || row.turn !== turnId)) throw invalid();
+    if (sealed) {
+      if (typeof seal !== "string" || !seal.endsWith("\n") || Buffer.byteLength(seal) > TURN_SEAL_MAX_LINE_BYTES) throw invalid();
+      const parsed = rows(seal);
+      if (parsed.length !== 1 || parsed[0]!.v !== TURN_SEAL_LEDGER_VERSION || parsed[0]!.turn !== turnId) throw invalid();
+    }
   } catch { throw invalid(); }
-  return { usage: usage as string | null, requests };
+  return { usage: usage as string | null, requests, ...(sealed ? { seal: seal as string } : {}) };
 }
 
+export type BrokerTurnLedgerPaths = Readonly<{ usageLedgerPath: string; requestLedgerPath: string; sealLedgerPath: string }>;
+
 /** Appends sealed lines on the first metering: no presence scan is needed, nothing was appended before the record existed. */
-export async function appendBrokerTurnLedger(lines: BrokerTurnLedgerLines, paths: Readonly<{ usageLedgerPath: string; requestLedgerPath: string }>): Promise<void> {
+export async function appendBrokerTurnLedger(lines: BrokerTurnLedgerLines, paths: BrokerTurnLedgerPaths): Promise<void> {
   if (lines.usage !== null) await recordLedgerLines(paths.usageLedgerPath, lines.usage);
   await recordLedgerLines(paths.requestLedgerPath, lines.requests);
+  // Last, and never conditional on usage: a turn with no attributable spend is
+  // precisely the one whose seal row is its only account of itself.
+  if (lines.seal !== undefined) await recordLedgerLines(paths.sealLedgerPath, lines.seal);
 }
 
 /** On replay: append each stream's sealed lines only when that stream (current file or its `.1`) holds no row for this turn. Never rejects. */
-export async function ensureBrokerTurnLedgered(lines: BrokerTurnLedgerLines, turnId: string, paths: Readonly<{ usageLedgerPath: string; requestLedgerPath: string }>): Promise<void> {
+export async function ensureBrokerTurnLedgered(lines: BrokerTurnLedgerLines, turnId: string, paths: BrokerTurnLedgerPaths): Promise<void> {
   try {
     if (lines.usage !== null && !await ledgerHasTurn(paths.usageLedgerPath, turnId)) await recordLedgerLines(paths.usageLedgerPath, lines.usage);
     if (lines.requests.length > 0 && !await ledgerHasTurn(paths.requestLedgerPath, turnId)) await recordLedgerLines(paths.requestLedgerPath, lines.requests);
+    if (lines.seal !== undefined && !await ledgerHasTurn(paths.sealLedgerPath, turnId)) await recordLedgerLines(paths.sealLedgerPath, lines.seal);
   } catch { /* advisory: a replay never fails on its ledger */ }
 }
 

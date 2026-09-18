@@ -1,4 +1,5 @@
 import { attentionTools, type AttentionRegistry } from "./attention.js";
+import { grokDaimonToolName, grokMountedToolNamingRule } from "../contracts/grokWorkerContract.js";
 import path from "node:path";
 
 import type { AgentHandle } from "../core/types.js";
@@ -56,7 +57,8 @@ export async function startOrganizationRuntimeEngine(
         readablePaths: codexSandboxReadablePaths(canonicalAgent)
       }
     : undefined;
-  const adapter = adapterFor(canonicalAgent, controlTokenEnv, readiness.verify, readiness.executablePath, readiness.engineHomePath, paths?.verify, agyBusAddress, [...await createProductionAgentTools(canonicalAgent, wakeContext), ...(agent.attention !== undefined && attention !== undefined ? attentionTools(agent.id, attention) : [])], wakeContext, grokSandbox,grokBroker,codexSandboxPaths);
+  const mountedTools = [...await createProductionAgentTools(canonicalAgent, wakeContext), ...(agent.attention !== undefined && attention !== undefined ? attentionTools(agent.id, attention) : [])];
+  const adapter = adapterFor(canonicalAgent, controlTokenEnv, readiness.verify, readiness.executablePath, readiness.engineHomePath, paths?.verify, agyBusAddress, mountedTools, wakeContext, grokSandbox,grokBroker,codexSandboxPaths, mountedTools.map((tool) => tool.name));
   const handle = await adapter.startAgent({
     id: canonicalAgent.id,
     name: canonicalAgent.name,
@@ -118,16 +120,16 @@ export function codexSandboxReadablePaths(
   return [path.join(currentAgent.runtimeHomePath, "tool-output")];
 }
 
-function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: string, verifyExecutable: () => Promise<void>, executablePath: string, engineHomePath: string, verifyRuntimePaths?: () => Promise<void>, agyBusAddress?: string, productionTools: readonly import("@earendil-works/pi-coding-agent").ToolDefinition[] = [], wakeEnvironmentContext: import("../pi/piAgentWakeSupport.js").PiWakeEnvironmentContextRef = {}, verifyGrokSandbox?: () => Promise<void>,grokBroker?:EngineBrokerTurnClient,codexSandboxPaths?: { readonly protectedPaths: readonly string[]; readonly readablePaths: readonly string[] }): PiHarnessAdapter {
+function adapterFor(agent: OrganizationRuntimeAgentConfig, controlTokenEnv: string, verifyExecutable: () => Promise<void>, executablePath: string, engineHomePath: string, verifyRuntimePaths?: () => Promise<void>, agyBusAddress?: string, productionTools: readonly import("@earendil-works/pi-coding-agent").ToolDefinition[] = [], wakeEnvironmentContext: import("../pi/piAgentWakeSupport.js").PiWakeEnvironmentContextRef = {}, verifyGrokSandbox?: () => Promise<void>,grokBroker?:EngineBrokerTurnClient,codexSandboxPaths?: { readonly protectedPaths: readonly string[]; readonly readablePaths: readonly string[] }, mountedToolNames: readonly string[] = []): PiHarnessAdapter {
   const engine = agent.engine.kind;
   const sessionFactory = createCliSessionFactory(
     engine === "agy"
-      ? { engine, maxToolTurns: AGY_MAX_TOOL_TURNS, timeoutMs: 180_000, dbusSessionBusAddress: agyBusAddress, redactedEnvironmentNames: [controlTokenEnv], identityPrompt: identityEnvelope(agent), command: executablePath, engineHomePath, verifyExecutable, verifyRuntimePaths,
+      ? { engine, maxToolTurns: AGY_MAX_TOOL_TURNS, timeoutMs: 180_000, dbusSessionBusAddress: agyBusAddress, redactedEnvironmentNames: [controlTokenEnv], identityPrompt: identityEnvelope(agent, mountedToolNames), command: executablePath, engineHomePath, verifyExecutable, verifyRuntimePaths,
         // AGY has no broker to meter it, so the session hands its decoded
         // terminal-frame usage straight to the same ledger the Grok broker
         // appends to. `recordTurnUsage` is advisory and never rejects.
         onTurnUsage: (usage, outcome) => recordTurnUsage(resolveTurnUsageLedgerPath(), { agent: agent.id, wake: wakeEnvironmentContext.current ?? "wake", engine: "agy", usage, outcome }) }
-      : { engine, redactedEnvironmentNames: [controlTokenEnv], identityPrompt: identityEnvelope(agent), command: executablePath, engineHomePath, verifyExecutable, verifyRuntimePaths,
+      : { engine, redactedEnvironmentNames: [controlTokenEnv], identityPrompt: identityEnvelope(agent, mountedToolNames), command: executablePath, engineHomePath, verifyExecutable, verifyRuntimePaths,
         ...(engine === "codex" ? {
           // Codex has no broker to meter it, so publish terminal-frame usage
           // to the shared advisory ledger — on the wake that published and on
@@ -176,16 +178,54 @@ function grokBrokerTurnFor(agent: OrganizationRuntimeAgentConfig, grokBroker: En
  * CLI engines do not consume Pi's resource loader. Frame the same immutable
  * identity in JSON so arbitrary names/instructions cannot change its shape.
  */
-function identityEnvelope(agent: OrganizationRuntimeAgentConfig): string {
+/**
+ * The caller-owned prompt preamble.
+ *
+ * It names the mounted tools explicitly, because a CLI engine reaches Daimon's
+ * tools over MCP and an agent whose instructions name another engine's tool
+ * spelling can finish a turn having called nothing. The declared names are the
+ * caller's own configuration, not engine-supplied text.
+ *
+ * On Grok the bare names are not the callable ones: every Daimon tool is a
+ * deferred MCP tool of server `daimon`, and Grok 1.0.34 refuses an unqualified
+ * name before any HTTP ("Tool names must be qualified as `server__tool`"). This
+ * envelope used to instruct exactly that refused form. The correct rule is not
+ * restated here — it is rendered by `grokMountedToolNamingRule` in the same
+ * contract module that renders the worker's pinned system prompt, so the two
+ * texts cannot contradict each other again. Every other engine's sentence is
+ * unchanged, byte for byte.
+ */
+export function identityEnvelope(agent: OrganizationRuntimeAgentConfig, mountedToolNames: readonly string[] = []): string {
   return [
     "<daimon-agent-identity>",
     JSON.stringify({ id: agent.id, name: agent.name, instructions: agent.instructions }),
     "</daimon-agent-identity>",
-    "Colleagues only hear you when you call moltnet_send; your terminal response is a private note to the runtime, not a message to anyone — keep it to one line or leave it empty. "
+    ...(mountedToolNames.length === 0 ? [] : [
+      (agent.engine.kind === "grok"
+        ? grokMountedToolNamingRule(mountedToolNames)
+        : `Your mounted tools are exactly: ${mountedToolNames.join(", ")}. Call them by these names; `
+          + "your instructions may spell them differently.")
+        + " No other tool reaches the newsroom."
+    ]),
+    // The one tool that reaches colleagues is named the way this engine can
+    // call it. Meaning and prohibition are unchanged; only the spelling is.
+    `Colleagues only hear you when you call ${engineToolName(agent, "moltnet_send")}; your terminal response is a private note to the runtime, not a message to anyone — keep it to one line or leave it empty. `
       + "Do not seek transport credentials or invoke a transport CLI unless the caller explicitly mounted an authenticated transport tool.",
     "The following is the current wake event."
   ].join("\n") + "\n";
 }
+
+/**
+ * One Daimon tool name, spelled the way this agent's engine accepts it.
+ *
+ * On Grok the bare form is refused as an invalid MCP tool name, so any
+ * engine-facing sentence that *names* a tool renders it through the contract's
+ * `grokDaimonToolName`; every other engine keeps the bare name byte for byte.
+ * Grok's own native tools (`read_file`, `search_tool`, `use_tool`) are not
+ * Daimon tools and never take the prefix.
+ */
+const engineToolName = (agent: OrganizationRuntimeAgentConfig, tool: string): string =>
+  agent.engine.kind === "grok" ? grokDaimonToolName(tool) : tool;
 
 function cliHarness(
   agent: OrganizationRuntimeAgentConfig,

@@ -53,7 +53,21 @@ export type OrganizationGrokBrokerProjectionOptions = Readonly<{
   architecture: "arm64" | "x64";
   usageLedgerPath: string;
   limits: EngineBrokerTurnLimits;
-  /** The wake-acceptance store, always denied like the Codex projection's. */
+  /**
+   * The deny entry that protects the durable wake-acceptance store: the store
+   * itself, or a directory containing it.
+   *
+   * Grok 1.0.34 materializes every deny target inside bubblewrap **as the
+   * worker uid**, so a target whose parent directory the worker cannot search
+   * is unplaceable and makes Grok refuse the whole profile — every turn of that
+   * worker then fails, not just that path. Deployments that keep the store
+   * under a private `state` directory (`2000:2000 0700`) therefore declare that
+   * directory here: it covers the store, nothing else lives there, and lifting
+   * the mask adds the worker no reach, where opening the parent with `o+x`
+   * would. The caller is the one party that knows both the layout and the
+   * modes; whoever recomputes this projection must pass the same value or the
+   * digests will not match, which is the intended fail-closed outcome.
+   */
   acceptanceStorePath: string;
   /** Evaluator and host-bind paths the deployment must keep from the worker (R4). */
   denyPaths?: readonly string[];
@@ -79,9 +93,10 @@ export type OrganizationGrokBrokerProjectionOptions = Readonly<{
  *
  * The agent must be a Grok agent that *declares* its model and reasoning
  * effort; nothing is defaulted. The deny list is Daimon's own protected set for
- * this agent (realm, bootstrap, peers, acceptance store) plus the caller's
- * evaluator paths, sorted and deduplicated exactly as the profile renderer
- * does. A supplied `profileSha256` that differs is refused.
+ * this agent (realm, bootstrap, peers, and the mask covering the acceptance
+ * store) plus the caller's evaluator paths, sorted and deduplicated exactly as
+ * the profile renderer does. A supplied `profileSha256` that differs is
+ * refused.
  */
 export function resolveOrganizationGrokBrokerProjection(config: unknown, agentId: string, options: OrganizationGrokBrokerProjectionOptions): OrganizationGrokBrokerProjection {
   const parsed = parseOrganizationRuntimeConfig(config);

@@ -25,6 +25,9 @@ environment: `DAIMON_MCP_CAPABILITY` and `DAIMON_PROVIDER_CAPABILITY` (Grok
 config reads the proxy capability through `env_key`). `--auth-provider` mode
 remains for callers of the older contract.
 
+It also exports `TMPDIR=<registered home>/tmp`, the worker's private temp
+directory, derived only from the root-owned registration.
+
 Received descriptors carry `MSG_CMSG_CLOEXEC` and can already occupy fds 3-5,
 so `launch()` lifts prompt, capability, output, executable and status fds above
 16 before `dup2`-ing them into place; a `dup2` onto itself keeps close-on-exec
@@ -36,3 +39,131 @@ Holding one verified descriptor and `execveat`-ing it would not make a replaced
 binary unrunnable: Grok 1.0.34 re-executes itself inside bubblewrap by path
 (`/usr/local/bin/grok`), so the image path's root ownership, not the launcher
 descriptor, is what protects the sandboxed process.
+
+**The worker's end of that pipe is a blocking pipe.** `O_NONBLOCK` is a
+property of the open file description, not of a descriptor, so creating the
+merged stdout/stderr pipe with `pipe2(..., O_NONBLOCK)` handed non-blocking
+writes to the worker along with `pipes[1]`: Grok 1.0.34 makes the first EAGAIN
+from a headless stdout write fatal (`stdout write failed: Resource temporarily
+unavailable (os error 11)`) and exits 1 before it issues a single model
+request, so the turn burns a wake and buys nothing. It stayed invisible until
+the MCP tools became reachable and the init frame that enumerates them grew to
+roughly 9.5 KB — past a pipe buffer, which is not always the 64 KiB default
+(8 KiB inside the Docker Desktop VM this suite runs in). So the pipe is created
+`O_CLOEXEC` only and `O_NONBLOCK` is set afterwards on `pipes[0]` alone, the
+read end this process polls; that one is load bearing, because the post-exit
+drain loop has no `poll` and would otherwise park on a write end some surviving
+grandchild still holds.
+
+A blocking child cannot wedge the launcher. `serve()` runs in its own forked
+handler per connection, so one worker's backpressure never reaches another
+turn; `supervise` drains the pipe on every pass of a 250 ms `poll`, and both
+bounds act on a child that is asleep in `write()`: crossing `DBL_MAX_OUTPUT`
+stops reading (`p[1].events = 0`) and `kill(-pid, SIGKILL)`s the worker's whole
+process group in the same iteration, and a client disconnect does the same —
+neither is refusable by a process sleeping on a pipe. `worker_spill_case` is
+the cover: the fixture shrinks its own stdout pipe to the kernel minimum,
+reports the capacity it actually got, and writes four times that in one
+`write`, so it straddles the buffer on any host without assuming 64 KiB while
+staying under `DBL_MAX_OUTPUT`.
+
+**Crossing `DBL_MAX_OUTPUT` is a reported status, not a lost turn.** This is
+worth stating because it has been guessed at twice: a trip sets
+`output_limited`, stops reading, `SIGKILL`s the worker's process group, reaps
+it, and then — `disconnected` is still 0, so the branch at the end of
+`supervise` runs — writes the complete 128-byte result frame with
+`DBL_STATUS_OUTPUT_FAILED`, `DBL_STAGE_OUTPUT`, `DBL_FAILURE_OUTPUT_LIMIT` and
+`output_length = 0`. `closed_result` admits exactly that shape, the client
+relays it, and `decodeNativeBrokerResult` raises a named
+`NativeBrokerTurnFailure`. So a trip costs the turn its *text* and nothing
+else: the broker still seals the turn and still meters the spend the proxy
+measured. A lost terminal frame, an unnamed transport failure or an unmetered
+turn therefore cannot be explained by this bound, and the only branch that
+sends nothing at all is a client that already disconnected.
+
+**Both readers of that buffer trip the same bound**, through
+`output_limit_crossed`. The poll loop always did; the post-exit drain did not,
+so a worker that exited with more than `DBL_MAX_OUTPUT` still in the pipe left
+`used` at the buffer's last byte with `output_limited` clear, and the turn was
+published `DBL_STATUS_OK` with `output_length = DBL_MAX_OUTPUT + 1` — which
+`closed_result` refuses, so the client replaced it with a fabricated
+`prelaunch_failed`/`protocol` frame carrying no pid and no start ticks. That
+frame says the worker never ran, about a turn that ran and whose work may have
+succeeded, which is the one class of lie this boundary must never tell.
+The window is real but narrow: `poll` is level-triggered, so the loop sees any
+buffered byte, and the drain can only inherit data written in the gap between
+`poll()` returning and `waitpid()` reaping. It is therefore **not
+reproducible on demand in this suite** — the fix is by construction, and the
+adversarial cases that do cross the bound (`output_boundary_case`,
+`worker_flood_case`, `worker_spill_case`) only prove it did not regress. Do not
+add a test that claims to cover it by feeding the bound through the poll loop:
+that routes around the defect.
+
+The bound is the whole turn's stdout, not one frame, and it is now 256 KiB.
+**This supersedes the "known limit, deliberately not raised yet" this file
+carried while the pipe's blocking mode was the variable under test.** The
+measurement that decided it: a live brokered turn emitted 26,482 bytes for
+four tool calls, 23,320 of them one tool-result frame carrying all four
+(`.runtime/grok-p1b/worker-a2-output.jsonl`); JSON framing and escaping
+inflated those payloads by 1.007x, so a turn's stdout is close to the sum of
+its tool results. The nine-tool-call turn this was raised for is about 210 KB
+of the same shape, against a 64 KiB bound — so 64 KiB was reachable by an
+ordinary working turn, and crossing it costs that turn its whole text. The new
+number is not headroom-by-guess: it is the control protocol's own `text` bound
+(`engineBrokerProtocol.ts`, 262144), the next boundary this output has to
+cross, so a larger launcher bound would only move the refusal one layer up.
+`worker_turn_case` writes exactly that measured shape — a 9,728-byte init
+frame and nine 23,320-byte frames, 219,608 bytes — and asserts it is published
+whole; restoring 65536 turns it red.
+
+**A bound that hangs would be worse than no bound, and this one does not.**
+The hypothesis that a worker parks forever in `write()` once the bound is
+crossed — plausible after the pipe became blocking, because a write that
+cannot complete now blocks instead of erroring — was tested, not reasoned
+about, and it is false. `worker_stream_case` writes eight times the bound in
+frame-sized writes and then sleeps far longer than this suite, so it is asleep
+inside `write()` with its pipe full when the trip fires and nothing but the
+launcher can end it; the launcher answers `output_limit` with `term_signal`
+SIGKILL in seconds. Its socket carries a 30-second deadline so a park fails
+red instead of parking the runner. Deleting the `output_limited` half of
+`if (disconnected || output_limited) kill(-pid, SIGKILL)` is the mutation that
+proves it: the case then times out on that deadline, and
+`output_boundary_case` does not notice, because its worker has already exited
+by the time the trip fires. That is the boundary the two cases straddle —
+a worker gone at the trip against a worker alive and blocked at it.
+
+The result frame's last word is `diagnostic_length`, not padding: on
+`DBL_STATUS_WORKER_FAILED` the supervisor keeps the last `DBL_MAX_DIAGNOSTIC`
+bytes of the worker's merged stdout/stderr and sends them after the fixed
+frame, while `output_length` stays 0 as before. Every other failure sends none,
+and `closed_result` refuses a frame that mixes the two. The bytes are the
+worker's own, so the broker redacts them before they cross any boundary.
+
+**The window keeps both ends.** A worker that dies early prints its error
+first and then echoes its own input, so a pure tail kept the echo: the one live
+capture this had ever produced was 512 bytes of the agent's own prompt read
+back, with the error already off the front and erased here. `diagnostic_window`
+keeps the first `DBL_MAX_DIAGNOSTIC / 2`, then `DBL_DIAGNOSTIC_ELISION` naming
+the bytes dropped, then the last `DBL_MAX_DIAGNOSTIC / 2`, all inside the same
+bound — the marker is sized against `used`, the largest count it can carry, so
+the budget holds for every input, and a `snprintf` that will not fit falls back
+to the tail. Output that already fits is left in place, byte-identical, with no
+marker. The marker text is byte-identical to the TypeScript window's
+(`boundedDiagnosticWindow`), so one grep finds an elision on either side of the
+boundary.
+
+That elision is a *cut*, and a cut can split a turn capability in half, leaving
+a fragment exact redaction can never match. The answer used where Daimon owns
+both ends — retain one whole secret more than is reported — cannot work here,
+because what this window keeps is exactly what it sends: a margin reserved here
+would be sent too. So the fragment is scrubbed where the capabilities are
+known, in `engineBrokerNativeClient.ts` (`scrubCutFragments`), on both sides of
+every marker and at the window's outer ends.
+
+Changing any of the six pinned launcher sources means rebuilding: `node
+--import tsx src/runtime/native/build.ts`, then re-pin
+`artifacts.sourceSha256`/`x64Sha256`/`arm64Sha256` in the contract manifest and
+re-emit it. `artifactsManifest.test.ts` fails by design until that is done. The
+adversarial suite is `docker build -f Dockerfile.integration -t <tag> .` in this
+folder and `docker run --rm --privileged <tag>`; `worker_flood_case` is the
+head-and-tail cover and fails first if the window regresses to a tail.

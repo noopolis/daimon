@@ -12,7 +12,7 @@ export const ENGINE_BROKER_SERVICE_V2 = "noopolis.daimon.engine-broker-service.v
 /** One root-provisioned broker slot. Every field is fixed at provisioning time; a wake can only lower `limits`. */
 export type EngineBrokerServiceRegistration = Readonly<{
   agentId: string; slot: number; workerUid: number; workspace: string; profilePath: string; eventsPath: string; profileSha256: string;
-  /** Per-slot usage ledger the broker appends turn rows to; per-request rows go to `requests.jsonl` beside it. */
+  /** Per-slot usage ledger the broker appends turn rows to; per-request rows go to `requests.jsonl` and per-turn seals to `turns.jsonl` beside it. */
   usageLedgerPath: string;
   limits: EngineBrokerTurnLimits;
   model: GrokBrokerModelPolicy;
@@ -31,10 +31,22 @@ const V2_REGISTRATION = [...V1_REGISTRATION, "usageLedgerPath", "limits", "model
 const invalid = (): TypeError => new TypeError("invalid engine broker service config");
 const plain = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const exact = (value: Record<string, unknown>, fields: readonly string[]): void => { if (Object.keys(value).length !== fields.length || fields.some((field) => !Object.hasOwn(value, field))) throw invalid(); };
-const absolute = (item: unknown): item is string => typeof item === "string" && item.startsWith("/") && !item.includes("/../") && !item.endsWith("/..") && !item.includes("\0");
+/**
+ * Absolute and canonical: no `.`/`..`/empty components and no trailing slash.
+ * The native launcher derives HOME, GROK_HOME and TMPDIR from the registered
+ * home and refuses a non-canonical one, so the broker's view must match it.
+ */
+const absolute = (item: unknown): item is string => typeof item === "string" && item.length > 1 && item.startsWith("/") && !item.endsWith("/") && path.posix.normalize(item) === item && !item.split("/").slice(1).some((part) => part === "." || part === "..") && !item.includes("\0");
 
 /** The per-request stream written beside a registration's usage ledger. */
 export const engineBrokerRequestLedgerPathFor = (usageLedgerPath: string): string => path.posix.join(path.posix.dirname(usageLedgerPath), "requests.jsonl");
+
+/**
+ * The per-turn seal stream written beside the other two
+ * (`engineBrokerSealLedger.ts`): the operator-visible half of a sealed terminal
+ * response, for the turn whose response never reaches a client.
+ */
+export const engineBrokerSealLedgerPathFor = (usageLedgerPath: string): string => path.posix.join(path.posix.dirname(usageLedgerPath), "turns.jsonl");
 
 /**
  * Strict `service.json` parser.
@@ -62,7 +74,7 @@ export function parseEngineBrokerServiceConfig(value: unknown): EngineBrokerServ
     const base = { agentId, slot: slot as number, workerUid: workerUid as number, workspace, profilePath, eventsPath, profileSha256 };
     if (!v2) return { ...base, usageLedgerPath: TURN_USAGE_LEDGER.filePath, limits: DEFAULT_GROK_BROKER_TURN_LIMITS, model: DEFAULT_GROK_BROKER_MODEL_POLICY };
     const usageLedgerPath = entry.usageLedgerPath;
-    if (!ledgerPath(usageLedgerPath) || usageLedgerPath === engineBrokerRequestLedgerPathFor(usageLedgerPath)) throw invalid();
+    if (!ledgerPath(usageLedgerPath) || usageLedgerPath === engineBrokerRequestLedgerPathFor(usageLedgerPath) || usageLedgerPath === engineBrokerSealLedgerPathFor(usageLedgerPath)) throw invalid();
     let limits: EngineBrokerTurnLimits;
     try { limits = parseEngineBrokerTurnLimits(entry.limits); } catch { throw invalid(); }
     return { ...base, usageLedgerPath, limits, model: parseServiceModel(entry.model) };
@@ -71,7 +83,7 @@ export function parseEngineBrokerServiceConfig(value: unknown): EngineBrokerServ
   if (!Object.hasOwn(value, "inferenceLedgerPath")) return base;
   const inferenceLedgerPath = value.inferenceLedgerPath;
   if (!ledgerPath(inferenceLedgerPath)) throw invalid();
-  const subject = new Set<string>([TURN_USAGE_LEDGER.filePath, TURN_REQUEST_LEDGER.filePath, ...registrations.flatMap((entry) => [entry.usageLedgerPath, engineBrokerRequestLedgerPathFor(entry.usageLedgerPath)])]);
+  const subject = new Set<string>([TURN_USAGE_LEDGER.filePath, TURN_REQUEST_LEDGER.filePath, ...registrations.flatMap((entry) => [entry.usageLedgerPath, engineBrokerRequestLedgerPathFor(entry.usageLedgerPath), engineBrokerSealLedgerPathFor(entry.usageLedgerPath)])]);
   if (subject.has(inferenceLedgerPath)) throw invalid();
   return { ...base, inferenceLedgerPath };
 }

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
+import { lstat, open, readdir, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -13,6 +13,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { OrganizationRuntimeAgentConfig, OrganizationRuntimeMcpServer } from "./organizationRuntime.js";
 import { moltnetOperationResult, readMoltnetPages } from "./moltnetMachineRead.js";
 import { McpToolCallError, MCP_TOOL_RESULT_MAX_BYTES, renderMcpToolResult, replayMcpReceipt, type McpUpstreamResult } from "./mcpToolResult.js";
+import { ensureRuntimeHomeDirectory } from "./runtimeHomeLayout.js";
 import { capToolResult, resolveExemptToolNames, resolveToolResultMaxBytes, TOOL_OUTPUT_DIRECTORY_NAME } from "./toolResultSpill.js";
 import { cliChildEnvironment } from "../pi/cliEnvironment.js";
 import type { PiWakeEnvironmentContextRef } from "../pi/piAgentWakeSupport.js";
@@ -31,7 +32,7 @@ const MAX_RESULT = 65_536; const TIMEOUT = 10_000;
 const DAIMON_ACTION_ID_PREFIX = "daimon-";
 
 export async function createProductionAgentTools(agent: OrganizationRuntimeAgentConfig, wakeContext: PiWakeEnvironmentContextRef = {}): Promise<ToolDefinition[]> {
-  await mkdir(path.join(agent.runtimeHomePath, "tool-state"), { recursive: true, mode: 0o700 });
+  await ensureRuntimeHomeDirectory(agent.runtimeHomePath, "tool-state");
   // Resolved once, at agent start: a malformed bound is a configuration error
   // that should refuse the agent, not a surprise thrown from the middle of a
   // tool call the model is waiting on.

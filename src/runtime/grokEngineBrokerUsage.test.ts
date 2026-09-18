@@ -7,10 +7,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import type { NativeBrokerTurn, NativeBrokerTurnResult } from "./engineBrokerNativeClient.js";
+import { decodeNativeBrokerResult, ENGINE_BROKER_NATIVE_RESULT_BYTES, type NativeBrokerTurn, type NativeBrokerTurnResult } from "./engineBrokerNativeClient.js";
 import type { EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
 import { EngineBrokerTurnRegistry } from "./engineBrokerTurnRegistry.js";
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
+import type { EngineBrokerMcpCallObservation } from "./engineBrokerMcpCallLog.js";
 import { EngineBrokerTurnFailure, runGrokEngineBrokerTurn, type GrokEngineBrokerTurnDependencies } from "./grokEngineBrokerTurn.js";
 import { TURN_REQUEST_LEDGER_VERSION } from "./turnRequestLedger.js";
 import { dedupeTurnUsageRows, TURN_USAGE_LEDGER_VERSION } from "./turnUsageLedger.js";
@@ -47,10 +48,19 @@ const untilAborted = (signal: AbortSignal): Promise<never> => new Promise((_reso
  * talks to the proxy exactly as the native worker does (capability bearer,
  * pinned client version, lean body). Only the launcher and attestation are fakes.
  */
-const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId: string, worker: Worker, overrides?: Parameters<typeof runGrokEngineBrokerTurn>[6], limits?: EngineBrokerServiceRegistration["limits"], turnStore?: string, syncDirectory?: (directory: string) => Promise<void>) => ReturnType<typeof runGrokEngineBrokerTurn>; usageRows: () => Promise<Record<string, unknown>[]>; requestRows: () => Promise<Record<string, unknown>[]>; upstreamCalls: () => number; upstreamAborts: () => number }>) => Promise<void>, usageLedgerPath?: string, upstreamDelayMs: (call: number) => number = () => 15): Promise<void> => {
+/** The stub provider's own SSE response: usage only, and no tool call, unless a test says otherwise. */
+const upstreamResponse = (): string => `data: ${JSON.stringify({ choices: [], usage: upstreamUsage })}\n\ndata: [DONE]\n\n`;
+/** One streaming tool call per name, arguments in a following delta, then the usage event. */
+const upstreamToolCallResponse = (names: readonly string[]): string => [
+  ...names.map((name, index) => ({ choices: [{ index: 0, delta: { tool_calls: [{ index, id: `call-${index}`, type: "function", function: { name, arguments: "" } }] } }] })),
+  ...names.map((_name, index) => ({ choices: [{ index: 0, delta: { tool_calls: [{ index, function: { arguments: '{"tool_name":"daimon__moltnet_read"}' } }] } }] })),
+  { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: upstreamUsage }
+].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
+
+const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId: string, worker: Worker, overrides?: Parameters<typeof runGrokEngineBrokerTurn>[6], limits?: EngineBrokerServiceRegistration["limits"], turnStore?: string, syncDirectory?: (directory: string) => Promise<void>) => ReturnType<typeof runGrokEngineBrokerTurn>; usageRows: () => Promise<Record<string, unknown>[]>; requestRows: () => Promise<Record<string, unknown>[]>; upstreamCalls: () => number; upstreamAborts: () => number }>) => Promise<void>, usageLedgerPath?: string, upstreamDelayMs: (call: number) => number = () => 15, upstreamBody: (call: number) => string = upstreamResponse): Promise<void> => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-broker-usage-"));
   let calls = 0, aborted = 0;
-  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async (_request, signal) => { calls++; await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, upstreamDelayMs(calls)); signal?.addEventListener("abort", () => { clearTimeout(timer); aborted++; reject(new Error("aborted")); }, { once: true }); }); return { status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from(`data: ${JSON.stringify({ choices: [], usage: upstreamUsage })}\n\ndata: [DONE]\n\n`) }; }, undefined, 0);
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => "provider-token", markRejected: async () => undefined }, async (_request, signal) => { calls++; await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, upstreamDelayMs(calls)); signal?.addEventListener("abort", () => { clearTimeout(timer); aborted++; reject(new Error("aborted")); }, { once: true }); }); return { status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from(upstreamBody(calls)) }; }, undefined, 0);
   const ledger = usageLedgerPath ?? path.join(root, "usage.jsonl");
   const rows = async (file: string) => (await readFile(file, "utf8").catch(() => "")).split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>);
   try {
@@ -60,7 +70,7 @@ const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId
         const registration: EngineBrokerServiceRegistration = { agentId: "foreman", slot: 0, workerUid: 2_200, workspace: "/workspace", profilePath: "/workers/0/.grok/sandbox.toml", eventsPath: "/workers/0/.grok/sessions/sandbox-events.jsonl", profileSha256: "a".repeat(64), usageLedgerPath: ledger, limits, model: { model: "grok-4.6", reasoningEffort: "low" } };
         const deps: GrokEngineBrokerTurnDependencies = {
           turns: syncDirectory === undefined ? new EngineBrokerTurnRegistry(turnStore) : new EngineBrokerTurnRegistry(turnStore, undefined, syncDirectory), proxy, credentialStale: () => false,
-          mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => undefined },
+          mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => undefined, observe: () => mcpObservation },
           prepareIsolation: async () => async () => undefined,
           runNative: async (input: NativeBrokerTurn, signal: AbortSignal) => nativeResult(await worker(() => post(proxy.port, input.providerCapability), signal))
         };
@@ -73,6 +83,9 @@ const withBroker = async (body: (context: Readonly<{ root: string; turn: (wakeId
     });
   } finally { await proxy.close(); await rm(root, { recursive: true, force: true }); }
 };
+
+/** What the facade would have seen of this turn's tool calls; the turn only reads it. */
+let mcpObservation: EngineBrokerMcpCallObservation | undefined;
 
 const twoRequests: Worker = async (send) => { assert.equal(await send(), 200); assert.equal(await send(), 200); return stream(); };
 
@@ -243,4 +256,127 @@ test("the broker meters only through the single sealing helper, on both terminal
   assert.equal(body.includes("turns.finish("), false, "every terminal record is sealed through the metering helper");
   assert.equal((body.match(/finishBrokerTurnWithUsage\(/gu) ?? []).length, 2);
   assert.ok(body.indexOf("return replay(") < body.indexOf("finishBrokerTurnWithUsage("), "a replay returns before any metering");
+});
+
+/**
+ * The question two live turns could not answer: did the model ever *try* to
+ * call a tool? The rows carried timings and tokens and nothing about an
+ * attempt, so a turn with zero tool calls and a turn whose calls all failed
+ * read identically after the fact.
+ */
+test("each per-request row records the tool-call names that request's response carried, names only", async () => {
+  await withBroker(async ({ turn, requestRows }) => {
+    await turn("wake-tools", twoRequests);
+    const rows = await requestRows();
+    // Mutation guard: without the field these are `[undefined, undefined]`.
+    assert.deepEqual(rows.map((row) => row.tool_calls), [["use_tool", "search_tool"], ["use_tool", "search_tool"]]);
+    const text = JSON.stringify(rows);
+    // Names only: no arguments, no message content, no bearer.
+    assert.equal(text.includes("daimon__moltnet_read"), false, "an argument value must never reach the ledger");
+    assert.equal(text.includes("arguments"), false);
+    assert.equal(text.includes("provider-token"), false);
+  }, undefined, () => 1, () => upstreamToolCallResponse(["use_tool", "search_tool"]));
+});
+
+test("a response that called nothing records an empty list, and one that cannot be decoded records no field at all", async () => {
+  await withBroker(async ({ turn, requestRows }) => {
+    await turn("wake-silent", twoRequests);
+    // Decoded, and it called nothing: that is an observation, not a gap.
+    assert.deepEqual((await requestRows()).map((row) => row.tool_calls), [[], []]);
+  }, undefined, () => 1);
+  await withBroker(async ({ turn, requestRows }) => {
+    await turn("wake-undecodable", twoRequests);
+    const rows = await requestRows();
+    // Mutation guard: a fabricated `[]` here would be byte-identical to the
+    // measured empty list above, and the ledger would claim an observation the
+    // proxy never made.
+    assert.deepEqual(rows.map((row) => Object.hasOwn(row, "tool_calls")), [false, false]);
+    assert.deepEqual(rows.map((row) => row.request), [0, 1], "the rows themselves are still written");
+  }, undefined, () => 1, () => "<html>bad gateway</html>");
+});
+
+
+/**
+ * The exact 128-byte frame `supervise()` emits when a worker crosses
+ * `DBL_MAX_OUTPUT`: it stops reading, SIGKILLs the process group, and publishes
+ * `output_length = 0` with `DBL_STATUS_OUTPUT_FAILED`. Built here at the wire
+ * offsets the header's `_Static_assert`s pin, so the test drives the real
+ * decoder rather than a hand-made exception.
+ */
+function outputLimitFrame(turnId: string): Buffer {
+  const frame = Buffer.alloc(ENGINE_BROKER_NATIVE_RESULT_BYTES);
+  frame.writeUInt32LE(2, 0); frame.writeUInt32LE(3, 4); frame.writeUInt32LE(2_200, 8); frame.writeUInt32LE(0, 12);
+  frame.writeInt32LE(4_242, 16); frame.writeInt32LE(0, 20); frame.writeInt32LE(9, 24);
+  frame.writeBigUInt64LE(99n, 32); frame.write(turnId, 40, "utf8");
+  frame.writeUInt32LE(7, 108); frame.writeUInt32LE(7, 112); frame.writeUInt32LE(0, 116); frame.writeUInt32LE(0, 120);
+  return frame;
+}
+
+test("a worker whose work succeeded but whose output crossed the launcher bound still seals the spend the proxy measured", async () => {
+  await withBroker(async ({ turn, usageRows, requestRows, upstreamCalls }) => {
+    // The worker does its real work through the real proxy — two admitted,
+    // metered upstream requests — and only then loses its whole output: the
+    // launcher refused to publish it and the turn's text never exists. The
+    // frame is decoded by the shipped client, so the failure reaches the turn
+    // exactly as the native transport delivers it.
+    const worker: Worker = async (send) => {
+      assert.equal(await send(), 200);
+      assert.equal(await send(), 200);
+      throw decodeNativeBrokerResult(outputLimitFrame(turnIdFor("foreman", "wake-output-limit")), turnIdFor("foreman", "wake-output-limit"), []) as never;
+    };
+    await assert.rejects(turn("wake-output-limit", worker), (error: unknown) => {
+      assert.ok(error instanceof EngineBrokerTurnFailure);
+      // No limit tripped and the credential is live: this is the worker's
+      // transport failing, not the turn being refused.
+      assert.equal(error.code, "engine_failed");
+      assert.equal(error.diagnostic?.failureClass, "output_limit");
+      // Mutation guard: the turn has no stream to read usage from, so this can
+      // only come from the proxy's own per-request measurements. Falling back
+      // to `null` here would report a fabricated zero for real spend.
+      assert.deepEqual(error.accounting, { outcome: "failed", usage: { input: 5_136, cacheRead: 256, cacheWrite: 0, output: 158, total: 5_550 }, model: "grok-4.6", requests: 2, limitReason: "none" });
+      return true;
+    });
+    assert.equal(upstreamCalls(), 2);
+    const [row, extra] = await usageRows();
+    assert.equal(extra, undefined);
+    assert.deepEqual([row?.outcome, row?.reason, row?.total, row?.calls, row?.complete], ["failed", "unknown", 5_550, 2, false]);
+    assert.notEqual(row?.total, 0, "a zero row would be byte-identical to a measured zero");
+    assert.deepEqual((await requestRows()).map((value) => value.request), [0, 1], "every request the proxy answered keeps its own row");
+    // The sealed record is the durable truth: a replay returns that spend and never meters again.
+    await assert.rejects(turn("wake-output-limit", twoRequests), (error: unknown) =>
+      error instanceof EngineBrokerTurnFailure && error.accounting?.usage?.total === 5_550);
+    assert.equal((await usageRows()).length, 1, "the replayed failure is not metered again");
+  });
+});
+
+/**
+ * The hang this instrument was built for: the worker stops acting with every
+ * provider request closed, the deadline kills it, and the only remaining
+ * question is whether it was waiting on a tool call. The answer has to reach
+ * the host, and the slot's control root is tmpfs that dies with the container —
+ * so it rides the seam the worker's last words and the sealed usage already
+ * ride: the sealed terminal response, which a replay hands back unchanged.
+ */
+test("a failed turn carries the facade's in-flight tool-call observation, and its replay still does", async () => {
+  await withBroker(async ({ turn }) => {
+    mcpObservation = { started: 3, answered: 2, undecoded: 0, outstanding: [{ name: "daimon__moltnet_read", outstandingMs: 419_000 }] };
+    const worker: Worker = async (send) => { assert.equal(await send(), 200); assert.equal(await send(), 200); throw new Error("engine broker turn failed"); };
+    const carried = (error: unknown): boolean => {
+      assert.ok(error instanceof EngineBrokerTurnFailure);
+      assert.deepEqual(error.mcpCalls, { started: 3, answered: 2, undecoded: 0, outstanding: [{ name: "daimon__moltnet_read", outstandingMs: 419_000 }] });
+      return true;
+    };
+    await assert.rejects(turn("wake-mcp-outstanding", worker), carried);
+    // The replay reads the durable record back through the frame parser, so
+    // this is the sealed bytes answering, not the live facade.
+    mcpObservation = undefined;
+    await assert.rejects(turn("wake-mcp-outstanding", worker), carried);
+  });
+});
+
+test("a turn whose facade observed nothing seals no observation at all", async () => {
+  await withBroker(async ({ turn }) => {
+    mcpObservation = undefined;
+    await assert.rejects(turn("wake-mcp-absent", async (send) => { await send(); throw new Error("engine broker turn failed"); }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.mcpCalls === undefined);
+  });
 });

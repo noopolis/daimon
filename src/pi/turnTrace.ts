@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { MemoryPrepareTurnResult, MemoryWakeMode } from "@noopolis/mneme";
 
 import type { HarnessModelSpec, WakeEvent } from "../core/types.js";
 import { redactCredentialText } from "../core/credentialRedaction.js";
+import { ensureRuntimeHomeDirectory } from "../runtime/runtimeHomeLayout.js";
 
 export interface PiTurnTraceModel {
   authMethod: NonNullable<HarnessModelSpec["auth"]>["method"];
@@ -268,8 +269,7 @@ export const writeTurnTraceRecord = async (
   record: PiTurnTraceRecord
 ): Promise<void> => {
   const telemetryPath = path.join(runtimeHomePath, "telemetry");
-  const turnsPath = path.join(telemetryPath, "turns");
-  await mkdir(turnsPath, { recursive: true });
+  const turnsPath = await ensureRuntimeHomeDirectory(runtimeHomePath, "telemetry/turns");
   const body = `${JSON.stringify(record, null, 2)}\n`;
   await writeFile(path.join(turnsPath, `${sanitizeTraceFileId(record.turn_id)}.json`), body, "utf8");
   await appendFile(path.join(telemetryPath, "turns.ndjson"), `${JSON.stringify(record)}\n`, "utf8");

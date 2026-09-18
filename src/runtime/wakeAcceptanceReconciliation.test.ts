@@ -48,9 +48,16 @@ test("offline reconciliation blocks untrusted proof, identity mismatch, and conc
     const mismatch = await reconcileOfflineWakeTransition({ ...request, lock: { ...request.lock, ino: request.lock.ino + 1 } }, { storePath: root, ...testLeaseOptions, verifyDeploymentAttestation: async (context) => ({ request_digest: context.request_digest, nonce: context.nonce, exclusive_store: true, authorized_registration_digests: [] }) });
     assert.equal(mismatch.state, "blocked");
     let release!: () => void;
+    let leaseCreated!: () => void;
     const paused = new Promise<void>((resolve) => { release = resolve; });
-    const first = reconcileOfflineWakeTransition(request, { storePath: root, ...testLeaseOptions, verifyDeploymentAttestation: async (context) => { await paused; return { request_digest: context.request_digest, nonce: context.nonce, exclusive_store: true, authorized_registration_digests: [] }; } });
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    // `verifyDeploymentAttestation` runs only after `acquireLease` has published the
+    // lease, so signalling from inside it is a real happens-after of that publication.
+    // A sleep is not: publishing the lease is several fsynced filesystem operations and
+    // takes ~5 ms even on an idle machine, so a 5 ms timer raced it and the store then
+    // opened against a store no one had reserved yet.
+    const leased = new Promise<void>((resolve) => { leaseCreated = resolve; });
+    const first = reconcileOfflineWakeTransition(request, { storePath: root, ...testLeaseOptions, verifyDeploymentAttestation: async (context) => { leaseCreated(); await paused; return { request_digest: context.request_digest, nonce: context.nonce, exclusive_store: true, authorized_registration_digests: [] }; } });
+    await leased;
     await assert.rejects(WakeAcceptanceStore.open(root, testStoreOptions), /reserved for offline reconciliation/);
     const concurrent = await reconcileOfflineWakeTransition(request, { storePath: root, ...testLeaseOptions, verifyDeploymentAttestation: async (context) => ({ request_digest: context.request_digest, nonce: context.nonce, exclusive_store: true, authorized_registration_digests: [] }) });
     assert.equal(concurrent.state, "blocked");
