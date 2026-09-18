@@ -187,6 +187,24 @@ static size_t diagnostic_window(unsigned char *bytes, size_t used) {
   memcpy(bytes + head, marker, (size_t)final);
   return head + (size_t)final + tail;
 }
+/* The one place the total-output bound is decided, because both readers fill
+   the same buffer and both must trip it. The post-exit drain had no check: a
+   worker that exited with more than DBL_MAX_OUTPUT still in the pipe left
+   `used` at the buffer's last byte with `output_limited` clear, so the turn
+   was published OK with `output_length = DBL_MAX_OUTPUT + 1` — which
+   `closed_result` refuses, so the client replaced it with a fabricated
+   `prelaunch_failed`/`protocol` frame. That frame says the worker never ran,
+   about a turn that ran and whose work may well have succeeded, and it carries
+   neither the worker's pid nor its start ticks. An honest `output_failed` is
+   the whole of what changes here. */
+static int output_limit_crossed(size_t used, struct dbl_result *out) {
+  if (used <= DBL_MAX_OUTPUT)
+    return 0;
+  out->status = DBL_STATUS_OUTPUT_FAILED;
+  out->stage = DBL_STAGE_OUTPUT;
+  out->failure_class = DBL_FAILURE_OUTPUT_LIMIT;
+  return 1;
+}
 static void supervise(int client, pid_t pid, int output,
                       struct dbl_result *out) {
   unsigned char bytes[DBL_MAX_OUTPUT + 1] = {0};
@@ -212,12 +230,9 @@ static void supervise(int client, pid_t pid, int output,
       ssize_t got = read(output, bytes + used, sizeof(bytes) - used);
       if (got > 0)
         used += (size_t)got;
-      if (used > DBL_MAX_OUTPUT) {
+      if (output_limit_crossed(used, out)) {
         output_limited = 1;
         p[1].events = 0;
-        out->status = DBL_STATUS_OUTPUT_FAILED;
-        out->stage = DBL_STAGE_OUTPUT;
-        out->failure_class = DBL_FAILURE_OUTPUT_LIMIT;
       }
     }
     if (disconnected || output_limited)
@@ -236,6 +251,8 @@ static void supervise(int client, pid_t pid, int output,
     if (got <= 0)
       break;
     used += (size_t)got;
+    if (output_limit_crossed(used, out))
+      output_limited = 1;
   }
   if (WIFEXITED(status))
     out->exit_code = WEXITSTATUS(status);

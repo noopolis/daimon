@@ -81,11 +81,34 @@ measured. A lost terminal frame, an unnamed transport failure or an unmetered
 turn therefore cannot be explained by this bound, and the only branch that
 sends nothing at all is a client that already disconnected.
 
+**Both readers of that buffer trip the same bound**, through
+`output_limit_crossed`. The poll loop always did; the post-exit drain did not,
+so a worker that exited with more than `DBL_MAX_OUTPUT` still in the pipe left
+`used` at the buffer's last byte with `output_limited` clear, and the turn was
+published `DBL_STATUS_OK` with `output_length = DBL_MAX_OUTPUT + 1` — which
+`closed_result` refuses, so the client replaced it with a fabricated
+`prelaunch_failed`/`protocol` frame carrying no pid and no start ticks. That
+frame says the worker never ran, about a turn that ran and whose work may have
+succeeded, which is the one class of lie this boundary must never tell.
+The window is real but narrow: `poll` is level-triggered, so the loop sees any
+buffered byte, and the drain can only inherit data written in the gap between
+`poll()` returning and `waitpid()` reaping. It is therefore **not
+reproducible on demand in this suite** — the fix is by construction, and the
+adversarial cases that do cross the bound (`output_boundary_case`,
+`worker_flood_case`, `worker_spill_case`) only prove it did not regress. Do not
+add a test that claims to cover it by feeding the bound through the poll loop:
+that routes around the defect.
+
 The bound is the whole turn's stdout, not one frame. A live single-tool-call
 brokered turn already emitted 26,486 bytes, 23,320 of them one tool-result
 frame (`.runtime/grok-p1b/worker-a2-output.jsonl`), against a `--max-turns` of
 48 and a 16 KiB tool-result spill bound, so 64 KiB is reachable by an ordinary
-working turn rather than only by a runaway one.
+working turn rather than only by a runaway one. **Known limit, deliberately not
+raised yet:** the same day changed the pipe's blocking mode, and raising the
+bound alongside it would mix two variables in the next live run; the measured
+ceiling is 26 KB against 64 KiB, so it is not the thing in the way. Revisit
+once a trial scores, and decide the number on the spread of real turns rather
+than on headroom-by-guess.
 
 The result frame's last word is `diagnostic_length`, not padding: on
 `DBL_STATUS_WORKER_FAILED` the supervisor keeps the last `DBL_MAX_DIAGNOSTIC`
