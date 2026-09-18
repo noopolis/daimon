@@ -189,7 +189,17 @@ const startMcp = async (
     await startupSettled;
     await transport.close().catch(() => undefined);
     await mcpServer.close().catch(() => undefined);
-    if (httpServer.listening) await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    // `close` only stops accepting and then waits for every open connection,
+    // including the ones the transport has no record of and so cannot end (a
+    // socket opened before `initialize`, or a client pool's idle keep-alive
+    // socket, which relaying a turn through the broker MCP facade leaves
+    // behind). That wait is unbounded and sits on the wake's own completion
+    // path: measured, one such connection parked a finished broker turn with
+    // its result in hand and published nothing. By here this one wake's engine
+    // has returned, failed or been cancelled, so anything still connected is a
+    // leftover — see `AGENTS.md`, and the facade, which bounds itself the same
+    // way.
+    if (httpServer.listening) await new Promise<void>((resolve) => { httpServer.close(() => resolve()); httpServer.closeAllConnections(); });
     lifecycle = "closed";
   })();
   const mount = { get endpoint(): string { return endpoint; }, close };
