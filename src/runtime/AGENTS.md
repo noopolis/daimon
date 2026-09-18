@@ -314,6 +314,31 @@ answer, so the call it was blocked on stays outstanding with the elapsed time
 it had reached — otherwise the turn's death would erase the evidence the
 instrument exists to keep.
 
+The facade relays one more thing, for the whole session, and until now wrote
+nothing about it. A `tools/call` is a POST that answers; the standalone `GET`
+SSE tunnel is the route a server notification or progress frame takes, and it
+stays open from `initialize` to the worker's own shutdown. A worker parked
+reading it was, in every artifact the broker wrote, identical to a worker doing
+nothing: every provider request closed, every tool call answered, idle to the
+deadline. `EngineBrokerMcpCallLog.openTunnel` records that lifecycle on the same
+observation — `tunnels: {opened, closed, delivered, open: [{openMs, delivered}]}`
+— so a turn sealed with one still open says so and says how long it had been
+open, and `delivered` separates a tunnel actively carrying frames from one held
+open having received nothing, which is the difference that decides whether it is
+the blocker. Bounded at `ENGINE_BROKER_MCP_TUNNEL_MAX` open entries (a session
+opens one), counts and elapsed milliseconds only, never a frame, an event
+payload or a session id. It is *observation only*: nothing here closes, times
+out or refuses a tunnel, because an instrument that tore the stream down would
+destroy the evidence it exists to gather. The member is optional on the wire for
+one reason — a turn sealed before it existed must still replay — so its absence
+means "not measured" and never zero, exactly as `mcp`'s own absence does.
+Measured against the real CLI (rig, grok 1.0.34, real facade and mount): the
+tunnel opens ~3 ms after `initialize`, carries nothing for its whole life, and
+**closes 16 ms before the worker exits** — the close is the worker's own
+shutdown, not the facade's. A turn that never reaches that shutdown is the one
+that seals with it open; a deliberately stalled `tools/call` sealed
+`open: [{openMs: 14652, delivered: false}]` beside its outstanding call.
+
 That seam is enough for a turn that *fails with a reply* and not for the turn
 the instrument was built for. A worker that crashes still produces a terminal
 response; a worker that HANGS is cancelled by its client's deadline, and a
@@ -328,7 +353,8 @@ terminal turn (`turns.jsonl`, `engineBrokerSealLedgerPathFor`), rendered from
 the sealed response and nothing else. Its members are the accounting, the
 failure `code`, the diagnostic's closed `status`/`stage`/`failure_class` with
 the reason `engineBrokerNativeClient.ts` already redacted and bounded, and the
-facade's `mcp` observation — names, counts and elapsed milliseconds. Never a
+facade's `mcp` observation — names, counts, GET-tunnel lifecycle and elapsed
+milliseconds. Never a
 prompt, body, reply, bearer, capability or session id; the terminal response
 carries none of those in the first place, and the projection is an allow-list
 rather than a spread, so a future additive member of the response cannot become
