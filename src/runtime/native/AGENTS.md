@@ -99,16 +99,38 @@ adversarial cases that do cross the bound (`output_boundary_case`,
 add a test that claims to cover it by feeding the bound through the poll loop:
 that routes around the defect.
 
-The bound is the whole turn's stdout, not one frame. A live single-tool-call
-brokered turn already emitted 26,486 bytes, 23,320 of them one tool-result
-frame (`.runtime/grok-p1b/worker-a2-output.jsonl`), against a `--max-turns` of
-48 and a 16 KiB tool-result spill bound, so 64 KiB is reachable by an ordinary
-working turn rather than only by a runaway one. **Known limit, deliberately not
-raised yet:** the same day changed the pipe's blocking mode, and raising the
-bound alongside it would mix two variables in the next live run; the measured
-ceiling is 26 KB against 64 KiB, so it is not the thing in the way. Revisit
-once a trial scores, and decide the number on the spread of real turns rather
-than on headroom-by-guess.
+The bound is the whole turn's stdout, not one frame, and it is now 256 KiB.
+**This supersedes the "known limit, deliberately not raised yet" this file
+carried while the pipe's blocking mode was the variable under test.** The
+measurement that decided it: a live brokered turn emitted 26,482 bytes for
+four tool calls, 23,320 of them one tool-result frame carrying all four
+(`.runtime/grok-p1b/worker-a2-output.jsonl`); JSON framing and escaping
+inflated those payloads by 1.007x, so a turn's stdout is close to the sum of
+its tool results. The nine-tool-call turn this was raised for is about 210 KB
+of the same shape, against a 64 KiB bound — so 64 KiB was reachable by an
+ordinary working turn, and crossing it costs that turn its whole text. The new
+number is not headroom-by-guess: it is the control protocol's own `text` bound
+(`engineBrokerProtocol.ts`, 262144), the next boundary this output has to
+cross, so a larger launcher bound would only move the refusal one layer up.
+`worker_turn_case` writes exactly that measured shape — a 9,728-byte init
+frame and nine 23,320-byte frames, 219,608 bytes — and asserts it is published
+whole; restoring 65536 turns it red.
+
+**A bound that hangs would be worse than no bound, and this one does not.**
+The hypothesis that a worker parks forever in `write()` once the bound is
+crossed — plausible after the pipe became blocking, because a write that
+cannot complete now blocks instead of erroring — was tested, not reasoned
+about, and it is false. `worker_stream_case` writes eight times the bound in
+frame-sized writes and then sleeps far longer than this suite, so it is asleep
+inside `write()` with its pipe full when the trip fires and nothing but the
+launcher can end it; the launcher answers `output_limit` with `term_signal`
+SIGKILL in seconds. Its socket carries a 30-second deadline so a park fails
+red instead of parking the runner. Deleting the `output_limited` half of
+`if (disconnected || output_limited) kill(-pid, SIGKILL)` is the mutation that
+proves it: the case then times out on that deadline, and
+`output_boundary_case` does not notice, because its worker has already exited
+by the time the trip fires. That is the boundary the two cases straddle —
+a worker gone at the trip against a worker alive and blocked at it.
 
 The result frame's last word is `diagnostic_length`, not padding: on
 `DBL_STATUS_WORKER_FAILED` the supervisor keeps the last `DBL_MAX_DIAGNOSTIC`

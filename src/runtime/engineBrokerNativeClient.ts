@@ -7,7 +7,8 @@ export const ENGINE_BROKER_NATIVE_REQUEST_BYTES = 396;
 export const ENGINE_BROKER_NATIVE_RESULT_BYTES = 128;
 /** `DBL_MAX_DIAGNOSTIC`: the launcher's bounded tail of a failed worker's own merged stdout/stderr. */
 export const ENGINE_BROKER_NATIVE_DIAGNOSTIC_BYTES = 512;
-const MAX_PROMPT = 65_536, MAX_CAPABILITY = 4_096, MAX_OUTPUT = 65_536;
+/** `DBL_MAX_OUTPUT`: the launcher's bound on a whole turn's stdout, and the control protocol's own `text` bound, which is the next boundary this output crosses. */
+const MAX_PROMPT = 65_536, MAX_CAPABILITY = 4_096, MAX_OUTPUT = 262_144;
 const statuses = ["ok", "prelaunch_failed", "worker_failed", "output_failed", "cancelled"] as const;
 const stages = ["none", "peer", "request", "registration", "executable", "exec", "wait", "output", "attestation"] as const;
 const failures = ["none", "peer", "protocol", "registration", "executable", "exec", "wait", "output_limit", "cancelled", "profile_missing", "profile_invalid"] as const;

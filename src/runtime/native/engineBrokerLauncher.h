@@ -8,7 +8,18 @@
 #define DBL_MAX_PROMPT 65536u
 #define DBL_MAX_TOKEN 4096u
 #define DBL_MAX_CAPABILITY_BUNDLE (DBL_MAX_TOKEN * 2u + 4u)
-#define DBL_MAX_OUTPUT 65536u
+/* The WHOLE turn's stdout, not one frame, and sized against real turns rather
+   than headroom-by-guess. A live four-tool-call brokered turn emitted 26,482
+   bytes, 23,320 of them one tool-result frame carrying four results
+   (`.runtime/grok-p1b/worker-a2-output.jsonl`), so 64 KiB was reachable by an
+   ordinary working turn: the nine-tool-call turn this was raised for lands
+   around 210 KB of the same shape, and a trip costs the turn its whole text.
+   The number is the control protocol's own `text` bound
+   (`engineBrokerProtocol.ts`, 262144), because that is the next boundary the
+   output must cross: a larger launcher bound would only move the refusal one
+   layer up. A runaway worker is still stopped here — crossing it stops
+   reading, SIGKILLs the worker's process group and reports `output_limit`. */
+#define DBL_MAX_OUTPUT 262144u
 /* Bounded tail of the worker's own merged stdout/stderr, kept only for a
    worker that exited on its own account (`DBL_STATUS_WORKER_FAILED`), so the
    reason reaches the host instead of `exit=1`. It is a diagnostic, never the

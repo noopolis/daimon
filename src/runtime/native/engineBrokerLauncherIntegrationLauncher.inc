@@ -201,6 +201,44 @@ static void worker_spill_case(void) {
   close(p);
   close(c);
 }
+/* An ordinary working turn must not be able to hit the bound, and its output
+   must arrive whole. The fixture writes the shape one live turn measured — a
+   9,728-byte init frame and nine 23,320-byte tool-result frames, 219,608
+   bytes in all — in frame-sized writes. That is more than three times the
+   64 KiB this bound used to be, so at the old value this same turn was
+   published as `output_limit` with its whole text discarded; it is the case
+   that straddles the raise, and restoring 65536 turns it red. */
+static void worker_turn_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("turn-output", "mcp.Turn-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  const uint32_t expected = 9728u + 23320u * 9u;
+  char *out, extra;
+  size_t index;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
+            r.status == DBL_STATUS_OK && r.stage == DBL_STAGE_OUTPUT &&
+            r.failure_class == DBL_FAILURE_NONE && r.exit_code == 0 &&
+            r.term_signal == 0 && r.diagnostic_length == 0 &&
+            expected > 65536u &&
+            r.output_length == expected,
+        "ordinary turn published whole");
+  out = calloc(1, (size_t)expected + 1u);
+  check(out && read_all(s, out, expected), "ordinary turn output");
+  check(!memcmp(out, "TURN-HEAD", 9) &&
+            !memcmp(out + expected - 9, "TURN-TAIL", 9),
+        "ordinary turn ends intact");
+  for (index = 9; index < (size_t)expected - 9u; index++)
+    if (out[index] != 'u')
+      break;
+  check(index == (size_t)expected - 9u, "ordinary turn bytes intact");
+  check(read(s, &extra, 1) == 0, "ordinary turn EOF");
+  free(out);
+  close(s);
+  close(p);
+  close(c);
+}
 /* The bound is the WHOLE TURN's stdout, and a worker can cross it while it is
    still working and still writing. `output_boundary_case` writes one byte past
    the bound and then exits on its own account, so it proves the arithmetic and
@@ -247,6 +285,7 @@ static void org_cases(void) {
   worker_failure_case();
   worker_flood_case();
   worker_spill_case();
+  worker_turn_case();
   worker_stream_case();
   int s = connect_socket(), p = sealed("prompt"),
       c = sealed_bundle("provider.Token-1", "mcp.Token-2");

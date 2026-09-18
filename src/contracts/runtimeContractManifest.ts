@@ -80,7 +80,7 @@ export const GROK_ENGINE_BROKER = {
       spillDirectory: { relativeToRuntimeHome: "tool-output", owner: "organization", group: "worker", mode: 0o2750, fileMode: 0o640 }
     }
   },
-  bounds: { promptBytes: 65_536, capabilityBytes: 4_096, capabilityBundleBytes: 8_196, outputBytes: 65_536 },
+  bounds: { promptBytes: 65_536, capabilityBytes: 4_096, capabilityBundleBytes: 8_196, outputBytes: 262_144 },
   // Accounting and limits (P2). The broker is the single sealed usage writer.
   controlProtocolVersion: "noopolis.daimon.engine-broker.v2",
   turnRecordVersions: ["noopolis.daimon.engine-broker-turn.v1", "noopolis.daimon.engine-broker-turn.v2"],
@@ -133,9 +133,9 @@ export const GROK_ENGINE_BROKER = {
   projectionVersion: "noopolis.daimon.grok-broker-projection.v1",
   slotPreflightVersion: "noopolis.daimon.grok-slot-preflight.v2",
   artifacts: {
-    sourceSha256: "d8c9640a2d0084f584721d0d4afdc524af7434e9461c1fc2f8adcdff6454ba6d",
-    x64Sha256: "4059ec576065130e857cc937b03b97a0c45fffab7d790fb153fcb170bfd0f310",
-    arm64Sha256: "eb0e2975cf3204bb80d25edc1fec00dbd623a95466176f3f36e7e83178deb8d2"
+    sourceSha256: "dd39aacfece496cc6528f6acdb4f1066a848a0fb5b0961f5c70b0ba00440dc24",
+    x64Sha256: "67e3624d3198e9c59e1ffafa4eca7c895dfe265d5b8bb0614cb547b68b8b93a7",
+    arm64Sha256: "c07d22225ff968bc289e5ddf0981cdd5d64040eee6e3ea45da7d03e1439dea98"
   }
 } as const;
 export const AGY_SUBSCRIPTION_REALM = {
