@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
-import { EngineBrokerMcpCallLog, type EngineBrokerMcpCallObservation, type EngineBrokerMcpTunnelHandle } from "./engineBrokerMcpCallLog.js";
+import { EngineBrokerMcpCallLog, type EngineBrokerMcpCallObservation, type EngineBrokerMcpRefusalReason, type EngineBrokerMcpTunnelHandle } from "./engineBrokerMcpCallLog.js";
 
 /**
  * The brokered worker's only route to its own per-wake Daimon MCP mount. The
@@ -46,6 +46,18 @@ const FORWARDED_RESPONSE_HEADERS = ["content-type", "mcp-session-id", "mcp-proto
 const FORWARDED_METHODS = new Set(["POST", "GET", "DELETE"]);
 const MAX_REQUEST_BYTES = 1024 * 1024;
 export const ENGINE_BROKER_MCP_FACADE_PORT = 43_124;
+/**
+ * Requests one turn capability may spend, across all three methods.
+ *
+ * A worker's round is a `search_tool` and a `use_tool`, so a 48-turn wake is
+ * ~96 POSTs plus the handshake, the standalone GET tunnel and the closing
+ * DELETE: exhaustion is reachable rather than theoretical, and every request
+ * past it is a 403 the worker cannot explain. That is why the refusal is
+ * counted and sealed (`engineBrokerMcpCallLog.ts`) rather than being an
+ * absence in the turn's row.
+ */
+export const ENGINE_BROKER_MCP_CAPABILITY_REQUESTS = 128;
+export const ENGINE_BROKER_MCP_CAPABILITY_TTL_MS = 15 * 60_000;
 
 class FacadeRefusal extends Error {}
 
@@ -71,15 +83,37 @@ export async function startEngineBrokerMcpFacade() {
     });
   });
 
+  /**
+   * A 403 the call log can read, whenever the bearer names a turn.
+   *
+   * The refusal itself is unchanged — same status, same body, same silence
+   * towards the worker — but it is attributed first, through a lookup that
+   * does not spend the capability's budget. A bearer no grant matches names no
+   * turn and stays unattributed, because guessing whose it was would be
+   * inventing the measurement. A capability that is *also* spent or expired
+   * reports that instead of the route it asked for: it is the fault the
+   * operator can act on.
+   */
+  function refuse(bearer: string | undefined, live: EngineBrokerMcpRefusalReason): FacadeRefusal {
+    const classified = bearer === undefined ? undefined : capabilities.classifyToken(bearer);
+    if (classified !== undefined) calls.refuse(classified.turnId, classified.state === "live" ? live : classified.state);
+    return new FacadeRefusal();
+  }
+
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const method = request.method ?? "";
-    if (request.url !== "/mcp" || !FORWARDED_METHODS.has(method)) throw new FacadeRefusal();
-    const match = request.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]{40,})$/u);
-    if (!match) throw new FacadeRefusal();
-    const scope = capabilities.authorizeToken(match[1]!);
-    if (!scope) throw new FacadeRefusal();
+    const bearer = request.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]{40,})$/u)?.[1];
+    if (request.url !== "/mcp" || !FORWARDED_METHODS.has(method)) throw refuse(bearer, "route");
+    if (bearer === undefined) throw new FacadeRefusal();
+    const scope = capabilities.authorizeToken(bearer);
+    // A live grant that authorizes is the only way past here; anything else is
+    // classified so an exhausted budget and an expired TTL reach the turn's
+    // sealed row as themselves. `live` cannot be the answer on this path —
+    // `authorizeToken` read the same grant a moment ago, expiry only moves
+    // forward and a budget only spends — so it is the unreachable arm.
+    if (!scope) throw refuse(bearer, "expired");
     const target = targets.get(scope.turnId);
-    if (target === undefined) throw new FacadeRefusal();
+    if (target === undefined) { calls.refuse(scope.turnId, "unrouted"); throw new FacadeRefusal(); }
 
     // Only POST carries a JSON-RPC body; drain anything else so the socket
     // never stalls waiting for a body the facade will not forward.
@@ -87,7 +121,13 @@ export async function startEngineBrokerMcpFacade() {
     // A body refused for size is a call the log can never name, and counting
     // it keeps "no tool call started" an honest reading rather than a gap.
     try { body = method === "POST" ? await bounded(request) : (request.resume(), undefined); }
-    catch (error) { calls.undecodable(scope.turnId); throw error; }
+    catch (error) {
+      calls.undecodable(scope.turnId);
+      // A body past the bound is refused, not merely unreadable: the worker
+      // gets a 403 for it, so it is counted as one too.
+      if (error instanceof FacadeRefusal) calls.refuse(scope.turnId, "oversized");
+      throw error;
+    }
     const payload = body === undefined ? undefined : (body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer);
     const call = calls.begin(scope.turnId, body);
     // The GET SSE tunnel is the session's other channel and the one that
@@ -133,7 +173,7 @@ export async function startEngineBrokerMcpFacade() {
       if (targets.has(turnId)) throw new Error("MCP turn already registered");
       targets.set(turnId, url.href);
       calls.open(turnId);
-      return capabilities.issue(agentId, turnId, 15 * 60_000, 128);
+      return capabilities.issue(agentId, turnId, ENGINE_BROKER_MCP_CAPABILITY_TTL_MS, ENGINE_BROKER_MCP_CAPABILITY_REQUESTS);
     },
     revoke(turnId: string): void {
       targets.delete(turnId);
@@ -142,8 +182,8 @@ export async function startEngineBrokerMcpFacade() {
       calls.close(turnId);
     },
     /**
-     * What the facade saw of this turn's tool calls and GET tunnels, or
-     * `undefined` for a turn
+     * What the facade saw of this turn's tool calls, GET tunnels and refusals,
+     * or `undefined` for a turn
      * it never registered. Read on the failure path, before `revoke`.
      */
     observe: (turnId: string): EngineBrokerMcpCallObservation | undefined => calls.observe(turnId),

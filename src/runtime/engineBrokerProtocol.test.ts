@@ -124,4 +124,23 @@ test("a failed frame carries the broker's in-flight MCP tool-call observation, b
     { ...tunnels, open: [{ openMs: 1, delivered: false, sessionId: "mcp-session-0" }] },
     { opened: 1, closed: 0, open: [] }
   ]) assert.throws(() => parseEngineBrokerResponse({ ...value, mcpCalls: { ...value.mcpCalls, tunnels: forged } }), /invalid broker frame/u, JSON.stringify(forged));
+
+  /**
+   * The refusals ride the same member under the same rules, and they are the
+   * counts that make a 403'd turn readable: without them a turn the facade
+   * refused every request of publishes `started: 0, answered: 0` — an idle
+   * turn's numbers. Every reason class is its own measurement, so a partial
+   * member is refused rather than zero-filled, and the whole member is optional
+   * for the one reason `tunnels` is.
+   */
+  const refusals = { route: 1, expired: 0, exhausted: 41, unrouted: 0, oversized: 2 } as const;
+  const refused = { ...value, mcpCalls: { ...value.mcpCalls, refusals } } as const;
+  assert.deepEqual(parseEngineBrokerResponse(refused), refused);
+  for (const forged of [
+    { ...refusals, exhausted: -1 },
+    { ...refusals, exhausted: 1.5 },
+    { ...refusals, exhausted: "41" },
+    { route: 1, expired: 0, unrouted: 0, oversized: 0 },
+    { ...refusals, capability: 3 }
+  ]) assert.throws(() => parseEngineBrokerResponse({ ...value, mcpCalls: { ...value.mcpCalls, refusals: forged } }), /invalid broker frame/u, JSON.stringify(forged));
 });

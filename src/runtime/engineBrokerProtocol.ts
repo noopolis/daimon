@@ -1,5 +1,5 @@
 import { isEngineBrokerInferenceRequestKind, isEngineBrokerInferenceResponseKind, parseEngineBrokerInferenceRequest, parseEngineBrokerInferenceResponse, type EngineBrokerInferenceRequest, type EngineBrokerInferenceResponse } from "./engineBrokerInferenceProtocol.js";
-import { ENGINE_BROKER_MCP_CALL_NAME, ENGINE_BROKER_MCP_OUTSTANDING_MAX, ENGINE_BROKER_MCP_TUNNEL_MAX, type EngineBrokerMcpCallObservation, type EngineBrokerMcpTunnelObservation } from "./engineBrokerMcpCallLog.js";
+import { ENGINE_BROKER_MCP_CALL_NAME, ENGINE_BROKER_MCP_OUTSTANDING_MAX, ENGINE_BROKER_MCP_REFUSAL_REASONS, ENGINE_BROKER_MCP_TUNNEL_MAX, type EngineBrokerMcpCallObservation, type EngineBrokerMcpRefusalObservation, type EngineBrokerMcpTunnelObservation } from "./engineBrokerMcpCallLog.js";
 import { parseEngineBrokerTurnAccounting, parseEngineBrokerTurnLimitOverrides, type EngineBrokerTurnAccounting, type EngineBrokerTurnLimitOverrides } from "./engineBrokerTurnAccounting.js";
 
 /**
@@ -146,7 +146,7 @@ function parseMcpCallObservation(value: unknown): EngineBrokerMcpCallObservation
   // `tunnels` is optional for one reason only: a turn sealed before the GET
   // tunnel was observed carries no such member, and its record must still
   // replay. Absence there means "the instrument did not exist", never zero.
-  exact(input, ["started", "answered", "undecoded", "outstanding", ...(input.tunnels === undefined ? [] : ["tunnels"])]);
+  exact(input, ["started", "answered", "undecoded", "outstanding", ...(input.tunnels === undefined ? [] : ["tunnels"]), ...(input.refusals === undefined ? [] : ["refusals"])]);
   const started = input.started, answered = input.answered, undecoded = input.undecoded;
   if (![started, answered, undecoded].every((count) => Number.isSafeInteger(count) && (count as number) >= 0)) throw new TypeError("invalid broker frame");
   if (!Array.isArray(input.outstanding) || input.outstanding.length > ENGINE_BROKER_MCP_OUTSTANDING_MAX) throw new TypeError("invalid broker frame");
@@ -159,7 +159,24 @@ function parseMcpCallObservation(value: unknown): EngineBrokerMcpCallObservation
   });
   if ((answered as number) > (started as number) || outstanding.length > (started as number) - (answered as number)) throw new TypeError("invalid broker frame");
   const tunnels = input.tunnels === undefined ? undefined : parseMcpTunnelObservation(input.tunnels);
-  return { started: started as number, answered: answered as number, undecoded: undecoded as number, outstanding, ...(tunnels === undefined ? {} : { tunnels }) };
+  const refusals = input.refusals === undefined ? undefined : parseMcpRefusalObservation(input.refusals);
+  return { started: started as number, answered: answered as number, undecoded: undecoded as number, outstanding, ...(tunnels === undefined ? {} : { tunnels }), ...(refusals === undefined ? {} : { refusals }) };
+}
+
+/**
+ * The refused requests, by reason class: one count per closed reason, all of
+ * them required once the member is present. Optional for the same single
+ * reason `tunnels` is — a turn sealed before the facade counted its refusals
+ * must still replay — so its absence means "not measured" and never zero, and
+ * a partial member is refused rather than zero-filled.
+ */
+function parseMcpRefusalObservation(value: unknown): EngineBrokerMcpRefusalObservation {
+  const input = record(value);
+  exact(input, ENGINE_BROKER_MCP_REFUSAL_REASONS);
+  for (const reason of ENGINE_BROKER_MCP_REFUSAL_REASONS) {
+    if (!Number.isSafeInteger(input[reason]) || (input[reason] as number) < 0) throw new TypeError("invalid broker frame");
+  }
+  return Object.fromEntries(ENGINE_BROKER_MCP_REFUSAL_REASONS.map((reason) => [reason, input[reason] as number])) as EngineBrokerMcpRefusalObservation;
 }
 
 /**

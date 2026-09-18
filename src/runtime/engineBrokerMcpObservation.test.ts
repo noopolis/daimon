@@ -6,6 +6,7 @@ import test from "node:test";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import type { EngineBrokerMcpTunnelObservation } from "./engineBrokerMcpCallLog.js";
+import { ENGINE_BROKER_MCP_CAPABILITY_REQUESTS, ENGINE_BROKER_MCP_FACADE_PORT } from "./engineBrokerMcpFacade.js";
 import { connectClient, FACADE_URL, sharedFacade, startRig, withDeadline } from "./engineBrokerMcpFacadeRig.test.js";
 
 /**
@@ -151,5 +152,72 @@ test("the facade observes the standalone GET tunnel: open with its age, whether 
     assert.deepEqual(tunnels(), { opened: 1, closed: 1, delivered: 1, open: [] });
   } finally {
     await rig.close();
+  }
+});
+
+/**
+ * The refusal, which was the one relay outcome that observed as nothing.
+ *
+ * `route()` refuses before the call log is ever touched, so a request the
+ * facade 403'd never reached `started`, `undecoded` or `outstanding`: a turn
+ * whose every request was refused sealed as `answered == started,
+ * outstanding: []`, which is exactly what a healthy turn seals as. The budget
+ * makes that reachable rather than theoretical — one capability buys
+ * {@link ENGINE_BROKER_MCP_CAPABILITY_REQUESTS} requests across all three
+ * methods, and a worker spends two of them per round.
+ *
+ * The boundary these assertions straddle: a turn served against a turn
+ * refused, and within the refusals, a spent capability against a route the
+ * facade does not serve — the first is a budget to raise, the second is a
+ * worker asking for something that does not exist.
+ *
+ * Mutation: restore `throw new FacadeRefusal()` in place of either `refuse`
+ * call in `route()`, and a 403'd turn reads as an idle one again.
+ */
+test("a request the facade refused is counted against its turn, by reason, and is never a call it served", async () => {
+  const facade = await sharedFacade();
+  let served = 0;
+  const target = createServer((request, response) => {
+    served += 1;
+    request.resume();
+    request.on("end", () => { response.writeHead(200, { "content-type": "application/json" }); response.end('{"jsonrpc":"2.0","id":1,"result":{}}'); });
+  });
+  await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
+  const address = target.address(); if (address === null || typeof address === "string") throw new Error();
+  const turnId = "turn-refused", token = facade.register("agent", turnId, `http://127.0.0.1:${address.port}/mcp`);
+  const listed = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const send = async (url: string, bearer: string, method = "POST"): Promise<number> => {
+    const response = await fetch(url, { method, headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" }, ...(method === "POST" ? { body: listed } : {}) });
+    await response.text();
+    return response.status;
+  };
+  try {
+    // A route the facade does not serve, asked for with a live capability.
+    assert.equal(await send(`http://127.0.0.1:${ENGINE_BROKER_MCP_FACADE_PORT}/nope`, token), 403);
+    assert.equal(await send(FACADE_URL, token, "PUT"), 403);
+    assert.deepEqual(facade.observe(turnId)?.refusals, { route: 2, expired: 0, exhausted: 0, unrouted: 0, oversized: 0 });
+
+    // A bearer no live grant matches names no turn, so it is recorded against
+    // none: inventing an owner would be worse than the silence.
+    assert.equal(await send(FACADE_URL, "wrong-token-abcdefghijklmnopqrstuvwxyz0123456789"), 403);
+    assert.equal(facade.observe(turnId)?.refusals?.route, 2, "an unattributable refusal belongs to no turn");
+
+    // Neither refusal spent the capability, so the budget is exactly what was
+    // issued — and spending it all is reachable: a 48-round worker asks for
+    // ~96 of these plus its handshake, tunnel and DELETE.
+    for (let spent = 0; spent < ENGINE_BROKER_MCP_CAPABILITY_REQUESTS; spent += 1) assert.equal(await send(FACADE_URL, token), 200);
+    assert.equal(served, ENGINE_BROKER_MCP_CAPABILITY_REQUESTS);
+    assert.equal(await send(FACADE_URL, token), 403, "the capability's budget is spent");
+    assert.equal(served, ENGINE_BROKER_MCP_CAPABILITY_REQUESTS, "an exhausted capability never reaches the mount");
+
+    const observed = facade.observe(turnId);
+    assert.deepEqual(observed?.refusals, { route: 2, expired: 0, exhausted: 1, unrouted: 0, oversized: 0 });
+    // And the reading the seal row used to publish for all of it: nothing.
+    assert.deepEqual([observed?.started, observed?.answered, observed?.undecoded, observed?.outstanding], [0, 0, 0, []]);
+    assert.ok(!JSON.stringify(observed).includes(token), "counts and reason classes only: never the capability");
+  } finally {
+    facade.revoke(turnId);
+    target.closeAllConnections();
+    await new Promise<void>((resolve) => target.close(() => resolve()));
   }
 });

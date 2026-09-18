@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import { ENGINE_BROKER_VERSION, encodeEngineBrokerFrame,EngineBrokerFrameDecoder,parseEngineBrokerResponse } from "./engineBrokerProtocol.js";
 import type { EngineBrokerInferenceFailureCode, EngineBrokerInferenceRequest, EngineBrokerInferenceResponse } from "./engineBrokerInferenceProtocol.js";
-import type { EngineBrokerMcpCallObservation, EngineBrokerMcpTunnelObservation } from "./engineBrokerMcpCallLog.js";
+import { ENGINE_BROKER_MCP_REFUSAL_REASONS, type EngineBrokerMcpCallObservation, type EngineBrokerMcpRefusalObservation, type EngineBrokerMcpTunnelObservation } from "./engineBrokerMcpCallLog.js";
 import type { EngineBrokerTurnLimitOverrides } from "./engineBrokerTurnAccounting.js";
 import type { GrokBrokerModel, GrokBrokerReasoningEffort } from "./grokBrokerModelPolicy.js";
 import type { GrokInferencePurpose } from "./inferenceUsageLedger.js";
@@ -14,7 +14,9 @@ import type { GrokInferencePurpose } from "./inferenceUsageLedger.js";
  * long it had been waiting — the one thing a completion-only tool receipt can
  * never say.
  */
-const renderMcpCalls=(calls:EngineBrokerMcpCallObservation|undefined):string=>calls===undefined?"":`; mcp=${calls.answered}/${calls.started} answered${calls.undecoded===0?"":`; mcp_undecoded=${calls.undecoded}`}${calls.outstanding.length===0?"":`; mcp_outstanding=${calls.outstanding.map((call)=>`${call.name}@${call.outstandingMs}ms`).join(",")}`}${renderMcpTunnels(calls.tunnels)}`;
+const renderMcpCalls=(calls:EngineBrokerMcpCallObservation|undefined):string=>calls===undefined?"":`; mcp=${calls.answered}/${calls.started} answered${calls.undecoded===0?"":`; mcp_undecoded=${calls.undecoded}`}${calls.outstanding.length===0?"":`; mcp_outstanding=${calls.outstanding.map((call)=>`${call.name}@${call.outstandingMs}ms`).join(",")}`}${renderMcpRefusals(calls.refusals)}${renderMcpTunnels(calls.tunnels)}`;
+/** The refusals the facade never relayed, by reason class, and only the classes that happened: a turn refused 403 must not read as a turn that was served. */
+const renderMcpRefusals=(refusals:EngineBrokerMcpRefusalObservation|undefined):string=>{if(refusals===undefined)return"";const named=ENGINE_BROKER_MCP_REFUSAL_REASONS.filter((reason)=>refusals[reason]>0);return named.length===0?"":`; mcp_refused=${named.map((reason)=>`${reason}:${refusals[reason]}`).join(",")}`;};
 /** The session's GET SSE tunnels: how many closed of how many opened, and each one still open with its age and whether the mount ever pushed through it. */
 const renderMcpTunnels=(tunnels:EngineBrokerMcpTunnelObservation|undefined):string=>tunnels===undefined?"":`; mcp_get=${tunnels.closed}/${tunnels.opened} closed, ${tunnels.delivered} delivered${tunnels.open.length===0?"":`; mcp_get_open=${tunnels.open.map((tunnel)=>`${tunnel.openMs}ms/${tunnel.delivered?"delivered":"silent"}`).join(",")}`}`;
 

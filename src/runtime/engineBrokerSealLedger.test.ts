@@ -158,3 +158,30 @@ test("a cancelled turn's GET tunnel is sealed open with its age, closed, or neve
   const unobserved = await cancelledTurn(() => ({ started: 1, answered: 1, undecoded: 0, outstanding: [] }));
   assert.equal(Object.hasOwn(unobserved.seal?.mcp as Record<string, unknown>, "tunnels"), false);
 });
+
+/**
+ * The refusal, on the same durable route as the hang it looks like.
+ *
+ * A request the facade 403'd never reached the relay, so before it was counted
+ * a turn whose capability was spent — 128 requests, two per worker round —
+ * sealed `answered == started, outstanding: []`, which is exactly what a
+ * healthy turn seals. The row has to carry the reason class, because an
+ * exhausted budget and an unserved route are opposite fixes.
+ *
+ * Mutation: drop the `refusals` member from `renderBrokerTurnSealLine` and the
+ * first assertion goes red; render it unconditionally as zeros for an
+ * observation that carries none, and the second does — a zero nobody measured
+ * reads exactly like a zero somebody did.
+ */
+test("a turn whose MCP requests were refused seals the refusals by reason, and a turn sealed before they were counted seals none", async () => {
+  const refused = await cancelledTurn(() => ({
+    started: 0, answered: 0, undecoded: 0, outstanding: [],
+    refusals: { route: 0, expired: 0, exhausted: 41, unrouted: 1, oversized: 0 }
+  }));
+  assert.deepEqual((refused.seal?.mcp as Record<string, unknown>).refusals, { route: 0, expired: 0, exhausted: 41, unrouted: 1, oversized: 0 });
+  // Without it this row is `started: 0, answered: 0` — an idle turn's row.
+  assert.deepEqual([(refused.seal?.mcp as Record<string, unknown>).started, (refused.seal?.mcp as Record<string, unknown>).answered], [0, 0]);
+
+  const unobserved = await cancelledTurn(() => ({ started: 1, answered: 1, undecoded: 0, outstanding: [] }));
+  assert.equal(Object.hasOwn(unobserved.seal?.mcp as Record<string, unknown>, "refusals"), false);
+});

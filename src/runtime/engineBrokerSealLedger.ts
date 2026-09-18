@@ -1,4 +1,4 @@
-import { ENGINE_BROKER_MCP_CALL_NAME, ENGINE_BROKER_MCP_OUTSTANDING_MAX, ENGINE_BROKER_MCP_TUNNEL_MAX } from "./engineBrokerMcpCallLog.js";
+import { ENGINE_BROKER_MCP_CALL_NAME, ENGINE_BROKER_MCP_OUTSTANDING_MAX, ENGINE_BROKER_MCP_REFUSAL_REASONS, ENGINE_BROKER_MCP_TUNNEL_MAX } from "./engineBrokerMcpCallLog.js";
 import type { EngineBrokerTerminalResponse } from "./engineBrokerProtocol.js";
 import { TURN_USAGE_LEDGER, TURN_USAGE_MAX_IDENTIFIER_CHARS } from "./turnUsageLedger.js";
 
@@ -104,6 +104,13 @@ export const renderBrokerTurnSealLine = (terminal: EngineBrokerTerminalResponse,
         outstanding: terminal.mcpCalls.outstanding
           .slice(0, ENGINE_BROKER_MCP_OUTSTANDING_MAX)
           .map((call) => ({ name: ENGINE_BROKER_MCP_CALL_NAME.test(call.name) ? call.name : "<invalid>", outstanding_ms: call.outstandingMs })),
+        // Every request the facade refused before it could relay it, by reason
+        // class. Without it a turn whose capability was spent — 128 requests,
+        // two per worker round — seals as `answered == started, outstanding:
+        // []`, which is what a healthy turn seals as.
+        ...(terminal.mcpCalls.refusals === undefined
+          ? {}
+          : { refusals: Object.fromEntries(ENGINE_BROKER_MCP_REFUSAL_REASONS.map((reason) => [reason, terminal.mcpCalls!.refusals![reason]])) }),
         // The session's standalone GET tunnel, absent for a turn sealed before
         // the facade observed that channel at all.
         ...(terminal.mcpCalls.tunnels === undefined

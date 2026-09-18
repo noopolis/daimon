@@ -55,6 +55,21 @@
  * the turn's death must not retroactively mark the call it was blocked on as
  * finished.
  */
+/**
+ * The same map carries the facade's *refusals*, for the sharpest form of the
+ * same problem. A refused request never reaches the relay at all, so a turn
+ * every one of whose requests was 403'd sealed as `answered == started,
+ * outstanding: []` — byte-identical to a healthy turn, which is precisely the
+ * reading this instrument exists to make trustworthy. The reason class is what
+ * makes it actionable: an exhausted per-turn capability budget (a worker's
+ * `search_tool`+`use_tool` pair per round is two requests of the facade's
+ * `ENGINE_BROKER_MCP_CAPABILITY_REQUESTS`) is a different fault from a
+ * mount that was never registered, and both differ from a worker asking for a
+ * route the facade does not serve. Counts only, keyed by a closed vocabulary:
+ * never the token, the capability, the URL or the body. A refusal the facade
+ * cannot attribute to a turn — a bearer no live grant matches — is recorded
+ * nowhere, because attributing it to a turn would be inventing the fact.
+ */
 export const ENGINE_BROKER_MCP_OUTSTANDING_MAX = 16;
 export const ENGINE_BROKER_MCP_CALL_INVALID = "<invalid>";
 export const ENGINE_BROKER_MCP_CALL_TRUNCATED = "<truncated>";
@@ -64,6 +79,19 @@ const TOOL_NAME = /^[A-Za-z0-9_.-]{1,64}$/u;
 
 /** Open GET tunnels reported: a session opens one, so more than a handful is already the anomaly. */
 export const ENGINE_BROKER_MCP_TUNNEL_MAX = 8;
+
+/**
+ * Why the facade refused one relayed request, as a closed vocabulary:
+ * - `route`: a path or method the facade does not serve.
+ * - `expired`: the turn capability's TTL had passed.
+ * - `exhausted`: the turn capability's request budget was spent.
+ * - `unrouted`: a live capability whose turn has no registered mount.
+ * - `oversized`: a POST body past the facade's own request bound.
+ */
+export const ENGINE_BROKER_MCP_REFUSAL_REASONS = ["route", "expired", "exhausted", "unrouted", "oversized"] as const;
+export type EngineBrokerMcpRefusalReason = (typeof ENGINE_BROKER_MCP_REFUSAL_REASONS)[number];
+/** How many requests of this turn the facade refused, by reason class. Every member is a measurement; the whole member is absent only where it was never measured. */
+export type EngineBrokerMcpRefusalObservation = Readonly<Record<EngineBrokerMcpRefusalReason, number>>;
 
 export type EngineBrokerOutstandingMcpCall = Readonly<{ name: string; outstandingMs: number }>;
 /** One GET SSE tunnel still open at observation: how long it has been open, and whether the mount ever pushed through it. */
@@ -79,7 +107,7 @@ export type EngineBrokerMcpTunnelObservation = Readonly<{ opened: number; closed
  * facade answered, how many POST bodies it could not read, and the ones still
  * unanswered with the time each has been outstanding.
  */
-export type EngineBrokerMcpCallObservation = Readonly<{ started: number; answered: number; undecoded: number; outstanding: readonly EngineBrokerOutstandingMcpCall[]; tunnels?: EngineBrokerMcpTunnelObservation }>;
+export type EngineBrokerMcpCallObservation = Readonly<{ started: number; answered: number; undecoded: number; outstanding: readonly EngineBrokerOutstandingMcpCall[]; tunnels?: EngineBrokerMcpTunnelObservation; refusals?: EngineBrokerMcpRefusalObservation }>;
 
 /** One relayed POST's calls. `answer` marks a complete relay; `close` ends it unanswered. Both are idempotent. */
 export interface EngineBrokerMcpCallHandle { answer(): void; close(): void }
@@ -93,14 +121,16 @@ type TunnelRecord = { readonly openedAt: number; delivered: boolean };
 type TurnLog = {
   started: number; answered: number; undecoded: number; readonly live: Set<CallRecord>; readonly ended: CallRecord[];
   tunnelsOpened: number; tunnelsClosed: number; tunnelsDelivered: number; readonly openTunnels: Set<TunnelRecord>;
+  readonly refusals: Record<EngineBrokerMcpRefusalReason, number>;
 };
+const noRefusals = (): Record<EngineBrokerMcpRefusalReason, number> => ({ route: 0, expired: 0, exhausted: 0, unrouted: 0, oversized: 0 });
 
 export class EngineBrokerMcpCallLog {
   private readonly turns = new Map<string, TurnLog>();
   constructor(private readonly now: () => number = Date.now) {}
 
   /** A turn the facade registered. Re-opening an id resets it: a turn id is unique per turn. */
-  open(turnId: string): void { this.turns.set(turnId, { started: 0, answered: 0, undecoded: 0, live: new Set(), ended: [], tunnelsOpened: 0, tunnelsClosed: 0, tunnelsDelivered: 0, openTunnels: new Set() }); }
+  open(turnId: string): void { this.turns.set(turnId, { started: 0, answered: 0, undecoded: 0, live: new Set(), ended: [], tunnelsOpened: 0, tunnelsClosed: 0, tunnelsDelivered: 0, openTunnels: new Set(), refusals: noRefusals() }); }
   close(turnId: string): void { this.turns.delete(turnId); }
 
   /** A POST body the facade is about to relay. Anything that is not a `tools/call` records nothing. */
@@ -152,6 +182,13 @@ export class EngineBrokerMcpCallLog {
     };
   }
 
+  /**
+   * A request the facade refused before it could ever be relayed. A refusal it
+   * cannot attribute to a turn is never recorded against one, so an unknown
+   * turn is a no-op here exactly as every other operation is.
+   */
+  refuse(turnId: string, reason: EngineBrokerMcpRefusalReason): void { const log = this.turns.get(turnId); if (log !== undefined) log.refusals[reason] += 1; }
+
   /** A POST whose body the facade refused to read (over its own bound), which is a call it cannot name. */
   undecodable(turnId: string): void { const log = this.turns.get(turnId); if (log !== undefined) log.undecoded += 1; }
 
@@ -167,6 +204,7 @@ export class EngineBrokerMcpCallLog {
       .map((record): EngineBrokerOpenMcpTunnel => ({ openMs: Math.max(0, at - record.openedAt), delivered: record.delivered }));
     return {
       started: log.started, answered: log.answered, undecoded: log.undecoded,
+      refusals: { ...log.refusals },
       tunnels: { opened: log.tunnelsOpened, closed: log.tunnelsClosed, delivered: log.tunnelsDelivered, open },
       outstanding: outstanding.length > ENGINE_BROKER_MCP_OUTSTANDING_MAX
         ? [...outstanding.slice(0, ENGINE_BROKER_MCP_OUTSTANDING_MAX - 1), { name: ENGINE_BROKER_MCP_CALL_TRUNCATED, outstandingMs: 0 }]

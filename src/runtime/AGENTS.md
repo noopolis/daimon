@@ -332,6 +332,25 @@ out or refuses a tunnel, because an instrument that tore the stream down would
 destroy the evidence it exists to gather. The member is optional on the wire for
 one reason — a turn sealed before it existed must still replay — so its absence
 means "not measured" and never zero, exactly as `mcp`'s own absence does.
+A request the facade *refuses* is the sharpest form of the same silence, and
+it used to observe as nothing at all: `route()` threw before `calls.begin`, so
+a turn 403'd on every request sealed `answered == started, outstanding: []` —
+byte-identical to a healthy turn. `EngineBrokerMcpCallLog.refuse` now counts
+each one by a closed reason class (`route`, `expired`, `exhausted`,
+`unrouted`, `oversized`), because the classes call for opposite fixes: an
+exhausted per-turn capability is a budget, an unserved route is a worker
+asking for something that does not exist. The budget is reachable rather than
+theoretical — `ENGINE_BROKER_MCP_CAPABILITY_REQUESTS` (128) covers every POST,
+the GET tunnel and the DELETE, and a `search_tool`+`use_tool` round spends two,
+so a 48-round wake asks for ~96 plus its handshake. Attribution comes from
+`EngineBrokerCapabilities.classifyToken`, which names the token's turn and why
+it would be refused *without spending its budget*; a bearer no grant matches
+names no turn and stays unattributed, because guessing an owner would be
+inventing the measurement. Counts only: never the token, the capability, the
+URL or the body. The member is optional on the wire for `tunnels`' one reason,
+and reaches the operator as `mcp_refused=exhausted:41` and the seal row's
+`mcp.refusals`.
+
 Measured against the real CLI (rig, grok 1.0.34, real facade and mount): the
 tunnel opens ~3 ms after `initialize`, carries nothing for its whole life, and
 **closes 16 ms before the worker exits** — the close is the worker's own
@@ -353,8 +372,12 @@ terminal turn (`turns.jsonl`, `engineBrokerSealLedgerPathFor`), rendered from
 the sealed response and nothing else. Its members are the accounting, the
 failure `code`, the diagnostic's closed `status`/`stage`/`failure_class` with
 the reason `engineBrokerNativeClient.ts` already redacted and bounded, and the
-facade's `mcp` observation — names, counts, GET-tunnel lifecycle and elapsed
-milliseconds. Never a
+facade's `mcp` observation — names, counts, refusals by reason class,
+GET-tunnel lifecycle and elapsed milliseconds. That projection is a closed
+allow-list and `engineBrokerSealLedger.test.ts` asserts the *exact key set* of
+a written row for a completed turn: replacing it with `...terminal` writes
+`usage`, `diagnostic`, `mcpCalls` and the model's entire reply into the
+ledger, and that mutation is what the assertion exists to catch. Never a
 prompt, body, reply, bearer, capability or session id; the terminal response
 carries none of those in the first place, and the projection is an allow-list
 rather than a spread, so a future additive member of the response cannot become
