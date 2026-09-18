@@ -61,11 +61,11 @@
  * every one of whose requests was 403'd sealed as `answered == started,
  * outstanding: []` — byte-identical to a healthy turn, which is precisely the
  * reading this instrument exists to make trustworthy. The reason class is what
- * makes it actionable: an exhausted per-turn capability budget (a worker's
- * `search_tool`+`use_tool` pair per round is two requests of the facade's
- * `ENGINE_BROKER_MCP_CAPABILITY_REQUESTS`) is a different fault from a
- * mount that was never registered, and both differ from a worker asking for a
- * route the facade does not serve. Counts only, keyed by a closed vocabulary:
+ * makes it actionable: an exhausted per-turn capability budget — the facade's
+ * `ENGINE_BROKER_MCP_CAPABILITY_REQUESTS`, derived from the compiled turn
+ * bound times what a round may spend — is a different fault from a mount that
+ * was never registered, and both differ from a worker asking for a route the
+ * facade does not serve. Counts only, keyed by a closed vocabulary:
  * never the token, the capability, the URL or the body. A refusal the facade
  * cannot attribute to a turn — a bearer no live grant matches — is recorded
  * nowhere, because attributing it to a turn would be inventing the fact.

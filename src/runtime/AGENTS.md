@@ -339,10 +339,21 @@ byte-identical to a healthy turn. `EngineBrokerMcpCallLog.refuse` now counts
 each one by a closed reason class (`route`, `expired`, `exhausted`,
 `unrouted`, `oversized`), because the classes call for opposite fixes: an
 exhausted per-turn capability is a budget, an unserved route is a worker
-asking for something that does not exist. The budget is reachable rather than
-theoretical — `ENGINE_BROKER_MCP_CAPABILITY_REQUESTS` (128) covers every POST,
-the GET tunnel and the DELETE, and a `search_tool`+`use_tool` round spends two,
-so a 48-round wake asks for ~96 plus its handshake. Attribution comes from
+asking for something that does not exist. That budget is *derived*, not
+picked: `ENGINE_BROKER_MCP_CAPABILITY_REQUESTS` is `GROK_WORKER_MAX_TURNS`
+times `ENGINE_BROKER_MCP_ROUND_REQUESTS` (3 — a round's `search_tool`, its
+`use_tool`, and one spare for a retry or a second discovery) plus
+`ENGINE_BROKER_MCP_SESSION_REQUESTS` (5 — `initialize`,
+`notifications/initialized`, `tools/list`, the GET tunnel, the DELETE). It was
+a literal 128 against a bound of 48 rounds whose legitimate traffic is ~101, so
+the first round that also retried met a mid-turn 403 storm; the two numbers
+that must agree now live in one place, and raising the turn bound can no longer
+silently exhaust the budget. It stays a bound rather than a comfortable number
+because the derivation is exact: the request *after* the worst-case legitimate
+session is refused, so a compromised worker gets three MCP calls per round it
+was compiled to take and not one more. `engineBrokerMcpObservation.test.ts`
+drives that worst case through the real facade, computed from the turn bound
+alone. Attribution comes from
 `EngineBrokerCapabilities.classifyToken`, which names the token's turn and why
 it would be refused *without spending its budget*; a bearer no grant matches
 names no turn and stays unattributed, because guessing an owner would be

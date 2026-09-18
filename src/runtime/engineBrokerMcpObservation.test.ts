@@ -6,7 +6,8 @@ import test from "node:test";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import type { EngineBrokerMcpTunnelObservation } from "./engineBrokerMcpCallLog.js";
-import { ENGINE_BROKER_MCP_CAPABILITY_REQUESTS, ENGINE_BROKER_MCP_FACADE_PORT } from "./engineBrokerMcpFacade.js";
+import { GROK_WORKER_MAX_TURNS } from "../contracts/grokWorkerContract.js";
+import { ENGINE_BROKER_MCP_FACADE_PORT, ENGINE_BROKER_MCP_ROUND_REQUESTS, ENGINE_BROKER_MCP_SESSION_REQUESTS } from "./engineBrokerMcpFacade.js";
 import { connectClient, FACADE_URL, sharedFacade, startRig, withDeadline } from "./engineBrokerMcpFacadeRig.test.js";
 
 /**
@@ -161,18 +162,32 @@ test("the facade observes the standalone GET tunnel: open with its age, whether 
  * `route()` refuses before the call log is ever touched, so a request the
  * facade 403'd never reached `started`, `undecoded` or `outstanding`: a turn
  * whose every request was refused sealed as `answered == started,
- * outstanding: []`, which is exactly what a healthy turn seals as. The budget
- * makes that reachable rather than theoretical — one capability buys
- * {@link ENGINE_BROKER_MCP_CAPABILITY_REQUESTS} requests across all three
- * methods, and a worker spends two of them per round.
+ * outstanding: []`, which is exactly what a healthy turn seals as.
+ *
+ * The middle of this test is a second guarantee and it is a *relationship*,
+ * not a number. The demand side is computed from the launcher's compiled
+ * `--max-turns` backstop alone — every round spending its full MCP allowance,
+ * plus the session's fixed cost — and the whole of it must be served on one
+ * capability, with the very next request refused. Two numbers that must agree
+ * and live apart drift: the budget was a literal 128 against a bound of 48
+ * rounds, ~101 requests of legitimate traffic, and the first round that also
+ * retried would have met a mid-turn 403 storm. Deriving one from the other is
+ * what makes raising `GROK_WORKER_MAX_TURNS` unable to silently exhaust the
+ * budget — and asserting the refusal one past the worst case is what keeps the
+ * derivation a bound rather than a comfortable number.
  *
  * The boundary these assertions straddle: a turn served against a turn
- * refused, and within the refusals, a spent capability against a route the
- * facade does not serve — the first is a budget to raise, the second is a
- * worker asking for something that does not exist.
+ * refused; within the refusals, a spent capability against a route the facade
+ * does not serve; and, for the budget, legitimate worst-case traffic against
+ * the first request beyond it.
  *
  * Mutation: restore `throw new FacadeRefusal()` in place of either `refuse`
- * call in `route()`, and a 403'd turn reads as an idle one again.
+ * call in `route()`, and a 403'd turn reads as an idle one again. Pin
+ * `ENGINE_BROKER_MCP_CAPABILITY_REQUESTS` back to a literal `128` and this is
+ * already red at today's turn bound; raise `GROK_WORKER_MAX_TURNS` beside that
+ * literal and it stays red, which is the drift the derivation removes. Raising
+ * `GROK_WORKER_MAX_TURNS` *with* the derivation keeps it green, which is the
+ * guarantee itself.
  */
 test("a request the facade refused is counted against its turn, by reason, and is never a call it served", async () => {
   const facade = await sharedFacade();
@@ -202,13 +217,18 @@ test("a request the facade refused is counted against its turn, by reason, and i
     assert.equal(await send(FACADE_URL, "wrong-token-abcdefghijklmnopqrstuvwxyz0123456789"), 403);
     assert.equal(facade.observe(turnId)?.refusals?.route, 2, "an unattributable refusal belongs to no turn");
 
-    // Neither refusal spent the capability, so the budget is exactly what was
-    // issued — and spending it all is reachable: a 48-round worker asks for
-    // ~96 of these plus its handshake, tunnel and DELETE.
-    for (let spent = 0; spent < ENGINE_BROKER_MCP_CAPABILITY_REQUESTS; spent += 1) assert.equal(await send(FACADE_URL, token), 200);
-    assert.equal(served, ENGINE_BROKER_MCP_CAPABILITY_REQUESTS);
+    // Neither refusal spent the capability, so what follows is the whole of it.
+    // The demand is read off the compiled turn bound and nothing else: every
+    // round the launcher admits, each spending its full MCP allowance, plus the
+    // one-off session cost. All of it must be served.
+    const legitimate = GROK_WORKER_MAX_TURNS * ENGINE_BROKER_MCP_ROUND_REQUESTS + ENGINE_BROKER_MCP_SESSION_REQUESTS;
+    for (let spent = 0; spent < legitimate; spent += 1) assert.equal(await send(FACADE_URL, token), 200, `request ${spent + 1} of ${legitimate} was refused`);
+    assert.equal(served, legitimate, "every legitimate request must reach the mount");
+    // And it is still a bound: the first request past the worst case is refused,
+    // so the budget caps a compromised worker at exactly the traffic the turn
+    // bound compiles for.
     assert.equal(await send(FACADE_URL, token), 403, "the capability's budget is spent");
-    assert.equal(served, ENGINE_BROKER_MCP_CAPABILITY_REQUESTS, "an exhausted capability never reaches the mount");
+    assert.equal(served, legitimate, "an exhausted capability never reaches the mount");
 
     const observed = facade.observe(turnId);
     assert.deepEqual(observed?.refusals, { route: 2, expired: 0, exhausted: 1, unrouted: 0, oversized: 0 });

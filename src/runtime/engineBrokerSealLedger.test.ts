@@ -163,9 +163,8 @@ test("a cancelled turn's GET tunnel is sealed open with its age, closed, or neve
  * The refusal, on the same durable route as the hang it looks like.
  *
  * A request the facade 403'd never reached the relay, so before it was counted
- * a turn whose capability was spent — 128 requests, two per worker round —
- * sealed `answered == started, outstanding: []`, which is exactly what a
- * healthy turn seals. The row has to carry the reason class, because an
+ * a turn whose capability was spent sealed `answered == started,
+ * outstanding: []`, which is exactly what a healthy turn seals. The row has to carry the reason class, because an
  * exhausted budget and an unserved route are opposite fixes.
  *
  * Mutation: drop the `refusals` member from `renderBrokerTurnSealLine` and the

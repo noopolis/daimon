@@ -105,9 +105,9 @@ export const renderBrokerTurnSealLine = (terminal: EngineBrokerTerminalResponse,
           .slice(0, ENGINE_BROKER_MCP_OUTSTANDING_MAX)
           .map((call) => ({ name: ENGINE_BROKER_MCP_CALL_NAME.test(call.name) ? call.name : "<invalid>", outstanding_ms: call.outstandingMs })),
         // Every request the facade refused before it could relay it, by reason
-        // class. Without it a turn whose capability was spent — 128 requests,
-        // two per worker round — seals as `answered == started, outstanding:
-        // []`, which is what a healthy turn seals as.
+        // class. Without it a turn whose capability was spent seals as
+        // `answered == started, outstanding: []`, which is what a healthy turn
+        // seals as.
         ...(terminal.mcpCalls.refusals === undefined
           ? {}
           : { refusals: Object.fromEntries(ENGINE_BROKER_MCP_REFUSAL_REASONS.map((reason) => [reason, terminal.mcpCalls!.refusals![reason]])) }),

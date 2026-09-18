@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
+import { GROK_WORKER_MAX_TURNS } from "../contracts/grokWorkerContract.js";
 import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
 import { EngineBrokerMcpCallLog, type EngineBrokerMcpCallObservation, type EngineBrokerMcpRefusalReason, type EngineBrokerMcpTunnelHandle } from "./engineBrokerMcpCallLog.js";
 
@@ -46,17 +47,31 @@ const FORWARDED_RESPONSE_HEADERS = ["content-type", "mcp-session-id", "mcp-proto
 const FORWARDED_METHODS = new Set(["POST", "GET", "DELETE"]);
 const MAX_REQUEST_BYTES = 1024 * 1024;
 export const ENGINE_BROKER_MCP_FACADE_PORT = 43_124;
+
+/** Requests one worker round may legitimately make: its `search_tool`, its `use_tool`, and one spare for a retry or a second discovery. */
+export const ENGINE_BROKER_MCP_ROUND_REQUESTS = 3;
+/** The session's fixed cost, once per turn: `initialize`, `notifications/initialized`, `tools/list`, the standalone GET tunnel, the closing DELETE. */
+export const ENGINE_BROKER_MCP_SESSION_REQUESTS = 5;
 /**
- * Requests one turn capability may spend, across all three methods.
+ * Requests one turn capability may spend, across all three methods — *derived*
+ * from the compiled turn bound rather than chosen.
  *
- * A worker's round is a `search_tool` and a `use_tool`, so a 48-turn wake is
- * ~96 POSTs plus the handshake, the standalone GET tunnel and the closing
- * DELETE: exhaustion is reachable rather than theoretical, and every request
- * past it is a 403 the worker cannot explain. That is why the refusal is
- * counted and sealed (`engineBrokerMcpCallLog.ts`) rather than being an
- * absence in the turn's row.
+ * It was 128, and a legitimate 48-round wake needs ~101 of them: a worker's
+ * round is a `search_tool` and a `use_tool`, so the first round that also
+ * retries, or looks something up twice, eats the margin. A bound that can be
+ * predicted to bite mid-turn is not a bound, it is a 403 storm waiting for a
+ * real wake — and a number raised until it feels comfortable is not one
+ * either, because the budget exists to cap a *compromised* worker.
+ *
+ * So the two numbers that must agree are kept in one place: the launcher's
+ * `--max-turns` backstop ({@link GROK_WORKER_MAX_TURNS}) times what a round
+ * may legitimately spend, plus the session's fixed cost. Raising the turn
+ * bound raises this with it, and a compromised worker still gets exactly three
+ * MCP calls per round it was compiled to take and not one more. The arithmetic
+ * is spelled out rather than folded into a literal so it can be audited: the
+ * two multiplicands above each say what they are.
  */
-export const ENGINE_BROKER_MCP_CAPABILITY_REQUESTS = 128;
+export const ENGINE_BROKER_MCP_CAPABILITY_REQUESTS = GROK_WORKER_MAX_TURNS * ENGINE_BROKER_MCP_ROUND_REQUESTS + ENGINE_BROKER_MCP_SESSION_REQUESTS;
 export const ENGINE_BROKER_MCP_CAPABILITY_TTL_MS = 15 * 60_000;
 
 class FacadeRefusal extends Error {}
