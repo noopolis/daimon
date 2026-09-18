@@ -328,7 +328,14 @@ static void serve(int client) {
     goto done;
   out.stage = DBL_STAGE_EXEC;
   out.failure_class = DBL_FAILURE_EXEC;
-  if (pipe2(pipes, O_CLOEXEC | O_NONBLOCK))
+  /* O_NONBLOCK lives on the open file description, so setting it on the pipe
+     as a whole handed it to the worker with `pipes[1]`: Grok 1.0.34 makes one
+     EAGAIN from a headless stdout write fatal and exits 1 before any model
+     request. Only the read end this process polls is non-blocking, so the
+     post-exit drain cannot park; a blocking child cannot wedge the launcher,
+     because `supervise` drains every pass and SIGKILLs the worker's process
+     group the moment the bound is crossed (`native/AGENTS.md`). */
+  if (pipe2(pipes, O_CLOEXEC) || fcntl(pipes[0], F_SETFL, O_NONBLOCK))
     goto done;
   pid = launch(&r, exe, fds[0], fds[1], pipes[1], &launch_failure,
                &launch_start_ticks);

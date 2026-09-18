@@ -40,6 +40,33 @@ binary unrunnable: Grok 1.0.34 re-executes itself inside bubblewrap by path
 (`/usr/local/bin/grok`), so the image path's root ownership, not the launcher
 descriptor, is what protects the sandboxed process.
 
+**The worker's end of that pipe is a blocking pipe.** `O_NONBLOCK` is a
+property of the open file description, not of a descriptor, so creating the
+merged stdout/stderr pipe with `pipe2(..., O_NONBLOCK)` handed non-blocking
+writes to the worker along with `pipes[1]`: Grok 1.0.34 makes the first EAGAIN
+from a headless stdout write fatal (`stdout write failed: Resource temporarily
+unavailable (os error 11)`) and exits 1 before it issues a single model
+request, so the turn burns a wake and buys nothing. It stayed invisible until
+the MCP tools became reachable and the init frame that enumerates them grew to
+roughly 9.5 KB — past a pipe buffer, which is not always the 64 KiB default
+(8 KiB inside the Docker Desktop VM this suite runs in). So the pipe is created
+`O_CLOEXEC` only and `O_NONBLOCK` is set afterwards on `pipes[0]` alone, the
+read end this process polls; that one is load bearing, because the post-exit
+drain loop has no `poll` and would otherwise park on a write end some surviving
+grandchild still holds.
+
+A blocking child cannot wedge the launcher. `serve()` runs in its own forked
+handler per connection, so one worker's backpressure never reaches another
+turn; `supervise` drains the pipe on every pass of a 250 ms `poll`, and both
+bounds act on a child that is asleep in `write()`: crossing `DBL_MAX_OUTPUT`
+stops reading (`p[1].events = 0`) and `kill(-pid, SIGKILL)`s the worker's whole
+process group in the same iteration, and a client disconnect does the same —
+neither is refusable by a process sleeping on a pipe. `worker_spill_case` is
+the cover: the fixture shrinks its own stdout pipe to the kernel minimum,
+reports the capacity it actually got, and writes four times that in one
+`write`, so it straddles the buffer on any host without assuming 64 KiB while
+staying under `DBL_MAX_OUTPUT`.
+
 The result frame's last word is `diagnostic_length`, not padding: on
 `DBL_STATUS_WORKER_FAILED` the supervisor keeps the last `DBL_MAX_DIAGNOSTIC`
 bytes of the worker's merged stdout/stderr and sends them after the fixed
