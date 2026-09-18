@@ -474,8 +474,12 @@ in `deny` (verified: `/tmp`, `/var/tmp`, `/run`, `/etc`, `sessions` all fail;
   directory belongs is refused rather than followed. The home itself is
   create-only (`ensureRuntimeHome`) — whether it should be `0700` or a Grok
   agent's `0710` is `physicalReadiness.ts`'s judgement, not the layout's. The
-  mode constant lives only in that module, and a test fails the build if any
-  writer imports it again;
+  mode constant lives only in that module, a test fails the build if any writer
+  imports it again, and the same test refuses any `mkdir` that names a runtime
+  home outside the layout — a `mode:` argument covers only the install where
+  the directory is new. `wakeAcceptanceFs.ts` is the one exception and closes
+  the hole the other way, by asserting the directory it found and refusing a
+  wider one;
 - spills (`toolResultSpill.ts`) are written `0640`; provision
   `<runtimeHome>/tool-output` as `2000:<worker gid> 2750` (setgid) under a
   runtime home the worker can traverse, so each spill carries that agent's

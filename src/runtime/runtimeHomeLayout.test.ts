@@ -166,6 +166,16 @@ const OUTSIDE_RUNTIME_HOME = [
   "src/runtime/native/copyArtifact.ts", "src/observability/emitCausalFixture.ts", "src/pi/auth.ts", "src/runtime/cli.ts"
 ];
 
+/**
+ * Files that may name a runtime home in a `mkdir` of their own.
+ *
+ * `runtimeHomeLayout.ts` is the correction itself. `wakeAcceptanceFs.ts`
+ * creates the home and its store directory and then *asserts* each one —
+ * refusing a directory it finds wider rather than correcting it — which closes
+ * the same hole the other way and is its own documented contract.
+ */
+const MAY_MKDIR_A_RUNTIME_HOME = ["src/runtime/runtimeHomeLayout.ts", "src/pi/wakeAcceptanceFs.ts"];
+
 const mkdirCalls = (source: string): string[] => {
   const calls: string[] = [];
   for (let index = source.indexOf("mkdir("); index !== -1; index = source.indexOf("mkdir(", index + 1)) {
@@ -178,9 +188,10 @@ const mkdirCalls = (source: string): string[] => {
   return calls;
 };
 
-test("no runtime-home directory is created without an explicit private mode", async () => {
+test("no runtime-home directory is created without an explicit private mode, and none is created outside the layout", async () => {
   // Source policy: a default `mkdir` under an agent's runtime home would be 0755,
-  // and the home of a brokered Grok agent is traversable by its worker uid.
+  // the home of a brokered Grok agent is traversable by its worker uid, and a
+  // `mode:` argument only covers the install where the directory is new.
   const offenders: string[] = [];
   const walk = async (directory: string): Promise<void> => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -189,6 +200,13 @@ test("no runtime-home directory is created without an explicit private mode", as
       if (!entry.name.endsWith(".ts") || entry.name.endsWith(".test.ts") || OUTSIDE_RUNTIME_HOME.includes(target)) continue;
       const source = await readFile(target, "utf8");
       for (const call of mkdirCalls(source)) {
+        // A `mode:` argument is a create-only mode: it decides nothing for a
+        // directory that already exists, so naming a runtime home in a `mkdir`
+        // is the defect whether or not a mode is passed.
+        if (/runtimeHome/iu.test(call) && !MAY_MKDIR_A_RUNTIME_HOME.includes(target)) {
+          offenders.push(`${target}: ${call.replace(/\s+/gu, " ").slice(0, 90)}`);
+          continue;
+        }
         // The workspace is a caller-prepared root with its own contract (group-readable for Grok).
         if (call.includes("mode:") || call.includes("{ mode }") || call.includes("workspacePath")) continue;
         offenders.push(`${target}: ${call.replace(/\s+/gu, " ").slice(0, 90)}`);
