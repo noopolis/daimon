@@ -122,7 +122,17 @@ export class AttentionDispatcher {
       const executionError = result.status === "rejected" ? `wake rejected: ${result.code}`
         : result.status === "failed" ? `engine_failed: ${result.detail ?? "engine execution failed"}` : null;
       for (const item of claimed.filter((value) => !value.done)) {
-        if (this.stopping || result.status === "stopped") await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
+        // Returned to the inbox for restart, and recording WHY. Only a WAKE OUTCOME
+        // decides this: `stopped` — which an aborted in-flight wake also carries, with
+        // its own code — is the runtime reclaiming work nobody read. The dispatcher's
+        // own halt is not an outcome and must not stand in for one; it guards the
+        // pre-wake path, where it belongs. Keying on it here discarded a completed
+        // wake's evidence because the host happened to be halting, leaving a record
+        // byte-identical to "never ran". Production tolerated it because a restart
+        // re-delivers; a one-shot isolated trial has no restart and simply lost it.
+        if (result.status === "stopped") {
+          await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted", result.code);
+        }
         else if (agent.attention !== undefined) {
           // Successful reading is not completion. A failed execution also keeps
           // unfinished deliveries, and its execution id for idempotent retry.
