@@ -201,6 +201,42 @@ static void worker_spill_case(void) {
   close(p);
   close(c);
 }
+/* The bound is the WHOLE TURN's stdout, and a worker can cross it while it is
+   still working and still writing. `output_boundary_case` writes one byte past
+   the bound and then exits on its own account, so it proves the arithmetic and
+   not the termination: the worker was already gone when the trip fired. This
+   one straddles that boundary from the other side. The fixture writes eight
+   times the bound in ordinary frame-sized writes and then sleeps far longer
+   than this suite, so it fills its own pipe repeatedly and is asleep inside
+   `write()` when the trip happens, and NOTHING but the launcher can end it.
+   A launcher that stopped reading without killing — or killed without
+   answering — parks the worker and this client forever, which is why the
+   socket carries a deadline: a park has to fail red here, not hang the runner.
+   The deadline also bounds the answer: it must arrive while the fixture is
+   still sleeping, so a pass cannot be the fixture exiting by itself. */
+static void worker_stream_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("stream-output", "mcp.Stream-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  struct timeval deadline = {.tv_sec = 30, .tv_usec = 0};
+  char extra;
+  check(!setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline)),
+        "worker stream deadline");
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r),
+        "worker stream answered before the deadline");
+  check(r.status == DBL_STATUS_OUTPUT_FAILED && r.stage == DBL_STAGE_OUTPUT &&
+            r.failure_class == DBL_FAILURE_OUTPUT_LIMIT &&
+            r.output_length == 0 && r.diagnostic_length == 0 &&
+            r.worker_pid > 0 && r.worker_uid == 2200 && r.start_ticks > 0 &&
+            r.term_signal == SIGKILL,
+        "worker stream stopped at the bound");
+  check(read(s, &extra, 1) == 0, "worker stream EOF");
+  close(s);
+  close(p);
+  close(c);
+}
 static void org_cases(void) {
   check(!setgid(DBL_BROKER_UID) && !setuid(DBL_BROKER_UID), "drop broker uid");
   client_case();
@@ -211,6 +247,7 @@ static void org_cases(void) {
   worker_failure_case();
   worker_flood_case();
   worker_spill_case();
+  worker_stream_case();
   int s = connect_socket(), p = sealed("prompt"),
       c = sealed_bundle("provider.Token-1", "mcp.Token-2");
   struct dbl_request q = request();
