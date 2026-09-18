@@ -2,16 +2,17 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 import { readChild } from "./cliChildOutput.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
-import { renderGrokSandboxArgs } from "./cliEngineSpawn.js";
 
 /**
  * Per-wake MCP endpoint registration for the CLI engines that cannot take the
  * endpoint on their own command line.
  *
  * Codex takes `-c mcp_servers.daimon.url=<endpoint>` per invocation and needs
- * nothing here. Grok and AGY are both config-file driven, so Daimon registers
- * the ephemeral endpoint before the turn and removes it afterwards, through
- * each CLI's own `mcp add`/`mcp remove` subcommands.
+ * nothing here. AGY is config-file driven, so Daimon registers the ephemeral
+ * endpoint before the turn and removes it afterwards through its own `mcp
+ * add`/`mcp remove` subcommands. Grok no longer uses this path: its project
+ * scope is ignored in untrusted workspaces on 1.0.34, so its endpoint is written
+ * into the agent's Daimon-owned GROK_HOME (`grokHomeMcpRegistration.ts`).
  *
  * The registration is deliberately performed by the engine CLI rather than by
  * writing its config file directly: the file format belongs to the engine, and
@@ -90,14 +91,8 @@ export const registerCliMcpServer = async (
   };
 };
 
-/** The MCP server name both engines register Daimon's per-wake endpoint under. */
+/** The MCP server name every CLI engine registers Daimon's per-wake endpoint under. */
 export const DAIMON_MCP_SERVER_NAME = "daimon" as const;
-
-export const renderGrokMcpAddArgs = (commandArgs: readonly string[] | undefined, profile: string, endpoint: string): string[] =>
-  [...renderGrokSandboxArgs(commandArgs, profile), "mcp", "add", "--transport", "http", "--scope", "project", DAIMON_MCP_SERVER_NAME, endpoint];
-
-export const renderGrokMcpRemoveArgs = (commandArgs: readonly string[] | undefined, profile: string): string[] =>
-  [...renderGrokSandboxArgs(commandArgs, profile), "mcp", "remove", "--scope", "project", DAIMON_MCP_SERVER_NAME];
 
 /**
  * `agy mcp add --type http <name> <url>`.

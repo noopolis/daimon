@@ -117,3 +117,23 @@ the previous block and why `token_usage_record` wins outright when both exist.
 The four requests also show exactly the shape the study predicted, in one wake:
 fresh input 15,742 → 248 → 4,276 → 10,068 against a context that only grows from
 34,686 to 50,004 — most of every request after the first is cache-read replay.
+
+
+# Grok 1.0.34 per-request stream fixture
+
+`grok-1.0.34-streaming-two-requests.jsonl` is a real two-request turn captured on
+2026-09-17 from `grok 1.0.34` (macOS arm64) with the lean worker flags and
+`--output-format streaming-messages-json` (P0 host matrix cell c14: one MCP
+`use_tool` call, then the answer). Sanitization before commit: the capturing
+scratchpad `cwd` was replaced with `/workspace`; every frame is otherwise
+verbatim.
+
+It pins what `grokStreamUsage.ts` reads and the broker meters per request:
+
+    assistant.message.id                       one request per distinct id
+    assistant.message.usage                    that request's own four buckets
+    result.modelUsage keys                     "grok-4.6-build" for grok-4.6
+
+The two per-request totals (2,775 + 2,810) sum exactly to the terminal
+`result.usage` (5,585), which is why a failed turn's frames are trusted as its
+partial usage.

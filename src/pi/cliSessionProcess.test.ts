@@ -6,10 +6,9 @@ import test from "node:test";
 
 import { createCliSessionFactory, readChild, spawnEngine, terminateChild } from "./cliSession.js";
 
-const grokStream = (text: string): string => [
-  { type: "assistant", parent_tool_use_id: null, session_id: "fake", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } },
-  { type: "result", subtype: "success", is_error: false, result: text, stop_reason: "end_turn", session_id: "fake" }
-].map((event) => JSON.stringify(event)).join("\n");
+// Only AGY still registers its per-wake MCP endpoint through setup/removal
+// children; Grok writes it into its own GROK_HOME (`grokHomeMcpRegistration.ts`).
+const agyStream = (text: string): string => JSON.stringify({ event: "result", result: { conversation_id: "fake", status: "SUCCESS", response: text, num_turns: 1, usage: { input_tokens: 1, output_tokens: 1, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 2 } } });
 
 test("terminates a process group after its leader has exited", async (context) => {
   if (!requirePosixProcessGroups(context)) return;
@@ -29,9 +28,9 @@ test("terminates a process group after its leader has exited", async (context) =
   }
 });
 
-test("Grok setup reaps a stubborn descendant after its successful leader exits", async (context) => {
+test("AGY MCP setup reaps a stubborn descendant after its successful leader exits", async (context) => {
   if (!requirePosixProcessGroups(context)) return;
-  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-grok-setup-group-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-agy-setup-group-"));
   const descendant = path.join(root, "setup-descendant-pid");
   const grok = path.join(root, "grok.mjs");
   await writeFile(grok, `import { spawn } from "node:child_process"; import { writeFileSync } from "node:fs";
@@ -41,10 +40,10 @@ test("Grok setup reaps a stubborn descendant after its successful leader exits",
       child.stdout.once("data", () => { writeFileSync(${JSON.stringify(descendant)}, String(child.pid)); process.exit(0); });
     }
     if (args.includes("remove")) process.exit(0);
-    process.stdout.write(${JSON.stringify(grokStream("engine complete"))});`);
+    process.stdout.write(${JSON.stringify(agyStream("engine complete"))});`);
   try {
     const { session } = await createCliSessionFactory({
-      command: process.execPath, commandArgs: [grok], engine: "grok", maxToolTurns: 1, timeoutMs: 10_000
+      command: process.execPath, commandArgs: [grok], engine: "agy", maxToolTurns: 1, timeoutMs: 10_000
     })({ cwd: root });
     await session.prompt("research");
     const pid = Number(await readFile(descendant, "utf8"));
@@ -56,9 +55,9 @@ test("Grok setup reaps a stubborn descendant after its successful leader exits",
   }
 });
 
-test("Grok removal reaps a stubborn descendant after its successful leader exits", async (context) => {
+test("AGY MCP removal reaps a stubborn descendant after its successful leader exits", async (context) => {
   if (!requirePosixProcessGroups(context)) return;
-  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-grok-remove-group-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-agy-remove-group-"));
   const descendant = path.join(root, "remove-descendant-pid");
   const grok = path.join(root, "grok.mjs");
   await writeFile(grok, `import { spawn } from "node:child_process"; import { writeFileSync } from "node:fs";
@@ -66,10 +65,10 @@ test("Grok removal reaps a stubborn descendant after its successful leader exits
     if (args.includes("remove")) {
       const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => undefined); process.stdout.write('ready'); setInterval(() => undefined, 1000)"], { stdio: ["ignore", "pipe", "ignore"] });
       child.stdout.once("data", () => { writeFileSync(${JSON.stringify(descendant)}, String(child.pid)); process.exit(0); });
-    } else if (args.includes("add")) process.exit(0); else process.stdout.write(${JSON.stringify(grokStream("engine complete"))});`);
+    } else if (args.includes("add")) process.exit(0); else process.stdout.write(${JSON.stringify(agyStream("engine complete"))});`);
   try {
     const { session } = await createCliSessionFactory({
-      command: process.execPath, commandArgs: [grok], engine: "grok", maxToolTurns: 1, timeoutMs: 10_000
+      command: process.execPath, commandArgs: [grok], engine: "agy", maxToolTurns: 1, timeoutMs: 10_000
     })({ cwd: root });
     await session.prompt("research");
     const pid = Number(await readFile(descendant, "utf8"));

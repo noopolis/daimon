@@ -81,6 +81,38 @@ the broker owns refresh and stale-credential recovery. The runtime checks broker
 readiness before admitting Grok agents and verifies their sandbox policy before
 turns. The older credential-lease helper is not the production host path.
 
+The broker worker is pinned to Grok CLI 1.0.34 and runs lean: a fixed Daimon
+system prompt, six tools (`run_terminal_command`, `read_file`, `grep`,
+`list_dir`, and the MCP meta-tools `search_tool`/`use_tool`), no bundled
+skills, workflows, plan mode, subagents, memory or web search, and a declared
+model and reasoning effort from a closed list (default `grok-4.6` at `low`).
+The broker proxy refuses any request outside that shape before it spends.
+
+Each broker registration (`service.json` v2) declares its model and effort,
+its usage ledger, and turn limits `{maxRequests, maxTokens, timeoutMs}`. A wake
+may only lower them (`DAIMON_ENGINE_WAKE_TIMEOUT_MS`,
+`DAIMON_ENGINE_WAKE_TOKEN_CEILING`; the `DAIMON_CODEX_WAKE_*` names are
+aliases). The proxy refuses request `maxRequests + 1` and any request after the
+deadline with HTTP 429 before upstream, and stops admitting requests once the
+upstream-reported running total (cached input included) reaches `maxTokens`, so
+a turn overshoots its token ceiling by at most one request. A tripped limit
+kills the worker. The broker seals every terminal turn with its usage, request
+count, declared model and limit reason, and writes one usage row (keyed by
+`turn`) plus per-request rows for completed and failed turns alike; a replayed
+turn is never metered twice. `resolveOrganizationGrokBrokerProjection` exposes
+a slot's full declared shape, and `noopolis.daimon.grok-slot-preflight.v2`
+receipts bind a slot's denied-path canaries to that projection's digest and to
+one recycle (the caller's nonce and the slot's increasing generation).
+
+Evaluators (Paideia judges and the optimizer, organization uid only) borrow the
+same credential through inference grants: `request_inference_grant` over the
+control socket returns a ten-minute token for one declared model and effort,
+which the evaluator's Grok CLI presents to the provider proxy through
+`env_key` in a config rendered by `renderGrokInferenceClientConfig`. Grant
+requests must carry no tools, are metered like a turn, and are written only to
+the broker's separate `inferenceLedgerPath` (`kind: "inference"` rows), never
+to a subject usage ledger or the wake fuse.
+
 AGY uses OS-native secure storage through one private D-Bus and Secret Service
 realm. Enroll it once with:
 

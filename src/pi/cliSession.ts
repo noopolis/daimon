@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir } from "node:fs/promises";
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -18,7 +17,6 @@ import type { TurnUsageOutcome } from "../runtime/turnUsageLedger.js";
 import { readChild } from "./cliChildOutput.js";
 import { cliChildEnvironment } from "./cliEnvironment.js";
 import {
-  GROK_STRICT_SANDBOX_PROFILE,
   renderCodexArgs,
   spawnEngine
 } from "./cliEngineSpawn.js";
@@ -26,10 +24,9 @@ import {
   registerCliMcpServer,
   renderAgyMcpAddArgs,
   renderAgyMcpRemoveArgs,
-  renderGrokMcpAddArgs,
-  renderGrokMcpRemoveArgs,
   type CliMcpRegistration
 } from "./cliMcpRegistration.js";
+import { registerGrokHomeMcpServer } from "./grokHomeMcpRegistration.js";
 import { decodeAgyHeadlessTurn, type AgyTurnUsage } from "./agyHeadlessResult.js";
 import { type CodexTurnUsage } from "./codexHeadlessResult.js";
 import { createCliTurnMeter, decodeCodexTurn, failedTurnOutcome, publishTurnRequests, publishTurnUsage } from "./cliTurnMetering.js";
@@ -37,6 +34,7 @@ import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
 import type { PiSessionFactoryInput } from "./piHarness.js";
+import { ensureRuntimeHome, ensureRuntimeHomeDirectory } from "../runtime/runtimeHomeLayout.js";
 
 export type CliEngineKind = "agy" | "codex" | "grok";
 
@@ -61,36 +59,10 @@ export type CliEngineKind = "agy" | "codex" | "grok";
  */
 export const AGY_MAX_TOOL_TURNS = 16;
 
-/**
- * Codex's per-wake bounds, and the one place they are decided.
- *
- * `maxToolTurns` mediates only daimon-MCP tool calls; Codex's own shell
- * (`exec_command`) is never routed through that gate, so a single Codex turn
- * previously had no ceiling at all — one production wake ran 23:32→23:42
- * (unbounded wall clock) making 51 shell calls. Codex's `--json` stream
- * reports token usage exactly once, on `turn.completed` — there is no
- * incremental total to watch mid-turn (verified against a live multi-tool-call
- * turn: `item.completed` fires once per tool call, but usage is reported only
- * on the single terminal `turn.completed`) — so the token ceiling is the best
- * bound obtainable from that wire shape: it converts an over-budget turn into
- * an explicit, killed, named failure instead of a silent success, and the
- * wall-clock timeout is what actually interrupts a runaway turn in progress.
- */
-export const DEFAULT_CODEX_WAKE_TIMEOUT_MS = 240_000;
-export const DEFAULT_CODEX_WAKE_TOKEN_CEILING = 300_000;
-export const DAIMON_CODEX_WAKE_TIMEOUT_MS_ENV = "DAIMON_CODEX_WAKE_TIMEOUT_MS";
-export const DAIMON_CODEX_WAKE_TOKEN_CEILING_ENV = "DAIMON_CODEX_WAKE_TOKEN_CEILING";
-
-const positiveInteger = (value: string | undefined, fallback: number, name: string): number => {
-  if (value === undefined) return fallback;
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
-  return parsed;
-};
-export const resolveCodexWakeTimeoutMs = (environment: NodeJS.ProcessEnv = process.env): number =>
-  positiveInteger(environment[DAIMON_CODEX_WAKE_TIMEOUT_MS_ENV], DEFAULT_CODEX_WAKE_TIMEOUT_MS, DAIMON_CODEX_WAKE_TIMEOUT_MS_ENV);
-export const resolveCodexWakeTokenCeiling = (environment: NodeJS.ProcessEnv = process.env): number =>
-  positiveInteger(environment[DAIMON_CODEX_WAKE_TOKEN_CEILING_ENV], DEFAULT_CODEX_WAKE_TOKEN_CEILING, DAIMON_CODEX_WAKE_TOKEN_CEILING_ENV);
+export {
+  DAIMON_CODEX_WAKE_TIMEOUT_MS_ENV, DAIMON_CODEX_WAKE_TOKEN_CEILING_ENV, DAIMON_ENGINE_WAKE_TIMEOUT_MS_ENV, DAIMON_ENGINE_WAKE_TOKEN_CEILING_ENV,
+  DEFAULT_CODEX_WAKE_TIMEOUT_MS, DEFAULT_CODEX_WAKE_TOKEN_CEILING, resolveCodexWakeTimeoutMs, resolveCodexWakeTokenCeiling, resolveEngineWakeLimitOverrides
+} from "./engineWakeLimits.js";
 
 export type CliEngineOptions = {
   readonly commandArgs?: readonly string[];
@@ -166,14 +138,9 @@ type CliTurnEnd = Extract<SessionEvent, { type: "turn_end" }>;
 
 export const prepareCliRuntimeHome = async (runtimeHomePath: string | undefined): Promise<void> => {
   if (runtimeHomePath === undefined) return;
-  await Promise.all([
-    runtimeHomePath,
-    `${runtimeHomePath}/.config`,
-    `${runtimeHomePath}/.local/share`,
-    `${runtimeHomePath}/.local/state`,
-    `${runtimeHomePath}/.cache`,
-    `${runtimeHomePath}/.tmp`
-  ].map((directory) => mkdir(directory, { recursive: true })));
+  await ensureRuntimeHome(runtimeHomePath);
+  await Promise.all([".config", ".local/share", ".local/state", ".cache", ".tmp"]
+    .map((relative) => ensureRuntimeHomeDirectory(runtimeHomePath, relative)));
 };
 
 const childSecretValues = (redactedNames: readonly string[]): readonly string[] =>
@@ -216,7 +183,17 @@ const startMcp = async (
     await startupSettled;
     await transport.close().catch(() => undefined);
     await mcpServer.close().catch(() => undefined);
-    if (httpServer.listening) await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    // `close` only stops accepting and then waits for every open connection,
+    // including the ones the transport has no record of and so cannot end (a
+    // socket opened before `initialize`, or a client pool's idle keep-alive
+    // socket, which relaying a turn through the broker MCP facade leaves
+    // behind). That wait is unbounded and sits on the wake's own completion
+    // path: measured, one such connection parked a finished broker turn with
+    // its result in hand and published nothing. By here this one wake's engine
+    // has returned, failed or been cancelled, so anything still connected is a
+    // leftover — see `AGENTS.md`, and the facade, which bounds itself the same
+    // way.
+    if (httpServer.listening) await new Promise<void>((resolve) => { httpServer.close(() => resolve()); httpServer.closeAllConnections(); });
     lifecycle = "closed";
   })();
   const mount = { get endpoint(): string { return endpoint; }, close };
@@ -321,35 +298,33 @@ class CliSession implements PiSessionLike {
         const controller=new AbortController();this.activeBrokerTurn=controller;
         try{output=await this.options.grokBrokerTurn(`${this.options.identityPrompt ?? ""}${text}`,mount.endpoint,controller.signal);}finally{if(this.activeBrokerTurn===controller)this.activeBrokerTurn=undefined;}
       } else {
-      if ((this.options.engine === "grok" || this.options.engine === "agy") && mount !== undefined) {
+      if (this.options.engine === "grok" && mount !== undefined) {
         await this.options.verifyExecutable?.();
-        const profile = this.options.grokSandboxProfile ?? GROK_STRICT_SANDBOX_PROFILE;
-        const grok = this.options.engine === "grok";
+        registration = await registerGrokHomeMcpServer({
+          engineHomePath: this.options.engineHomePath,
+          endpoint: mount.endpoint,
+          ...(this.options.verifyGrokSandbox !== undefined ? { verify: this.options.verifyGrokSandbox } : {})
+        });
+        this.mcpRegistration = registration;
+      } else if (this.options.engine === "agy" && mount !== undefined) {
+        await this.options.verifyExecutable?.();
         registration = await registerCliMcpServer({
-          addArgs: grok
-            ? renderGrokMcpAddArgs(this.options.commandArgs, profile, mount.endpoint)
-            : renderAgyMcpAddArgs(this.options.commandArgs, mount.endpoint),
-          removeArgs: grok
-            ? renderGrokMcpRemoveArgs(this.options.commandArgs, profile)
-            : renderAgyMcpRemoveArgs(this.options.commandArgs),
+          addArgs: renderAgyMcpAddArgs(this.options.commandArgs, mount.endpoint),
+          removeArgs: renderAgyMcpRemoveArgs(this.options.commandArgs),
           command: this.options.command ?? this.options.engine,
           cwd: this.input.cwd,
           env: cliChildEnvironment([
             ...(this.options.redactedEnvironmentNames ?? []),
             ...(this.input.daimonSecretEnvironmentNames ?? [])
           ], this.input.runtimeHomePath, {
-            ...(this.options.engine === "agy" && this.options.dbusSessionBusAddress !== undefined
-              ? { dbusSessionBusAddress: this.options.dbusSessionBusAddress }
-              : {}),
+            ...(this.options.dbusSessionBusAddress !== undefined ? { dbusSessionBusAddress: this.options.dbusSessionBusAddress } : {}),
             engine: this.options.engine,
             executablePath: this.options.command,
             engineHomePath: this.options.engineHomePath
           }),
-          ...(grok ? { failureClassifier: classifyGrokAuthenticationDiagnostic } : {}),
           onChild: (setupChild) => { this.setupChildren.add(setupChild); },
           onChildSettled: (setupChild) => this.setupChildren.delete(setupChild),
-          secretValues,
-          ...(grok && this.options.verifyGrokSandbox !== undefined ? { verify: this.options.verifyGrokSandbox } : {})
+          secretValues
         });
         this.mcpRegistration = registration;
       }

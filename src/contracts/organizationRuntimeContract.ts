@@ -1,3 +1,5 @@
+import { GROK_BROKER_MODELS, GROK_BROKER_REASONING_EFFORTS } from "./grokWorkerContract.js";
+
 /** The data-only organization-runtime constants shared by product code and artifacts. */
 export const ORGANIZATION_RUNTIME_VERSION = "noopolis.daimon.organization-runtime.v1" as const;
 export const ORGANIZATION_RUNTIME_V2_VERSION = "noopolis.daimon.organization-runtime.v2" as const;
@@ -74,7 +76,11 @@ export const ORGANIZATION_RUNTIME_CONFIG_SCHEMA = {
           codexSandbox: { type: "object", additionalProperties: false, required: ["mode", "networkAccess", "webSearch"], properties: {
             mode: { const: "workspace-write" }, networkAccess: { const: false }, webSearch: { const: "disabled" }
           } }
-        } },
+        }, allOf: [
+          // grok: a declared model is the closed broker pair, both or neither; never a Codex sandbox.
+          { if: { properties: { kind: { const: "grok" } } }, then: { properties: { model: { enum: GROK_BROKER_MODELS }, reasoningEffort: { enum: GROK_BROKER_REASONING_EFFORTS }, codexSandbox: false }, dependentRequired: { model: ["reasoningEffort"], reasoningEffort: ["model"] } } },
+          { if: { properties: { kind: { const: "agy" } } }, then: { properties: { model: false, reasoningEffort: false, codexSandbox: false } } }
+        ] },
         ...PRODUCTION_TOOL_PROPERTIES
       }
     } }

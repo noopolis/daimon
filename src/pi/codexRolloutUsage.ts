@@ -44,6 +44,17 @@ export type CodexRequestUsage = Readonly<{
   output: number;
   reasoning: number;
   total: number;
+  /**
+   * When the request began and ended, from the rollout's own frame
+   * `timestamp`s. `endedAt` is the usage frame's timestamp (Codex appends it at
+   * `response.completed`); `startedAt` is the first non-usage frame after the
+   * previous request's usage frame — the tool output or turn context that
+   * triggers the next request — falling back to the previous request's end.
+   * Either is absent when the frames carry no valid timestamp: a wake-end stamp
+   * substituted here would be indistinguishable from a measured one.
+   */
+  startedAt?: string;
+  endedAt?: string;
 }>;
 
 /**
@@ -177,17 +188,20 @@ export const parseCodexRolloutRequests = (text: string, threadId: string): reado
   const requests: CodexRequestUsage[] = [];
   const fallback: CodexRequestUsage[] = [];
   let previousFallback = "";
+  const clocks = { record: requestClock(), fallback: requestClock() };
   for (const line of text.split("\n")) {
     if (line.trim().length === 0) continue;
     let frame: unknown;
     try { frame = JSON.parse(line); } catch { continue; }
     if (!isRecord(frame)) continue;
     const block = usageBlock(frame, threadId);
+    const usageFrame = frame.type === "token_usage_record" || (frame.type === "event_msg" && isRecord(frame.payload) && frame.payload.type === "token_count");
+    if (!usageFrame) { if (frame.type !== "session_meta") { clocks.record.observe(frame.timestamp); clocks.fallback.observe(frame.timestamp); } continue; }
     if (block === undefined) continue;
     if (frame.type === "token_usage_record") {
       const decoded = decodeRequestUsage(block.usage, requests.length);
       if (decoded === undefined) return [];
-      requests.push(decoded);
+      requests.push({ ...decoded, ...clocks.record.close(frame.timestamp) });
       continue;
     }
     // `token_count` is NOT one frame per request: the captured fixture carries
@@ -201,12 +215,28 @@ export const parseCodexRolloutRequests = (text: string, threadId: string): reado
     previousFallback = serialized;
     const decoded = decodeRequestUsage(block.usage, fallback.length);
     if (decoded === undefined) return [];
-    fallback.push(decoded);
+    fallback.push({ ...decoded, ...clocks.fallback.close(frame.timestamp) });
   }
   // A Codex version that emits both shapes emits `token_usage_record` once per
   // request, so the richer one wins outright rather than being merged into a
   // double count. The fallback exists only for a version that has neither.
   return requests.length > 0 ? requests : fallback;
+};
+
+const timestampOf = (value: unknown): string | undefined =>
+  typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/u.test(value) && !Number.isNaN(Date.parse(value)) ? value : undefined;
+
+/** Tracks one request stream's start/end stamps; see {@link CodexRequestUsage.startedAt}. */
+const requestClock = () => {
+  let start: string | undefined, previousEnd: string | undefined;
+  return {
+    observe(value: unknown): void { start ??= timestampOf(value); },
+    close(value: unknown): { startedAt?: string; endedAt?: string } {
+      const endedAt = timestampOf(value), startedAt = start ?? previousEnd;
+      start = undefined; previousEnd = endedAt;
+      return { ...(startedAt === undefined ? {} : { startedAt }), ...(endedAt === undefined ? {} : { endedAt }) };
+    }
+  };
 };
 
 /**

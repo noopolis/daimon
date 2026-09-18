@@ -13,3 +13,11 @@ test("proxy resolves scope from opaque token without caller identity", () => {
   const capabilities = new EngineBrokerCapabilities(); const token = capabilities.issue("agent-a", "turn-a");
   assert.deepEqual(capabilities.authorizeToken(token), { agentId: "agent-a", turnId: "turn-a" });
 });
+
+test("the live proxy lookups refuse an expired capability", async () => {
+  const capabilities = new EngineBrokerCapabilities(); const token = capabilities.issue("agent-a", "turn-a", 20, 64);
+  assert.deepEqual(capabilities.inspectToken(token), { agentId: "agent-a", turnId: "turn-a" });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(capabilities.inspectToken(token), undefined);
+  assert.equal(capabilities.authorizeToken(token), undefined);
+});

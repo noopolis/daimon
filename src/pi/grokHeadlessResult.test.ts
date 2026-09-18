@@ -77,7 +77,7 @@ test("exit-zero cancelled Grok sessions reject without emitting a turn", async (
   ].join("\n"));
   try {
     const { session } = await createCliSessionFactory({
-      command: process.execPath, commandArgs: [grok], engine: "grok", timeoutMs: 10_000
+      command: process.execPath, commandArgs: [grok], engine: "grok", engineHomePath: path.join(root, ".grok"), timeoutMs: 10_000
     })({ cwd: root });
     let turns = 0;
     session.subscribe((event) => { if (event.type === "turn_end") turns += 1; });
@@ -108,7 +108,7 @@ test("successful Grok sessions emit only decoded terminal text", async () => {
   ].join("\n"));
   try {
     const { session } = await createCliSessionFactory({
-      command: process.execPath, commandArgs: [grok], engine: "grok", timeoutMs: 10_000
+      command: process.execPath, commandArgs: [grok], engine: "grok", engineHomePath: path.join(root, ".grok"), timeoutMs: 10_000
     })({ cwd: root });
     let reply = "";
     session.subscribe((event) => {

@@ -1,6 +1,10 @@
 import { constants } from "node:fs";
 import { open, rename, stat } from "node:fs/promises";
 
+import { GROK_BROKER_MODELS } from "../contracts/grokWorkerContract.js";
+import { ENGINE_BROKER_LIMIT_REASONS, type EngineBrokerLimitReason } from "./engineBrokerTurnAccounting.js";
+import type { GrokBrokerModel } from "./grokBrokerModelPolicy.js";
+
 /**
  * Append-only per-turn token accounting for one container.
  *
@@ -81,6 +85,7 @@ export const TURN_USAGE_OUTCOMES = ["completed", "failed"] as const;
 
 /**
  * - `token_ceiling` — the turn's own reported usage crossed the per-wake ceiling.
+ * - `request_ceiling` — the broker refused a model request past the turn's request limit.
  * - `wake_timeout` — the wall-clock bound fired before the child finished.
  * - `output_limit` — the retained-output bound was exceeded.
  * - `engine_exit` — the child exited non-zero (or died) after reporting usage.
@@ -89,6 +94,7 @@ export const TURN_USAGE_OUTCOMES = ["completed", "failed"] as const;
  */
 export const TURN_USAGE_FAILURE_REASONS = [
   "token_ceiling",
+  "request_ceiling",
   "wake_timeout",
   "output_limit",
   "engine_exit",
@@ -110,6 +116,17 @@ export type TurnUsageEntry = Readonly<{
   usage: TurnUsageMeasurement;
   at?: string;
   outcome?: TurnUsageOutcome;
+  /**
+   * Broker rows only. `turn` is the idempotency key readers dedupe on (the
+   * broker turn id, a sha256 hex); `limitReason` and `model` come from the
+   * closed broker vocabularies and are dropped rather than written through
+   * when they are not members.
+   */
+  turn?: string;
+  limitReason?: EngineBrokerLimitReason;
+  model?: GrokBrokerModel;
+  /** Broker rows only: how many of the turn's requests were charged an estimate because their response carried no valid usage. */
+  estimatedRequests?: number;
 }>;
 
 /**
@@ -166,8 +183,26 @@ export const renderTurnUsageLine = (entry: TurnUsageEntry): string => `${JSON.st
   calls: entry.usage.calls,
   notional_usd: entry.usage.notionalUsd,
   complete: entry.usage.complete,
-  ...outcomeFields(entry.outcome)
+  ...outcomeFields(entry.outcome),
+  ...brokerFields(entry)
 })}\n`;
+
+const brokerFields = (entry: TurnUsageEntry): Record<string, string | number> => ({
+  ...(entry.turn !== undefined && /^[a-f0-9]{64}$/u.test(entry.turn) ? { turn: entry.turn } : {}),
+  ...(entry.limitReason !== undefined && ENGINE_BROKER_LIMIT_REASONS.includes(entry.limitReason) ? { limit_reason: entry.limitReason } : {}),
+  ...(entry.model !== undefined && (GROK_BROKER_MODELS as readonly string[]).includes(entry.model) ? { model: entry.model } : {}),
+  ...(entry.estimatedRequests !== undefined && Number.isSafeInteger(entry.estimatedRequests) && entry.estimatedRequests > 0 ? { estimated_requests: entry.estimatedRequests } : {})
+});
+
+/**
+ * Collapse rows that share a `turn` key to the first one, keeping rows without
+ * a key untouched. Every reader that sums the ledger applies this, because a
+ * turn key exists precisely so a re-appended turn can never be counted twice.
+ */
+export const dedupeTurnUsageRows = <T extends Readonly<{ turn?: unknown }>>(rows: readonly T[]): T[] => {
+  const seen = new Set<string>();
+  return rows.filter((row) => { if (typeof row.turn !== "string") return true; if (seen.has(row.turn)) return false; seen.add(row.turn); return true; });
+};
 
 const rotate = async (file: string): Promise<void> => {
   let size: number;

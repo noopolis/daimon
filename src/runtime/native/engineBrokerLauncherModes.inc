@@ -2,7 +2,7 @@ static int client_mode(void) {
   struct dbl_request request;
   uint32_t prompt_length = 0, capability_length = 0;
   unsigned char *prompt = NULL, capability[DBL_MAX_CAPABILITY_BUNDLE] = {0},
-                output[DBL_MAX_OUTPUT] = {0}, extra;
+                output[DBL_MAX_OUTPUT + DBL_MAX_DIAGNOSTIC] = {0}, extra;
   struct dbl_result result;
   struct sockaddr_un a = {.sun_family = AF_UNIX};
   int s = -1, p = -1, c = -1, ok = -1;
@@ -37,7 +37,8 @@ static int client_mode(void) {
                   1) ||
       client_send(s, &request, p, c) || full_read(s, &result, sizeof(result)) ||
       !closed_result(&result, request.turn_id) ||
-      full_read(s, output, result.output_length) || read(s, &extra, 1) != 0) {
+      full_read(s, output, result.output_length + result.diagnostic_length) ||
+      read(s, &extra, 1) != 0) {
     struct dbl_result failure;
     memset(&failure, 0, sizeof(failure));
     failure.version = DBL_VERSION;
@@ -50,8 +51,11 @@ static int client_mode(void) {
       ok = 0;
     goto done;
   }
+  /* The trailer is the turn's output on success and the worker's bounded
+     diagnostic tail on failure; `closed_result` keeps the two exclusive. */
   if (full_write(STDOUT_FILENO, &result, sizeof(result)) ||
-      full_write(STDOUT_FILENO, output, result.output_length))
+      full_write(STDOUT_FILENO, output,
+                 result.output_length + result.diagnostic_length))
     goto done;
   ok = 0;
 done:

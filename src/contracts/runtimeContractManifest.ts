@@ -1,4 +1,5 @@
 import { WORK_AVAILABILITY_SCHEMA, WORK_BLOCKED_SCHEMA } from "./attentionContract.js";
+import { GROK_BROKER_MODELS, GROK_BROKER_REASONING_EFFORTS, GROK_WORKER_MAX_TURNS, GROK_WORKER_TOOL_IDS, GROK_WORKER_VISIBLE_TOOLS } from "./grokWorkerContract.js";
 import {
   ORGANIZATION_RUNTIME_CONFIG_SCHEMA,
   ORGANIZATION_RUNTIME_CONFIG_V2_SCHEMA,
@@ -34,11 +35,107 @@ export const GROK_ENGINE_BROKER = {
   providerProxy: { host: "127.0.0.1", port: 43_123 },
   mcpFacade: { host: "127.0.0.1", port: 43_124, path: "/mcp" },
   identities: { organizationUid: 2_000, brokerUid: 2_100, firstWorkerUid: 2_200 },
-  bounds: { promptBytes: 65_536, capabilityBytes: 4_096, capabilityBundleBytes: 8_196, outputBytes: 65_536 },
+  grokCliVersion: "1.0.34",
+  grokCliBuild: "3736acbc8658",
+  grokCliArtifacts: {
+    arm64: { url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.34-linux-aarch64", sha256: "39ab87666877d64ef3a40aa60fbe0c3b6a6acd7001b78fe60e2c76bb6cfc4a94", bytes: 136_090_504 },
+    x64: { url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.34-linux-x86_64", sha256: "be5905e107d2b8b5f3c142d21ecfe4c8fd32a913d2fd551b788707930c4dc80d", bytes: 163_035_648 }
+  },
+  worker: {
+    modelId: "daimon-broker-grok",
+    models: GROK_BROKER_MODELS,
+    reasoningEfforts: GROK_BROKER_REASONING_EFFORTS,
+    defaultModel: "grok-4.6",
+    defaultReasoningEffort: "low",
+    toolIds: GROK_WORKER_TOOL_IDS,
+    visibleTools: GROK_WORKER_VISIBLE_TOOLS,
+    maxTurns: GROK_WORKER_MAX_TURNS,
+    systemPromptSha256: "2c31c0085a54a4efbf9c0cf0b8124c56e47f38691b7f0c7fa233a74abaa8ddf8",
+    // sha256 of `renderGrokBrokerWorkerConfig({ model, reasoningEffort })`, the only accepted config.toml bytes.
+    configSha256: {
+      "grok-4.6": { low: "ab58499ac32678097c146479896f2b8a8e2b0e39aea22dc0a60b6227e370538e", medium: "df1a5cc84346e7f6bf6090492fbd19faaefb42953e3bb2e8c6cbc0572242403f", high: "65b0212564fb74042b1503d293fb8d3620276033264c0efade2a539ca09218e3" },
+      "grok-4.5": { low: "8247127c3625ff7c5d8d527a53596b89ec6557a821ac46cfd00bd122b90daff6", medium: "59288cee61297bb8c002097061a48f77b09d310754187a253ee089f7172a9155", high: "c63c3387ce92d94ec3f690abfe98942afcd7c9e17ff84816bbe751f340ab251f" },
+      "grok-build": { low: "fb343f2809903f26d21681470943235031f946e99085542fd89555eb7782cbb5", medium: "8a587ef75c90eab70d19b24583e60051d6fba9d90c558839fdbb15588b4cc656", high: "a23724e00d670caee185ba7690d2daa868173e53905cf446f5329666f01ab4e3" }
+    },
+    // Worker `GROK_HOME` layout the broker attests before every turn. The home and
+    // its `sessions/` directory are root-owned, worker-group writable and sticky so
+    // Grok can create its own state but never replace a root-owned file.
+    home: {
+      directory: { uid: 0, group: "worker", mode: 0o1771 },
+      sessionsDirectory: { relativePath: "sessions", uid: 0, group: "worker", mode: 0o1771 },
+      readOnlyFiles: { names: ["config.toml", "managed_config.toml", "requirements.toml", "sandbox.toml", "trusted_folders.toml"], uid: 0, gid: 0, mode: 0o444 },
+      sandboxEvents: { relativePath: "sessions/sandbox-events.jsonl", owner: "worker", group: "broker", mode: 0o640 },
+      // The launcher exports TMPDIR=<worker home>/tmp; Grok's strict profile grants TMPDIR read-write.
+      privateTmp: { relativeToWorkerHome: "tmp", owner: "worker", mode: 0o700 },
+      // Strict also grants shared /tmp and /var/tmp read-write and refuses to start if either is
+      // denied, so the deployment keeps them from every worker by mode: root-owned, a non-worker
+      // group (< 2200), others read-only (Grok needs to open the directory) and no search/write.
+      sharedTmp: { paths: ["/tmp", "/var/tmp"], uid: 0, maxGroupExclusive: 2_200, otherMode: 0o4, mode: 0o1774 },
+      // The organization runtime home of a brokered Grok agent: traverse-only for the
+      // worker group so the worker can reach `tool-output/` and nothing else (no group
+      // read, no group write, no world bits; `physicalReadiness.ts` refuses anything else).
+      organizationRuntimeHome: { owner: "organization", group: "worker", mode: 0o710 },
+      // Spilled tool output the worker reads with read_file: setgid directory in the worker's group,
+      // files written 0640 by the runtime, never other-readable.
+      spillDirectory: { relativeToRuntimeHome: "tool-output", owner: "organization", group: "worker", mode: 0o2750, fileMode: 0o640 }
+    }
+  },
+  bounds: { promptBytes: 65_536, capabilityBytes: 4_096, capabilityBundleBytes: 8_196, outputBytes: 262_144 },
+  // Accounting and limits (P2). The broker is the single sealed usage writer.
+  controlProtocolVersion: "noopolis.daimon.engine-broker.v2",
+  turnRecordVersions: ["noopolis.daimon.engine-broker-turn.v1", "noopolis.daimon.engine-broker-turn.v2"],
+  serviceConfigVersions: ["noopolis.daimon.engine-broker-service.v1", "noopolis.daimon.engine-broker-service.v2"],
+  turnLimits: {
+    keys: ["maxRequests", "maxTokens", "timeoutMs"],
+    v1Defaults: { maxRequests: 32, maxTokens: 300_000, timeoutMs: 240_000 },
+    bounds: { maxRequests: [1, GROK_WORKER_MAX_TURNS], maxTokens: [1, 10_000_000], timeoutMs: [1_000, 3_600_000] },
+    limitReasons: ["tokens", "requests", "timeout", "none"],
+    wakeMayOnlyLower: true,
+    tokenCeilingOvershoot: "at-most-one-request",
+    maxInFlightRequests: 1,
+    // A per-request usage block above this is implausible (beyond the model
+    // context window) and treated as invalid rather than added to any total.
+    requestUsageMaxTokens: 500_000,
+    // A request whose response carries no valid usage is charged this estimate.
+    missingUsageEstimate: { inputBytesPerToken: 2, outputTokens: 4_096 }
+  },
+  wakeLimitEnvironment: { timeoutMs: "DAIMON_ENGINE_WAKE_TIMEOUT_MS", maxTokens: "DAIMON_ENGINE_WAKE_TOKEN_CEILING" },
+  // Evaluator inference grants (P2c). Judges and the optimizer (organization uid
+  // only, over the control socket) borrow the broker's Grok credential through
+  // the provider proxy; they never hold it, and their spend never reaches the
+  // subject usage ledger or wake fuse.
+  inferenceGrants: {
+    requestKinds: ["request_inference_grant", "release_inference_grant"],
+    purposes: ["judge", "optimizer"],
+    tokenPrefix: "inference_",
+    ttlMs: 600_000,
+    limits: { maxRequests: 64, maxTokens: 2_000_000 },
+    maxLiveGrants: 8,
+    maxInFlightRequestsPerGrant: 1,
+    // Top-level request members Grok 1.0.34 sends for a Paideia judge/optimizer call
+    // (live stub capture); `tools` and `tool_choice` are refused outright.
+    bodyMembers: ["messages", "model", "reasoning_effort", "response_format", "stream", "stream_options"],
+    messageRoles: ["system", "user", "assistant"],
+    failureCodes: ["auth_stale", "grant_limit", "invalid_request", "unavailable"],
+    ledgerVersion: "noopolis.daimon.inference-usage.v1",
+    ledgerDedupeKey: ["grant", "request"],
+    client: {
+      modelId: "daimon-inference-grok",
+      envKey: "DAIMON_INFERENCE_GRANT",
+      // sha256 of `renderGrokInferenceClientConfig` for the production proxy base URL and this env key.
+      configSha256: {
+        "grok-4.6": { low: "79314d039f787e4ebfec7dacf57adc969086b948f564dec008f0ed6367e6062f", medium: "6f538de0547c0c4e6a3f04ae08595ceadadabb06b75f6b6ee4c428744bb95cd8", high: "5652656effa82f0c4f09cf8226b16e6140332a5a358b571194bb5563312367ac" },
+        "grok-4.5": { low: "a07f7436f1268bb399ec233c65d3b3d8fb99a11a1f175f8da1ca133c9367bc74", medium: "1f4c0d4dad1f3b09419b5739db6423a09e0049abc091594c64123a75dd53dfb9", high: "ffbc33728b821e9854fbc7c93601e599225da421ecfd6ebf10d314afcc28d6f2" },
+        "grok-build": { low: "ca15c6a562a008227d39c51d3a3a83715663089b3784e8b46debb1fb67b3c4a1", medium: "01783fb6beadcf6f8486fff0836820ad43fab5662b812a907fe9cfdb83e9804d", high: "98d16f2b7d12f4eb540d625c853e51d227933e204923e43e8b9b4176f10aca2c" }
+      }
+    }
+  },
+  projectionVersion: "noopolis.daimon.grok-broker-projection.v1",
+  slotPreflightVersion: "noopolis.daimon.grok-slot-preflight.v2",
   artifacts: {
-    sourceSha256: "bdcab1e12dcc531ed8e56f890263ca23a9ee7bac468191dd598e143df4ff8c58",
-    x64Sha256: "e3fe2738fc8a979861085b4003bf2d5d7c284874897cb6ec2e2e2383211768bd",
-    arm64Sha256: "ad44e02c38e6a3207ac4a3d5fd98b6d2e55341ce42dfd2f07204bbe54a7a653d"
+    sourceSha256: "dd39aacfece496cc6528f6acdb4f1066a848a0fb5b0961f5c70b0ba00440dc24",
+    x64Sha256: "67e3624d3198e9c59e1ffafa4eca7c895dfe265d5b8bb0614cb547b68b8b93a7",
+    arm64Sha256: "c07d22225ff968bc289e5ddf0981cdd5d64040eee6e3ea45da7d03e1439dea98"
   }
 } as const;
 export const AGY_SUBSCRIPTION_REALM = {
@@ -88,5 +185,5 @@ export const RUNTIME_CONTRACT_MANIFEST = {
   ] },
   healthResponseSchema: { type: "object", additionalProperties: false, required: ["version", "state", "agents"], properties: { version: { const: "noopolis.daimon.organization-runtime-health.v1" }, state: { enum: ["starting", "running", "stopping", "stopped"] }, agents: { type: "array", maxItems: ORGANIZATION_RUNTIME_MAX_AGENTS, items: { type: "object", additionalProperties: false, required: ["agentId", "state"], properties: { agentId: text, state: { enum: ["starting", "running", "stopping", "stopped", "idle", "failed"] } } } } } },
   activityResponseSchema: { type: "object", additionalProperties: false, required: ["version", "items"], properties: { version: { const: "noopolis.daimon.organization-runtime-activity.v1" }, items: { type: "array", maxItems: 100, items: activityItem }, nextCursor: { type: "string", minLength: 1, maxLength: 16, pattern: "^(0|[1-9][0-9]{0,15})$" } } },
-  activityV2ResponseSchema: { type: "object", additionalProperties: false, required: ["version", "items"], properties: { version: { const: ORGANIZATION_RUNTIME_ACTIVITY_V2_VERSION }, executions: { type: "array", maxItems: ORGANIZATION_RUNTIME_MAX_AGENTS, items: { type: "object", additionalProperties: false, required: ["agent_id", "execution_id", "state", "delivery_ids"], properties: { agent_id: text, execution_id: { type: "string" }, state: { const: "running" }, delivery_ids: { type: "array", maxItems: 32, items: text } } } }, items: { type: "array", maxItems: 2_112, items: { type: "object", additionalProperties: false, required: ["version", "acceptance_id", "agent_id", "delivery_id", "request_digest", "state", "accepted_at", "updated_at", "active"], properties: { version: { const: "noopolis.daimon.wake-receipt-status.v2" }, acceptance_id: { type: "string" }, agent_id: text, delivery_id: text, request_digest: { type: "string" }, state: { enum: ["accepted", "running", "completed", "failed", "stopped"] }, accepted_at: timestamp, updated_at: timestamp, active: { type: "boolean" }, execution_id: { type: "string" }, deferred: { type: "boolean" }, text: { type: "string", maxLength: 16384 }, queue_position: { type: "integer", minimum: 1 }, code: { enum: ["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] } } } } } }
+  activityV2ResponseSchema: { type: "object", additionalProperties: false, required: ["version", "items"], properties: { version: { const: ORGANIZATION_RUNTIME_ACTIVITY_V2_VERSION }, state: { enum: ["running", "stopped"] }, executions: { type: "array", maxItems: ORGANIZATION_RUNTIME_MAX_AGENTS, items: { type: "object", additionalProperties: false, required: ["agent_id", "execution_id", "state", "delivery_ids"], properties: { agent_id: text, execution_id: { type: "string" }, state: { const: "running" }, delivery_ids: { type: "array", maxItems: 32, items: text } } } }, items: { type: "array", maxItems: 2_112, items: { type: "object", additionalProperties: false, required: ["version", "acceptance_id", "agent_id", "delivery_id", "request_digest", "state", "accepted_at", "updated_at", "active"], properties: { version: { const: "noopolis.daimon.wake-receipt-status.v2" }, acceptance_id: { type: "string" }, agent_id: text, delivery_id: text, request_digest: { type: "string" }, state: { enum: ["accepted", "running", "completed", "failed", "stopped"] }, accepted_at: timestamp, updated_at: timestamp, active: { type: "boolean" }, execution_id: { type: "string" }, deferred: { type: "boolean" }, text: { type: "string", maxLength: 16384 }, queue_position: { type: "integer", minimum: 1 }, code: { enum: ["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] } } } } } }
 } as const;

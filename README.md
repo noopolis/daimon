@@ -54,6 +54,22 @@ import { PiHarnessAdapter } from "@noopolis/daimon/pi";
 
 ## Organization-runtime contract
 
+For a strict Codex agent in an already prepared runtime, the public
+`resolveOrganizationCodexSandboxProjection(config, agentId, { acceptanceStorePath })`
+API returns `noopolis.daimon.codex-sandbox-projection.v1`: canonical workspace/home
+paths, the resolved executable, and `sandboxArgs` containing the exact permission
+profile rendered for production. Append only `--` and a mechanical command when
+checking whether that policy can execute in the caller's container.
+
+The resolver opens and verifies caller-owned path identities and executes the
+Codex version probe. It does not import/read authentication, create an agent,
+accept a wake or invoke a model. The acceptance-store path must be the same one
+given to the control host. This API projects command permissions, not the complete
+cognition invocation: Codex's `sandbox` subcommand lacks the strict configuration
+flags accepted by `exec`. A caller must therefore use a fresh empty `HOME` and
+`CODEX_HOME` and a restricted environment for its mechanical probe. Do not infer
+successful tool use or completed agent work from this projection alone.
+
 `@noopolis/daimon/runtime` exports a standard JSON Schema for structural
 validation plus the strict, side-effect-free semantic
 `validateOrganizationRuntimeConfig` / `parseOrganizationRuntimeConfig` API and

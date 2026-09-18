@@ -47,6 +47,19 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
   let fusePoll: ReturnType<typeof setInterval> | undefined;
   let started = false;
   let stopping = false;
+  let sealedActivity: OrganizationRuntimeActivityV2 | undefined;
+
+  /**
+   * One projection, read the same way live and at shutdown. `active` is decided by
+   * the dispatcher's own execution authority rather than the record's flag alone,
+   * so a stopped host — whose dispatcher has already awaited every in-flight turn
+   * — reports exactly the executions that were still admitted when it stopped.
+   */
+  const projectActivity = async (current: WakeAcceptanceStore, state: "running" | "stopped"): Promise<OrganizationRuntimeActivityV2> => {
+    const executions = dispatcher?.activeExecutions() ?? [];
+    const items = (await current.activity()).map((item) => ({ ...item, active: item.active && executions.some((execution) => execution.agent_id === item.agent_id && execution.delivery_ids.includes(item.delivery_id)) }));
+    return { version: ACTIVITY_V2_VERSION, state, items, executions };
+  };
 
   const hardReason = (): BlockReason | undefined => {
     if (!started || stopping) return stopping ? "host_stopping" : "host_stopped";
@@ -132,10 +145,15 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
       return await store.status(acceptanceId);
     },
     async activityV2(token) {
-      if (!tokensEqual(expectedToken, token) || store === undefined) return undefined;
-      const executions = dispatcher?.activeExecutions() ?? [];
-      const items = (await store.activity()).map((item) => ({ ...item, active: item.active && executions.some((execution) => execution.agent_id === item.agent_id && execution.delivery_ids.includes(item.delivery_id)) }));
-      return { version: ACTIVITY_V2_VERSION, items, executions };
+      if (!tokensEqual(expectedToken, token)) return undefined;
+      // A stopped host is not an unanswerable one. Its sealed projection is a
+      // *stronger* statement about quiescence than a live poll, because nothing
+      // can be admitted after it, and a caller proving that an execution closed
+      // has no other authority to read. A host that never started, or one whose
+      // seal could not be taken, still answers nothing: absence stays absence
+      // rather than becoming a fabricated idle runtime.
+      if (store === undefined) return sealedActivity;
+      return await projectActivity(store, "running");
     },
     async availability(token) {
       if (!tokensEqual(expectedToken, token) || !store || !fuse) return undefined;
@@ -161,6 +179,11 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
       await Promise.allSettled(persistence);
       const result = await host.stop();
       await dispatcher?.stop();
+      // The last moment the store can be read, and the only one at which the
+      // dispatcher has finished every admitted turn. Seal the projection here so
+      // the closure query keeps an accurate answer once the store is closed; a
+      // fault leaves it absent instead of inventing one.
+      if (store) { try { sealedActivity = await projectActivity(store, "stopped"); } catch { /* an unreadable final state stays absent */ } }
       await store?.close(); await fuse?.close();
       store = undefined; fuse = undefined; schedules = undefined; started = false;
       return result;

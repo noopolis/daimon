@@ -471,16 +471,16 @@ test("disposing from a Server.prototype.listen interleaving never leaves an MCP 
   }
 });
 
-test("disposing during Grok registration terminates setup before the engine starts", async (context) => {
+test("disposing during AGY MCP registration terminates setup before the engine starts", async (context) => {
   if (!requirePosixProcessGroups(context)) return;
-  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-grok-cancel-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-cli-agy-cancel-"));
   const ready = path.join(root, "add-ready");
   const marker = path.join(root, "engine-started");
   const grok = path.join(root, "grok.mjs");
   await writeFile(grok, `import { writeFileSync } from "node:fs"; const args = process.argv.slice(2); if (args.includes("add")) { writeFileSync(${JSON.stringify(ready)}, "ready"); process.on("SIGTERM", () => undefined); setInterval(() => undefined, 1000); } else if (args.includes("remove")) process.exit(0); else writeFileSync(${JSON.stringify(marker)}, "started");`);
   try {
     const { session } = await createCliSessionFactory({
-      command: process.execPath, commandArgs: [grok], engine: "grok", maxToolTurns: 1, timeoutMs: 10_000
+      command: process.execPath, commandArgs: [grok], engine: "agy", maxToolTurns: 1, timeoutMs: 10_000
     })({ cwd: root });
     const pending = session.prompt("cancel");
     void pending.catch(() => undefined);

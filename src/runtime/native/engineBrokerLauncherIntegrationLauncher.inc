@@ -83,6 +83,198 @@ static void output_boundary_case(const char *provider, int overflow) {
   close(p);
   close(c);
 }
+/* A worker that exits nonzero publishes no output, but its own last words —
+   stderr and stdout share one pipe — must survive as the bounded diagnostic
+   tail, because the host otherwise sees nothing but `exit=1`. */
+static void worker_failure_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("stderr-failure", "mcp.Failure-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
+            r.status == DBL_STATUS_WORKER_FAILED && r.stage == DBL_STAGE_WAIT &&
+            r.failure_class == DBL_FAILURE_EXEC && r.exit_code == 1 &&
+            r.term_signal == 0 && r.worker_pid > 0 && r.worker_uid == 2200 &&
+            r.start_ticks > 0 && r.output_length == 0 &&
+            r.diagnostic_length > 0 &&
+            r.diagnostic_length <= DBL_MAX_DIAGNOSTIC,
+        "worker failure diagnostic length");
+  char *reason = calloc(1, r.diagnostic_length + 1);
+  check(read_all(s, reason, r.diagnostic_length) &&
+            strstr(reason, "grok: session store unwritable"),
+        "worker failure reason");
+  char extra;
+  check(read(s, &extra, 1) == 0, "worker failure EOF");
+  free(reason);
+  close(s);
+  close(p);
+  close(c);
+}
+/* A worker that dies after printing far more than the window: the error is at
+   the START of what it printed and the echo at the end, which is the shape a
+   pure tail got wrong. The distinctive head run STRADDLES the head's own cut —
+   its first bytes are inside the retained head and its later bytes are elided —
+   so a tail-only window loses it entirely and this case fails. */
+static void worker_flood_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("stderr-flood", "mcp.Flood-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  size_t printed = strlen("HEAD-OF-ERROR grok: profile refused ") + 4096u +
+                   strlen(" TAIL-OF-ECHO");
+  unsigned long long elided = 0;
+  char *reason, *marker, *shown;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && r.status == DBL_STATUS_WORKER_FAILED &&
+            r.exit_code == 1 && r.output_length == 0 &&
+            r.diagnostic_length > 0 &&
+            r.diagnostic_length <= DBL_MAX_DIAGNOSTIC,
+        "worker flood diagnostic length");
+  reason = calloc(1, r.diagnostic_length + 1);
+  check(read_all(s, reason, r.diagnostic_length), "worker flood diagnostic");
+  check(!strncmp(reason, "HEAD-OF-ERROR grok: profile refused",
+                 strlen("HEAD-OF-ERROR grok: profile refused")),
+        "worker flood head");
+  shown = strstr(reason, " TAIL-OF-ECHO");
+  check(shown && shown[strlen(" TAIL-OF-ECHO")] == 0, "worker flood tail");
+  marker = strstr(reason, "[\xe2\x80\xa6 ");
+  check(marker && sscanf(marker, "[\xe2\x80\xa6 %llu bytes elided", &elided) == 1,
+        "worker flood marker");
+  /* The count is exactly what was dropped: everything printed, less the two
+     ends that survived (the whole window less the marker itself). */
+  size_t marker_length = (size_t)(strchr(marker, ']') - marker) + 1u;
+  check((size_t)elided + (size_t)r.diagnostic_length - marker_length == printed,
+        "worker flood elided count");
+  char extra;
+  check(read(s, &extra, 1) == 0, "worker flood EOF");
+  free(reason);
+  close(s);
+  close(p);
+  close(c);
+}
+/* A worker's single write larger than the pipe buffer must complete, not kill
+   it. The launcher created its stdout/stderr pipe O_NONBLOCK as a whole, and
+   O_NONBLOCK is a property of the open file description, so the worker
+   inherited a non-blocking stdout: Grok 1.0.34 turns the first EAGAIN from a
+   headless stdout write into `stdout write failed: Resource temporarily
+   unavailable` and exits 1 before it ever reaches the model. Once its init
+   frame outgrew a pipe buffer that was every turn, at $0 apiece.
+   The fixture shrinks its own stdout pipe to the kernel minimum, reports the
+   capacity it actually got, and writes four times that in ONE write, so the
+   case straddles the buffer on any host instead of assuming 64 KiB — and
+   stays under DBL_MAX_OUTPUT, so it is the write that is bounded here, never
+   the turn's output. */
+static void worker_spill_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("spill-output", "mcp.Spill-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  unsigned capacity = 0, count = 0;
+  size_t head, filler = 0;
+  char *out, *line, extra;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
+            r.status == DBL_STATUS_OK && r.stage == DBL_STAGE_OUTPUT &&
+            r.failure_class == DBL_FAILURE_NONE && r.exit_code == 0 &&
+            r.term_signal == 0 && r.diagnostic_length == 0 &&
+            r.worker_pid > 0 && r.worker_uid == 2200 &&
+            r.output_length > 0 && r.output_length <= DBL_MAX_OUTPUT,
+        "worker spill survived its own oversized write");
+  out = calloc(1, (size_t)r.output_length + 1u);
+  check(out && read_all(s, out, r.output_length), "worker spill output");
+  line = strchr(out, '\n');
+  check(line && sscanf(out, "SPILL cap=%u count=%u", &capacity, &count) == 2 &&
+            capacity > 0 && count == r.output_length &&
+            count >= capacity * 4u,
+        "worker spill straddles the pipe buffer");
+  head = (size_t)(line - out) + 1u;
+  while (head + filler + 10u < (size_t)r.output_length &&
+         out[head + filler] == 's')
+    filler++;
+  check(head + filler + 10u == (size_t)r.output_length &&
+            !memcmp(out + r.output_length - 10, "SPILL-TAIL", 10),
+        "worker spill bytes arrived intact");
+  check(read(s, &extra, 1) == 0, "worker spill EOF");
+  free(out);
+  close(s);
+  close(p);
+  close(c);
+}
+/* An ordinary working turn must not be able to hit the bound, and its output
+   must arrive whole. The fixture writes the shape one live turn measured — a
+   9,728-byte init frame and nine 23,320-byte tool-result frames, 219,608
+   bytes in all — in frame-sized writes. That is more than three times the
+   64 KiB this bound used to be, so at the old value this same turn was
+   published as `output_limit` with its whole text discarded; it is the case
+   that straddles the raise, and restoring 65536 turns it red. */
+static void worker_turn_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("turn-output", "mcp.Turn-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  const uint32_t expected = 9728u + 23320u * 9u;
+  char *out, extra;
+  size_t index;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
+            r.status == DBL_STATUS_OK && r.stage == DBL_STAGE_OUTPUT &&
+            r.failure_class == DBL_FAILURE_NONE && r.exit_code == 0 &&
+            r.term_signal == 0 && r.diagnostic_length == 0 &&
+            expected > 65536u &&
+            r.output_length == expected,
+        "ordinary turn published whole");
+  out = calloc(1, (size_t)expected + 1u);
+  check(out && read_all(s, out, expected), "ordinary turn output");
+  check(!memcmp(out, "TURN-HEAD", 9) &&
+            !memcmp(out + expected - 9, "TURN-TAIL", 9),
+        "ordinary turn ends intact");
+  for (index = 9; index < (size_t)expected - 9u; index++)
+    if (out[index] != 'u')
+      break;
+  check(index == (size_t)expected - 9u, "ordinary turn bytes intact");
+  check(read(s, &extra, 1) == 0, "ordinary turn EOF");
+  free(out);
+  close(s);
+  close(p);
+  close(c);
+}
+/* The bound is the WHOLE TURN's stdout, and a worker can cross it while it is
+   still working and still writing. `output_boundary_case` writes one byte past
+   the bound and then exits on its own account, so it proves the arithmetic and
+   not the termination: the worker was already gone when the trip fired. This
+   one straddles that boundary from the other side. The fixture writes eight
+   times the bound in ordinary frame-sized writes and then sleeps far longer
+   than this suite, so it fills its own pipe repeatedly and is asleep inside
+   `write()` when the trip happens, and NOTHING but the launcher can end it.
+   A launcher that stopped reading without killing — or killed without
+   answering — parks the worker and this client forever, which is why the
+   socket carries a deadline: a park has to fail red here, not hang the runner.
+   The deadline also bounds the answer: it must arrive while the fixture is
+   still sleeping, so a pass cannot be the fixture exiting by itself. */
+static void worker_stream_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("stream-output", "mcp.Stream-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  struct timeval deadline = {.tv_sec = 30, .tv_usec = 0};
+  char extra;
+  check(!setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline)),
+        "worker stream deadline");
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r),
+        "worker stream answered before the deadline");
+  check(r.status == DBL_STATUS_OUTPUT_FAILED && r.stage == DBL_STAGE_OUTPUT &&
+            r.failure_class == DBL_FAILURE_OUTPUT_LIMIT &&
+            r.output_length == 0 && r.diagnostic_length == 0 &&
+            r.worker_pid > 0 && r.worker_uid == 2200 && r.start_ticks > 0 &&
+            r.term_signal == SIGKILL,
+        "worker stream stopped at the bound");
+  check(read(s, &extra, 1) == 0, "worker stream EOF");
+  close(s);
+  close(p);
+  close(c);
+}
 static void org_cases(void) {
   check(!setgid(DBL_BROKER_UID) && !setuid(DBL_BROKER_UID), "drop broker uid");
   client_case();
@@ -90,6 +282,11 @@ static void org_cases(void) {
   client_input_reject(5, 1);
   output_boundary_case("exact-output", 0);
   output_boundary_case("overflow-output", 1);
+  worker_failure_case();
+  worker_flood_case();
+  worker_spill_case();
+  worker_turn_case();
+  worker_stream_case();
   int s = connect_socket(), p = sealed("prompt"),
       c = sealed_bundle("provider.Token-1", "mcp.Token-2");
   struct dbl_request q = request();
@@ -110,8 +307,22 @@ static void org_cases(void) {
   char *out = calloc(1, r.output_length + 1);
   check(read(s, out, r.output_length) == (ssize_t)r.output_length &&
             strstr(out, "uid=2200") && strstr(out, "--always-approve") &&
+            strstr(out, " prompt=prompt fds=0,1,2,3,4 stdin=/dev/null tmpdir=/tmp/worker-home/tmp\n") &&
             !strstr(out, "EVIL"),
         "fixed worker boundary");
+  check(strstr(out, "=--verbatim\n") && strstr(out, "=--no-plan\n") &&
+            strstr(out, "=--no-subagents\n") && strstr(out, "=--no-memory\n") &&
+            strstr(out, "=--disable-web-search\n") &&
+            strstr(out, "=--tools\n") && strstr(out, "=" DBL_GROK_TOOLS "\n") &&
+            strstr(out, "=--max-turns\n") &&
+            strstr(out, "=" DBL_GROK_MAX_TURNS "\n") &&
+            strstr(out, "=--system-prompt-override\n") &&
+            strstr(out, "=" DBL_GROK_SYSTEM_PROMPT "\n") &&
+            strstr(out, "=--prompt-file\n") &&
+            strstr(out, "=/proc/self/fd/3\n") &&
+            !strstr(out, "--reasoning-effort") &&
+            strstr(out, " argc=23 "),
+        "lean worker argv");
   free(out);
   close(s);
   q = request();

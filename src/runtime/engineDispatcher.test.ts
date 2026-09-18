@@ -243,9 +243,10 @@ test("production Grok dispatcher routes every wake through the broker without ag
     process.env.PATH = `${root}${path.delimiter}${priorPath ?? ""}`;
     process.env.NOOPOLIS_RUN_ID = "dispatcher-grok-realm-test";
     const broker: EngineBrokerTurnClient = {
-      async turn(agentId,wakeId,prompt,endpoint,signal) { turns += 1;assert.equal(agentId,config.id);assert.match(wakeId,/^(first|second)$/u);assert.match(prompt,/work/u);assert.match(endpoint,/^http:\/\/127\.0\.0\.1:\d+\/mcp$/u);assert.equal(signal?.aborted,false);return "brokered"; }
+      async turn(agentId,wakeId,prompt,endpoint,signal,options) { turns += 1;assert.equal(agentId,config.id);assert.match(wakeId,/^(first|second)$/u);assert.match(prompt,/work/u);assert.match(endpoint,/^http:\/\/127\.0\.0\.1:\d+\/mcp$/u);assert.equal(signal?.aborted,false);
+        assert.deepEqual(options,{limits:{maxTokens:123_456}});return "brokered"; } // the engine-neutral wake bound reaches the broker as a lowering limit
     };
-    const handle = await startOrganizationRuntimeEngine(config, "DAIMON_UNUSED_CONTROL", undefined, undefined, broker);
+    const priorCeiling = process.env.DAIMON_ENGINE_WAKE_TOKEN_CEILING; process.env.DAIMON_ENGINE_WAKE_TOKEN_CEILING = "123456"; const handle = await startOrganizationRuntimeEngine(config, "DAIMON_UNUSED_CONTROL", undefined, undefined, broker).finally(() => { if (priorCeiling === undefined) delete process.env.DAIMON_ENGINE_WAKE_TOKEN_CEILING; else process.env.DAIMON_ENGINE_WAKE_TOKEN_CEILING = priorCeiling; });
     assert.equal((await handle.wake({ id: "first", kind: "manual", text: "work" })).text, "brokered");
     assert.equal((await handle.wake({ id: "second", kind: "manual", text: "work" })).text, "brokered");
     assert.equal(turns, 2);
@@ -289,7 +290,7 @@ test("Daimon frames one escaped identity envelope for every production engine", 
       const envelope = JSON.stringify({ id: config.id, name: identity.name, instructions: identity.instructions });
       assert.equal(result.text.split(envelope).length - 1, 1);
       assert.match(result.text, /<daimon-agent-identity>/);
-      assert.match(result.text, /Colleagues only hear you when you call moltnet_send/u);
+      assert.ok(result.text.includes(`Colleagues only hear you when you call ${kind === "grok" ? "daimon__moltnet_send" : "moltnet_send"};`), `${kind} must name the send tool the way it can call it`);
       assert.match(result.text, /Do not seek transport credentials or invoke a transport CLI/u);
       assert.match(result.text, /payload/);
       await handle.stop();

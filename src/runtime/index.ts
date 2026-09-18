@@ -3,6 +3,25 @@ export * from "./contractManifest.js";
 export * from "./agySubscriptionRealm.js";
 export { createOrganizationRuntimeHost } from "./organizationRuntimeHost.js";
 export { createOrganizationRuntimeControlHost } from "./organizationRuntimeControl.js";
+export { CODEX_SANDBOX_PROJECTION_VERSION, resolveOrganizationCodexSandboxProjection,
+  type OrganizationCodexSandboxProjection } from "./codexSandboxProjection.js";
+export { GROK_BROKER_PROJECTION_VERSION, grokBrokerProjectionSha256, grokBrokerServiceRegistrationFor, resolveOrganizationGrokBrokerProjection,
+  verifyGrokBrokerRegistrationMatchesProjection, type OrganizationGrokBrokerProjection, type OrganizationGrokBrokerProjectionOptions } from "./grokBrokerProjection.js";
+export { GROK_SLOT_PREFLIGHT_VERSION, grokSlotPreflightCanarySchema, grokSlotPreflightReceiptSchema, parseGrokSlotPreflightReceipt, type GrokSlotPreflightFreshness,
+  verifyGrokSlotPreflightReceipt, type GrokSlotPreflightReceipt } from "./grokSlotPreflightReceipt.js";
+export { grokBrokerWorkerConfigSha256, renderGrokBrokerWorkerConfig } from "./grokBrokerWorkerConfig.js";
+export { GROK_INFERENCE_CLIENT_MODEL_ID, GROK_INFERENCE_GRANT_ENV, grokInferenceClientConfigSha256, renderGrokInferenceClientConfig, renderProductionGrokInferenceClientConfig, type GrokInferenceClientConfigInput } from "./grokInferenceClientConfig.js";
+export { GROK_INFERENCE_PROXY_BASE_URL, ENGINE_BROKER_INFERENCE_FAILURE_CODES, type EngineBrokerInferenceFailureCode } from "./engineBrokerInferenceProtocol.js";
+export { dedupeInferenceUsageRows, INFERENCE_USAGE_LEDGER_VERSION, GROK_INFERENCE_PURPOSES, type GrokInferencePurpose } from "./inferenceUsageLedger.js";
+export { GROK_INFERENCE_AUTH_STALE_BODY } from "./grokInferenceProxy.js";
+export { assertGrokWorkerDenyPathPlacement, assertGrokWorkerDenyPathShape, assertGrokWorkerDenyPathsPlaceable, GROK_WORKER_BASE_PROFILE_GRANTS, grokWorkerCanSearch, grokWorkerDenyPathChain, GrokWorkerDenyPlacementError, readGrokWorkerDenyPathChain } from "./grokWorkerDenyPlacement.js";
+export type { GrokWorkerDenyPathEntry, GrokWorkerDenyPathStep, GrokWorkerDenyPathWorker } from "./grokWorkerDenyPlacement.js";
+export { grokWorkerSandboxProfileSha256, renderGrokWorkerSandboxProfile } from "./grokWorkerSandboxProfile.js";
+export { engineBrokerRequestLedgerPathFor, engineBrokerSealLedgerPathFor, parseEngineBrokerServiceConfig, type EngineBrokerServiceConfig, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
+export { TURN_SEAL_LEDGER, TURN_SEAL_LEDGER_VERSION } from "./engineBrokerSealLedger.js";
+export { DEFAULT_GROK_BROKER_TURN_LIMITS, ENGINE_BROKER_LIMIT_REASONS, type EngineBrokerLimitReason, type EngineBrokerTurnAccounting,
+  type EngineBrokerTurnLimits, type EngineBrokerTurnUsage } from "./engineBrokerTurnAccounting.js";
+export { dedupeTurnUsageRows } from "./turnUsageLedger.js";
 export { WakeTransitionLockBlockedError } from "./wakeAcceptanceStore.js";
 export {
   OFFLINE_RECONCILIATION_BLOCKED_CODE,
@@ -38,3 +57,4 @@ export {
   type WakeReceiptState
 } from "./wakeAcceptanceTypes.js";
 export type { OrganizationRuntimeControlHost, OrganizationRuntimeControlOptions } from "./organizationRuntimeControl.js";
+export { EngineBrokerControlClient, EngineBrokerInferenceGrantRefused, type EngineBrokerInferenceGrant } from "./engineBrokerControlClient.js";

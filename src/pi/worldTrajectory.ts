@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { PiTurnTraceModel } from "./turnTrace.js";
 import { redactTraceText, sanitizeTraceFileId } from "./turnTrace.js";
 import type { PiWorldTurnContext } from "./worldNudge.js";
+import { ensureRuntimeHomeDirectory } from "../runtime/runtimeHomeLayout.js";
 
 export const WORLD_TRAJECTORY_SCHEMA = "daimon.world_trajectory.v1" as const;
 
@@ -188,8 +189,7 @@ export const persistPiWorldTrajectory = async (
     }
   };
   const telemetryPath = path.join(input.runtimeHomePath, "telemetry");
-  const trajectoriesPath = path.join(telemetryPath, "world-trajectories");
-  await mkdir(trajectoriesPath, { recursive: true });
+  const trajectoriesPath = await ensureRuntimeHomeDirectory(input.runtimeHomePath, "telemetry/world-trajectories");
   const bytes = `${JSON.stringify(record, null, 2)}\n`;
   await writeFile(
     path.join(trajectoriesPath, `${sanitizeTraceFileId(input.turnId)}.json`),
