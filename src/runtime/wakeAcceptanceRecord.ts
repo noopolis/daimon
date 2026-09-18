@@ -40,8 +40,12 @@ export function parseStoredWakeAcceptance(value: unknown): StoredWakeAcceptanceR
   if (executionError === "" || record.execution_error !== undefined && Buffer.byteLength(string(record.execution_error)) > MAX_EXECUTION_ERROR_BYTES) throw new Error("wake acceptance execution error is invalid");
   const completionText = record.text === undefined ? undefined : sanitizeWakeCompletionText(string(record.text));
   if (claimGeneration !== undefined && !uuid(claimGeneration)) throw new Error("wake acceptance record is invalid");
-  if (code !== undefined && !(["engine_failed", "host_stopped", "host_stopping", "queue_full", "unknown_agent"] as const).includes(code)) throw new Error("wake acceptance record is invalid");
-  if ((state === "accepted" || state === "running" || state === "completed") && code !== undefined) throw new Error("wake acceptance record is invalid");
+  if (code !== undefined && !(["engine_failed", "host_stopped", "host_stopping", "queued_wake_stopped", "active_wake_aborted", "queue_full", "unknown_agent"] as const).includes(code)) throw new Error("wake acceptance record is invalid");
+  // `accepted` is the one non-terminal state a record can be arrived at FROM an ended
+  // execution: the dispatcher returns an undisposed delivery there for restart, and the
+  // outcome that returned it is the only account of why. `running` and `completed` still
+  // refuse a code, where one would be nonsense rather than evidence.
+  if ((state === "running" || state === "completed") && code !== undefined) throw new Error("wake acceptance record is invalid");
   if ((state === "failed" || state === "stopped") && code === undefined) throw new Error("wake acceptance record is invalid");
   if ((state !== "completed" && state !== "failed" && completionText !== undefined) || completionText !== record.text) throw new Error("wake acceptance record is invalid");
   if (string(record.request_digest) !== wakeAcceptanceDigest(parsed) || !uuid(string(record.acceptance_id))) throw new Error("wake acceptance record is invalid");

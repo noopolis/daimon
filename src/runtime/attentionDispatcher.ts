@@ -122,7 +122,16 @@ export class AttentionDispatcher {
       const executionError = result.status === "rejected" ? `wake rejected: ${result.code}`
         : result.status === "failed" ? `engine_failed: ${result.detail ?? "engine execution failed"}` : null;
       for (const item of claimed.filter((value) => !value.done)) {
-        if (this.stopping || result.status === "stopped") await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
+        // Returned to the inbox for restart, and now recording WHY. This was the one
+        // caller that never passed a code, so an evaluator reading the receipt could
+        // not tell a shutdown from a wake the host refused, and a live trial cost
+        // several investigations to the same undifferentiated record. The wake's own
+        // stopped code is exact; a dispatcher merely halted has no code to give, and
+        // it stays absent rather than borrowing a plausible one.
+        if (this.stopping || result.status === "stopped") {
+          await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted",
+            result.status === "stopped" ? result.code : undefined);
+        }
         else if (agent.attention !== undefined) {
           // Successful reading is not completion. A failed execution also keeps
           // unfinished deliveries, and its execution id for idempotent retry.

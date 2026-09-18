@@ -746,3 +746,23 @@ stay absence), and a claim about the store-backed routes beside it —
 neither settles a closure proof. `state` is optional on the wire for the reason
 every additive member here is: a projection published before the seal existed
 must still parse, and its absence means "not stated", never "running".
+
+A delivery returned to the inbox for restart now records the outcome that returned
+it. `attentionDispatcher` reclaims an undisposed delivery to `accepted` on two
+conditions — the dispatcher halting, and a wake that came back `stopped` — and it
+was the one `transitionClaimed` caller that passed no code, so the receipt an
+evaluator reads was identical for both; a live trial closed its execution, spent
+real money, and reported an `accepted` delivery with no marker and no reason.
+`WakeReceiptCode` therefore carries `queued_wake_stopped` and `active_wake_aborted`
+beside the existing five, because those are the two shapes a shutdown really gives a
+wake (`organizationRuntimeHost.ts` settles a queued job with the first and the
+in-flight one with the second) and neither had an honest name. The wake's own code
+is recorded exactly; a dispatcher merely halted has no wake outcome to name and the
+record stays **silent**, because a plausible name for an undetermined cause gets
+acted on and a missing one does not. Two consequences, both load bearing: `accepted`
+is now the one non-terminal state a record may carry a code in, since it is the only
+one reached *from* an ended execution (`running` and `completed` still refuse one),
+and `transitionClaimed` no longer carries a code across a transition — it describes
+the transition that produced the current state, and a reclaimed delivery is claimed
+again later. Widening the enum rotates the contract manifest digest, so Spawnfile
+must re-vendor `contract-manifest.json`/`.sha256` and its pinned constant.

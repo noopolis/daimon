@@ -87,3 +87,88 @@ test("an unstarted host seals nothing and a repeated stop does not erase the sea
 });
 
 async function privateRoot(): Promise<string> { const root = await mkdtemp(path.join(os.tmpdir(), "daimon-closure-")); await chmod(root, 0o700); return root; }
+
+/**
+ * A delivery returned to the inbox for restart must say which outcome returned it.
+ *
+ * `attentionDispatcher` reclaims an undisposed delivery to `accepted` on two
+ * conditions — the dispatcher halting, and a wake that came back `stopped` — and it
+ * recorded neither, so the receipt an evaluator reads was identical for both. A
+ * live trial closed its execution, spent real money and reported an `accepted`
+ * delivery with no marker and no reason, and four investigations went into telling
+ * those two apart from the outside. The wake's own code is exact and is now kept;
+ * a halt has no code of its own and stays absent, because a plausible name for an
+ * undetermined cause gets acted on and a missing one does not.
+ */
+test("a delivery reclaimed for restart records the stopped wake's own code", async () => {
+  const root = await privateRoot();
+  const attention = { version: ORGANIZATION_RUNTIME_VERSION, host: config.host,
+    agents: [{ ...config.agents[0]!, attention: { maxBatchMessages: 4, maxBatchBytes: 4096, maxExecutions: 8, maxTokens: 100_000 } }] };
+  let stopWake = false;
+  const stopping = {
+    ...core,
+    async wake(request: OrganizationRuntimeWakeRequest) {
+      if (!stopWake) return { version: "noopolis.daimon.wake-result.v1", status: "completed", agentId: request.agentId, wakeId: request.event.id, text: "private", durationMs: 1 } as const;
+      // Exactly what organizationRuntimeHost settles an in-flight wake with at shutdown.
+      return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "active_wake_aborted" } as const;
+    }
+  } as unknown as OrganizationRuntimeHost;
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(attention, stopping, { acceptanceStorePath: root, controlToken: token, storeOptions });
+  try {
+    await control.start();
+    stopWake = true;
+    const accepted = await control.accept(delivery("restart-delivery"));
+    assert.equal(accepted.state, "accepted");
+    await waitFor(async () => (await control.activityV2(token))?.items.some((item) => item.state === "accepted" && item.code !== undefined) === true);
+    const item = (await control.activityV2(token))?.items.find((row) => row.delivery_id === "restart-delivery");
+    // Returned for restart, undisposed, and no longer silent about which outcome did it.
+    assert.equal(item?.state, "accepted");
+    // Exactly the live shape: the running transition left deferred FALSE and the
+    // reclaim does not clear it, which is what distinguishes it from a real deferral.
+    assert.equal(item?.deferred, false);
+    assert.equal(item?.code, "active_wake_aborted");
+  } finally { await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); }
+});
+
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  do { if (await predicate()) return; await new Promise((resolve) => setTimeout(resolve, 10)); } while (Date.now() < deadline);
+  throw new Error("timed out waiting for the reclaimed delivery");
+}
+
+/**
+ * The other half, and the one that keeps the field trustworthy. A dispatcher halted
+ * mid-turn reclaims the same way, and has no wake outcome to name: the record must
+ * stay silent rather than borrow `host_stopping`, which reads as an account of the
+ * cause and would be acted on as one. Absence is the honest answer here.
+ */
+test("a reclaim with no wake outcome of its own records no code at all", async () => {
+  const root = await privateRoot();
+  const attention = { version: ORGANIZATION_RUNTIME_VERSION, host: config.host,
+    agents: [{ ...config.agents[0]!, attention: { maxBatchMessages: 4, maxBatchBytes: 4096, maxExecutions: 8, maxTokens: 100_000 } }] };
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let arrived!: () => void;
+  const waking = new Promise<void>((resolve) => { arrived = resolve; });
+  const blocking = { ...core,
+    async wake(request: OrganizationRuntimeWakeRequest) {
+      arrived();
+      await held;
+      return { version: "noopolis.daimon.wake-result.v1", status: "completed", agentId: request.agentId, wakeId: request.event.id, text: "private", durationMs: 1 } as const;
+    }
+  } as unknown as OrganizationRuntimeHost;
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(attention, blocking, { acceptanceStorePath: root, controlToken: token, storeOptions });
+  try {
+    await control.start();
+    await control.accept(delivery("halted-delivery"));
+    await waking;
+    const stopping = control.stop();
+    release();
+    await stopping;
+    const item = (await control.activityV2(token))?.items.find((row) => row.delivery_id === "halted-delivery");
+    // Reclaimed exactly as above — and saying nothing it cannot know.
+    assert.equal(item?.state, "accepted");
+    assert.equal(item?.deferred, false);
+    assert.equal(item?.code, undefined);
+  } finally { await control.stop().catch(() => undefined); await rm(root, { recursive: true, force: true }); }
+});
