@@ -120,3 +120,41 @@ test("a cancelled turn that called no tool is distinguishable from one the facad
   try { await assert.rejects(readFile(engineBrokerSealLedgerPathFor(path.join(root, "usage.jsonl")), "utf8")); }
   finally { await rm(root, { recursive: true, force: true }); }
 });
+
+/**
+ * The channel the seal row could not see, on the same durable route.
+ *
+ * Seven live runs sealed with every provider request closed and every tool call
+ * answered, and still went idle to the deadline. The facade relays one more
+ * thing for the whole session — the standalone GET SSE tunnel — and recorded
+ * nothing about it, so a worker parked reading that stream and a worker doing
+ * nothing wrote identical rows. These three seal the boundary that separates
+ * them: still open at seal time, closed before it, and never opened at all.
+ *
+ * Mutation: drop the `tunnels` member from `renderBrokerTurnSealLine` and the
+ * first three go red; render it unconditionally as zeros when the observation
+ * carries none, and the fourth does — a zero nobody measured reads exactly
+ * like a zero somebody did.
+ */
+test("a cancelled turn's GET tunnel is sealed open with its age, closed, or never opened — three distinct rows", async () => {
+  const mcp = (tunnels: Record<string, unknown>): EngineBrokerMcpCallObservation =>
+    ({ started: 1, answered: 1, undecoded: 0, outstanding: [], ...tunnels } as EngineBrokerMcpCallObservation);
+
+  const parked = await cancelledTurn(() => mcp({ tunnels: { opened: 1, closed: 0, delivered: 0, open: [{ openMs: 428_004, delivered: false }] } }));
+  assert.deepEqual((parked.seal?.mcp as Record<string, unknown>).tunnels, {
+    opened: 1, closed: 0, delivered: 0, open: [{ open_ms: 428_004, delivered: false }]
+  }, "a turn sealed with a tunnel still open must say so, and say how long it had been open");
+
+  const ended = await cancelledTurn(() => mcp({ tunnels: { opened: 1, closed: 1, delivered: 2, open: [] } }));
+  assert.deepEqual((ended.seal?.mcp as Record<string, unknown>).tunnels, { opened: 1, closed: 1, delivered: 2, open: [] },
+    "a tunnel that closed before the seal is not an open one");
+
+  const never = await cancelledTurn(() => mcp({ tunnels: { opened: 0, closed: 0, delivered: 0, open: [] } }));
+  assert.deepEqual((never.seal?.mcp as Record<string, unknown>).tunnels, { opened: 0, closed: 0, delivered: 0, open: [] },
+    "a turn whose facade never relayed a GET measured zero, which is not the same as not having looked");
+
+  // And the fourth state, which is the absence: a turn sealed before this
+  // channel was observed at all carries no `tunnels` member.
+  const unobserved = await cancelledTurn(() => ({ started: 1, answered: 1, undecoded: 0, outstanding: [] }));
+  assert.equal(Object.hasOwn(unobserved.seal?.mcp as Record<string, unknown>, "tunnels"), false);
+});

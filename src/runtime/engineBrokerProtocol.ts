@@ -1,5 +1,5 @@
 import { isEngineBrokerInferenceRequestKind, isEngineBrokerInferenceResponseKind, parseEngineBrokerInferenceRequest, parseEngineBrokerInferenceResponse, type EngineBrokerInferenceRequest, type EngineBrokerInferenceResponse } from "./engineBrokerInferenceProtocol.js";
-import { ENGINE_BROKER_MCP_CALL_NAME, ENGINE_BROKER_MCP_OUTSTANDING_MAX, type EngineBrokerMcpCallObservation } from "./engineBrokerMcpCallLog.js";
+import { ENGINE_BROKER_MCP_CALL_NAME, ENGINE_BROKER_MCP_OUTSTANDING_MAX, ENGINE_BROKER_MCP_TUNNEL_MAX, type EngineBrokerMcpCallObservation, type EngineBrokerMcpTunnelObservation } from "./engineBrokerMcpCallLog.js";
 import { parseEngineBrokerTurnAccounting, parseEngineBrokerTurnLimitOverrides, type EngineBrokerTurnAccounting, type EngineBrokerTurnLimitOverrides } from "./engineBrokerTurnAccounting.js";
 
 /**
@@ -143,7 +143,10 @@ function parseTerminal(input: JsonRecord, expected: typeof VERSION | typeof V1):
  */
 function parseMcpCallObservation(value: unknown): EngineBrokerMcpCallObservation {
   const input = record(value);
-  exact(input, ["started", "answered", "undecoded", "outstanding"]);
+  // `tunnels` is optional for one reason only: a turn sealed before the GET
+  // tunnel was observed carries no such member, and its record must still
+  // replay. Absence there means "the instrument did not exist", never zero.
+  exact(input, ["started", "answered", "undecoded", "outstanding", ...(input.tunnels === undefined ? [] : ["tunnels"])]);
   const started = input.started, answered = input.answered, undecoded = input.undecoded;
   if (![started, answered, undecoded].every((count) => Number.isSafeInteger(count) && (count as number) >= 0)) throw new TypeError("invalid broker frame");
   if (!Array.isArray(input.outstanding) || input.outstanding.length > ENGINE_BROKER_MCP_OUTSTANDING_MAX) throw new TypeError("invalid broker frame");
@@ -155,7 +158,31 @@ function parseMcpCallObservation(value: unknown): EngineBrokerMcpCallObservation
     return { name: call.name, outstandingMs: call.outstandingMs as number };
   });
   if ((answered as number) > (started as number) || outstanding.length > (started as number) - (answered as number)) throw new TypeError("invalid broker frame");
-  return { started: started as number, answered: answered as number, undecoded: undecoded as number, outstanding };
+  const tunnels = input.tunnels === undefined ? undefined : parseMcpTunnelObservation(input.tunnels);
+  return { started: started as number, answered: answered as number, undecoded: undecoded as number, outstanding, ...(tunnels === undefined ? {} : { tunnels }) };
+}
+
+/**
+ * The GET SSE tunnels, under the call observation's rules: counts and elapsed
+ * milliseconds, bounded, and internally consistent. A tunnel cannot close
+ * before it opened, cannot deliver without having opened, and no more can be
+ * reported open than `opened - closed` — a report claiming otherwise is a
+ * frame, not a measurement.
+ */
+function parseMcpTunnelObservation(value: unknown): EngineBrokerMcpTunnelObservation {
+  const input = record(value);
+  exact(input, ["opened", "closed", "delivered", "open"]);
+  const opened = input.opened, closed = input.closed, delivered = input.delivered;
+  if (![opened, closed, delivered].every((count) => Number.isSafeInteger(count) && (count as number) >= 0)) throw new TypeError("invalid broker frame");
+  if ((closed as number) > (opened as number) || (delivered as number) > (opened as number)) throw new TypeError("invalid broker frame");
+  if (!Array.isArray(input.open) || input.open.length > ENGINE_BROKER_MCP_TUNNEL_MAX || input.open.length > (opened as number) - (closed as number)) throw new TypeError("invalid broker frame");
+  const open = input.open.map((entry) => {
+    const tunnel = record(entry);
+    exact(tunnel, ["openMs", "delivered"]);
+    if (!Number.isSafeInteger(tunnel.openMs) || (tunnel.openMs as number) < 0 || typeof tunnel.delivered !== "boolean") throw new TypeError("invalid broker frame");
+    return { openMs: tunnel.openMs as number, delivered: tunnel.delivered };
+  });
+  return { opened: opened as number, closed: closed as number, delivered: delivered as number, open };
 }
 
 function closedDiagnostic(value:JsonRecord):boolean{

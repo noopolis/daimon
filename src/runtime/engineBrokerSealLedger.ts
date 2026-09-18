@@ -1,4 +1,4 @@
-import { ENGINE_BROKER_MCP_CALL_NAME, ENGINE_BROKER_MCP_OUTSTANDING_MAX } from "./engineBrokerMcpCallLog.js";
+import { ENGINE_BROKER_MCP_CALL_NAME, ENGINE_BROKER_MCP_OUTSTANDING_MAX, ENGINE_BROKER_MCP_TUNNEL_MAX } from "./engineBrokerMcpCallLog.js";
 import type { EngineBrokerTerminalResponse } from "./engineBrokerProtocol.js";
 import { TURN_USAGE_LEDGER, TURN_USAGE_MAX_IDENTIFIER_CHARS } from "./turnUsageLedger.js";
 
@@ -27,7 +27,8 @@ import { TURN_USAGE_LEDGER, TURN_USAGE_MAX_IDENTIFIER_CHARS } from "./turnUsageL
  *   the accounting, the diagnostic's closed `status`/`stage`/`failure_class`
  *   and its already-redacted, already-bounded, control-character-free `reason`
  *   (`engineBrokerNativeClient.ts` produced it; nothing here re-derives it),
- *   plus tool-call names and elapsed milliseconds. Never a prompt, a body, a
+ *   plus tool-call names, GET-tunnel counts and elapsed milliseconds. Never a
+ *   prompt, a body, a
  *   reply, a bearer, a capability or a session id — none of which the terminal
  *   response carries in the first place.
  * - **Absence stays absence.** `mcp` is written only when the facade actually
@@ -102,7 +103,21 @@ export const renderBrokerTurnSealLine = (terminal: EngineBrokerTerminalResponse,
         undecoded: terminal.mcpCalls.undecoded,
         outstanding: terminal.mcpCalls.outstanding
           .slice(0, ENGINE_BROKER_MCP_OUTSTANDING_MAX)
-          .map((call) => ({ name: ENGINE_BROKER_MCP_CALL_NAME.test(call.name) ? call.name : "<invalid>", outstanding_ms: call.outstandingMs }))
+          .map((call) => ({ name: ENGINE_BROKER_MCP_CALL_NAME.test(call.name) ? call.name : "<invalid>", outstanding_ms: call.outstandingMs })),
+        // The session's standalone GET tunnel, absent for a turn sealed before
+        // the facade observed that channel at all.
+        ...(terminal.mcpCalls.tunnels === undefined
+          ? {}
+          : {
+            tunnels: {
+              opened: terminal.mcpCalls.tunnels.opened,
+              closed: terminal.mcpCalls.tunnels.closed,
+              delivered: terminal.mcpCalls.tunnels.delivered,
+              open: terminal.mcpCalls.tunnels.open
+                .slice(0, ENGINE_BROKER_MCP_TUNNEL_MAX)
+                .map((tunnel) => ({ open_ms: tunnel.openMs, delivered: tunnel.delivered }))
+            }
+          })
       }
     }
     : {})

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
-import { EngineBrokerMcpCallLog, type EngineBrokerMcpCallObservation } from "./engineBrokerMcpCallLog.js";
+import { EngineBrokerMcpCallLog, type EngineBrokerMcpCallObservation, type EngineBrokerMcpTunnelHandle } from "./engineBrokerMcpCallLog.js";
 
 /**
  * The brokered worker's only route to its own per-wake Daimon MCP mount. The
@@ -90,6 +90,11 @@ export async function startEngineBrokerMcpFacade() {
     catch (error) { calls.undecodable(scope.turnId); throw error; }
     const payload = body === undefined ? undefined : (body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer);
     const call = calls.begin(scope.turnId, body);
+    // The GET SSE tunnel is the session's other channel and the one that
+    // outlives every request: it stays open until the worker or the mount ends
+    // it, so a turn sealed with one still open is a turn whose worker may be
+    // parked on it. Observed only — never closed, timed out or refused here.
+    const tunnel = method === "GET" ? calls.openTunnel(scope.turnId) : undefined;
 
     const controller = new AbortController();
     const open = inflight.get(scope.turnId) ?? new Set<AbortController>();
@@ -101,9 +106,10 @@ export async function startEngineBrokerMcpFacade() {
       // Answered only on a relay that reached its own end: a tunnel torn down
       // by the worker's death must not mark the call it was blocked on as
       // finished.
-      if (await forward(target, method, headersFor(method, request), payload, controller.signal, response)) call.answer();
+      if (await forward(target, method, headersFor(method, request), payload, controller.signal, response, tunnel)) call.answer();
     } finally {
       call.close();
+      tunnel?.close();
       response.off("close", abort);
       open.delete(controller);
       if (open.size === 0) inflight.delete(scope.turnId);
@@ -136,7 +142,8 @@ export async function startEngineBrokerMcpFacade() {
       calls.close(turnId);
     },
     /**
-     * What the facade saw of this turn's tool calls, or `undefined` for a turn
+     * What the facade saw of this turn's tool calls and GET tunnels, or
+     * `undefined` for a turn
      * it never registered. Read on the failure path, before `revoke`.
      */
     observe: (turnId: string): EngineBrokerMcpCallObservation | undefined => calls.observe(turnId),
@@ -179,7 +186,8 @@ async function forward(
   headers: Record<string, string>,
   body: ArrayBuffer | undefined,
   signal: AbortSignal,
-  response: ServerResponse
+  response: ServerResponse,
+  tunnel?: EngineBrokerMcpTunnelHandle
 ): Promise<boolean> {
   const upstream = await fetch(target, { method, headers, body, signal, redirect: "manual" });
   // MCP never redirects, and following one would let the mount aim the facade
@@ -196,8 +204,12 @@ async function forward(
   response.writeHead(upstream.status, outbound);
   if (upstream.body === null) { response.end(); return true; }
   const stream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
+  let delivered = false;
   try {
     for await (const chunk of stream) {
+      // The first byte the mount pushes: a tunnel that carried frames is a
+      // different fact from one held open having delivered nothing.
+      if (!delivered) { delivered = true; tunnel?.deliver(); }
       if (response.destroyed || response.writableEnded) throw new Error("MCP tunnel closed");
       if (!response.write(chunk as Uint8Array)) await awaitMcpTunnelDrain(response, signal);
     }

@@ -12,6 +12,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 
 import { createPiToolMcpServer } from "../mcp/toolServer.js";
+import type { EngineBrokerMcpTunnelObservation } from "./engineBrokerMcpCallLog.js";
 import { awaitMcpTunnelDrain, ENGINE_BROKER_MCP_FACADE_PORT, startEngineBrokerMcpFacade } from "./engineBrokerMcpFacade.js";
 
 const FACADE_URL = `http://127.0.0.1:${ENGINE_BROKER_MCP_FACADE_PORT}/mcp`;
@@ -260,6 +261,60 @@ test("the facade carries the mount's server-initiated SSE stream, which only the
     } finally {
       await client.close();
     }
+  } finally {
+    await rig.close();
+  }
+});
+
+/**
+ * The channel the call log could not see.
+ *
+ * A brokered turn's tool calls all answer and its provider requests all close,
+ * and the worker can still sit idle to the deadline — parked on the standalone
+ * GET SSE tunnel, which stays open for the whole session and, until now, wrote
+ * nothing anywhere. This drives the real transport: the tunnel the real client
+ * opens must observe as open with an age while it is open, as *delivered* once
+ * the mount pushes a frame through it, and as closed once the client ends it.
+ *
+ * Mutation: remove `calls.openTunnel` from the facade's route and the first
+ * assertion goes red (an open tunnel reads as a turn that opened none); remove
+ * `tunnel?.close()` from the relay's `finally` and the last one does (a closed
+ * tunnel reads as still open, which is the reading the whole instrument is
+ * meant to make trustworthy).
+ */
+test("the facade observes the standalone GET tunnel: open with its age, whether it delivered, and closed when it ends", async () => {
+  const rig = await startRig();
+  const tunnels = (): EngineBrokerMcpTunnelObservation | undefined => rig.facade.observe(rig.turnId)?.tunnels;
+  const until = async (reason: string, ready: () => boolean): Promise<void> => {
+    for (let attempt = 0; attempt < 200 && !ready(); attempt += 1) await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    assert.ok(ready(), reason);
+  };
+  try {
+    // Before any request the turn is registered and has relayed nothing: a
+    // measured zero, which is not the same statement as an open tunnel.
+    assert.deepEqual(tunnels(), { opened: 0, closed: 0, delivered: 0, open: [] });
+    const { client } = await connectClient(rig.capability);
+    const notified = new Promise<void>((resolve) => client.setNotificationHandler(ToolListChangedNotificationSchema, () => resolve()));
+    try {
+      await until("the client never opened its GET tunnel", () => (tunnels()?.open.length ?? 0) > 0);
+      const open = tunnels();
+      assert.equal(open?.opened, 1); assert.equal(open?.closed, 0);
+      assert.ok((open?.open[0]?.openMs ?? -1) >= 0, "an open tunnel reports how long it has been open");
+      assert.equal(open?.open[0]?.delivered, false, "a tunnel the mount has not pushed through is held open in silence");
+      assert.equal(open?.delivered, 0);
+
+      // The same tunnel, now actually carrying a server frame. "Held open
+      // having delivered nothing" and "in use" are different facts about it.
+      rig.server.sendToolListChanged();
+      await withDeadline(notified, 4_000, "no server notification reached the client");
+      await until("the delivered frame was never attributed to the tunnel", () => (tunnels()?.delivered ?? 0) === 1);
+      assert.equal(tunnels()?.open[0]?.delivered, true);
+      assert.equal(tunnels()?.closed, 0, "a tunnel that delivered is still open");
+    } finally {
+      await client.close();
+    }
+    await until("the closed GET tunnel still reads as open", () => (tunnels()?.closed ?? 0) === 1);
+    assert.deepEqual(tunnels(), { opened: 1, closed: 1, delivered: 1, open: [] });
   } finally {
     await rig.close();
   }

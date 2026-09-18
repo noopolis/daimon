@@ -30,6 +30,24 @@
  *   the one parse is wrapped, and the facade treats a missing handle as a
  *   no-op.
  *
+ * The same map carries the facade's *other* channel, and for the same reason.
+ * A `tools/call` is a POST that answers; the standalone `GET` SSE tunnel the
+ * Streamable HTTP transport opens once per session is the route a server
+ * notification or progress frame takes, and it stays open for the whole
+ * session by design. A worker parked reading that tunnel is, in every artifact
+ * the broker writes, indistinguishable from a worker doing nothing at all:
+ * every provider request closed, every tool call answered, and the turn idle
+ * until its deadline. {@link EngineBrokerMcpCallLog.openTunnel} records the
+ * lifecycle — how many the facade relayed, how many ended, and for the ones
+ * still open at seal time how long each has been open and whether the mount
+ * ever pushed a single byte through it. A tunnel held open having delivered
+ * nothing is a different fact from one actively carrying frames, and it is the
+ * difference that decides whether the tunnel is the blocker.
+ *
+ * Observing is all it does. The facade's behaviour is unchanged: nothing here
+ * closes, times out or refuses a tunnel, because an instrument that tore down
+ * the stream would destroy the evidence it exists to gather.
+ *
  * "Answered" means the facade wrote a complete response back to the worker —
  * the relay reached its own `end()`. A relay that was torn down (the worker
  * died, the tunnel broke, the turn aborted) did *not* answer, so its calls stay
@@ -44,27 +62,45 @@ export const ENGINE_BROKER_MCP_CALL_TRUNCATED = "<truncated>";
 export const ENGINE_BROKER_MCP_CALL_NAME = /^(?:<invalid>|<truncated>|[A-Za-z0-9_.-]{1,64})$/u;
 const TOOL_NAME = /^[A-Za-z0-9_.-]{1,64}$/u;
 
+/** Open GET tunnels reported: a session opens one, so more than a handful is already the anomaly. */
+export const ENGINE_BROKER_MCP_TUNNEL_MAX = 8;
+
 export type EngineBrokerOutstandingMcpCall = Readonly<{ name: string; outstandingMs: number }>;
+/** One GET SSE tunnel still open at observation: how long it has been open, and whether the mount ever pushed through it. */
+export type EngineBrokerOpenMcpTunnel = Readonly<{ openMs: number; delivered: boolean }>;
+/**
+ * What the facade saw of one turn's standalone GET SSE tunnels: how many it
+ * relayed, how many ended, how many ever carried a byte from the mount, and
+ * the ones still open with the age of each.
+ */
+export type EngineBrokerMcpTunnelObservation = Readonly<{ opened: number; closed: number; delivered: number; open: readonly EngineBrokerOpenMcpTunnel[] }>;
 /**
  * What the facade saw of one turn's tool calls: how many started, how many the
  * facade answered, how many POST bodies it could not read, and the ones still
  * unanswered with the time each has been outstanding.
  */
-export type EngineBrokerMcpCallObservation = Readonly<{ started: number; answered: number; undecoded: number; outstanding: readonly EngineBrokerOutstandingMcpCall[] }>;
+export type EngineBrokerMcpCallObservation = Readonly<{ started: number; answered: number; undecoded: number; outstanding: readonly EngineBrokerOutstandingMcpCall[]; tunnels?: EngineBrokerMcpTunnelObservation }>;
 
 /** One relayed POST's calls. `answer` marks a complete relay; `close` ends it unanswered. Both are idempotent. */
 export interface EngineBrokerMcpCallHandle { answer(): void; close(): void }
 const INERT: EngineBrokerMcpCallHandle = { answer: () => undefined, close: () => undefined };
+/** One relayed GET tunnel. `deliver` marks the first byte the mount pushed; `close` ends it. Both are idempotent. */
+export interface EngineBrokerMcpTunnelHandle { deliver(): void; close(): void }
+const INERT_TUNNEL: EngineBrokerMcpTunnelHandle = { deliver: () => undefined, close: () => undefined };
 
 type CallRecord = { readonly name: string; readonly startedAt: number; endedAt?: number };
-type TurnLog = { started: number; answered: number; undecoded: number; readonly live: Set<CallRecord>; readonly ended: CallRecord[] };
+type TunnelRecord = { readonly openedAt: number; delivered: boolean };
+type TurnLog = {
+  started: number; answered: number; undecoded: number; readonly live: Set<CallRecord>; readonly ended: CallRecord[];
+  tunnelsOpened: number; tunnelsClosed: number; tunnelsDelivered: number; readonly openTunnels: Set<TunnelRecord>;
+};
 
 export class EngineBrokerMcpCallLog {
   private readonly turns = new Map<string, TurnLog>();
   constructor(private readonly now: () => number = Date.now) {}
 
   /** A turn the facade registered. Re-opening an id resets it: a turn id is unique per turn. */
-  open(turnId: string): void { this.turns.set(turnId, { started: 0, answered: 0, undecoded: 0, live: new Set(), ended: [] }); }
+  open(turnId: string): void { this.turns.set(turnId, { started: 0, answered: 0, undecoded: 0, live: new Set(), ended: [], tunnelsOpened: 0, tunnelsClosed: 0, tunnelsDelivered: 0, openTunnels: new Set() }); }
   close(turnId: string): void { this.turns.delete(turnId); }
 
   /** A POST body the facade is about to relay. Anything that is not a `tools/call` records nothing. */
@@ -98,6 +134,24 @@ export class EngineBrokerMcpCallLog {
     };
   }
 
+  /**
+   * A GET SSE tunnel the facade is about to relay. Counted when it opens, not
+   * when it succeeds: a tunnel the mount refused still ends, so `opened` and
+   * `closed` stay a pair and an open one is exactly `opened - closed`.
+   */
+  openTunnel(turnId: string): EngineBrokerMcpTunnelHandle {
+    const log = this.turns.get(turnId);
+    if (log === undefined) return INERT_TUNNEL;
+    const record: TunnelRecord = { openedAt: this.now(), delivered: false };
+    log.tunnelsOpened += 1;
+    log.openTunnels.add(record);
+    let ended = false;
+    return {
+      deliver: (): void => { if (record.delivered) return; record.delivered = true; log.tunnelsDelivered += 1; },
+      close: (): void => { if (ended) return; ended = true; log.tunnelsClosed += 1; log.openTunnels.delete(record); }
+    };
+  }
+
   /** A POST whose body the facade refused to read (over its own bound), which is a call it cannot name. */
   undecodable(turnId: string): void { const log = this.turns.get(turnId); if (log !== undefined) log.undecoded += 1; }
 
@@ -107,8 +161,13 @@ export class EngineBrokerMcpCallLog {
     const at = this.now();
     const pending = [...log.live, ...log.ended].sort((left, right) => left.startedAt - right.startedAt);
     const outstanding = pending.map((record): EngineBrokerOutstandingMcpCall => ({ name: record.name, outstandingMs: Math.max(0, (record.endedAt ?? at) - record.startedAt) }));
+    const open = [...log.openTunnels]
+      .sort((left, right) => left.openedAt - right.openedAt)
+      .slice(0, ENGINE_BROKER_MCP_TUNNEL_MAX)
+      .map((record): EngineBrokerOpenMcpTunnel => ({ openMs: Math.max(0, at - record.openedAt), delivered: record.delivered }));
     return {
       started: log.started, answered: log.answered, undecoded: log.undecoded,
+      tunnels: { opened: log.tunnelsOpened, closed: log.tunnelsClosed, delivered: log.tunnelsDelivered, open },
       outstanding: outstanding.length > ENGINE_BROKER_MCP_OUTSTANDING_MAX
         ? [...outstanding.slice(0, ENGINE_BROKER_MCP_OUTSTANDING_MAX - 1), { name: ENGINE_BROKER_MCP_CALL_TRUNCATED, outstandingMs: 0 }]
         : outstanding

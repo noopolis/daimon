@@ -101,4 +101,27 @@ test("a failed frame carries the broker's in-flight MCP tool-call observation, b
   ]) assert.throws(() => parseEngineBrokerResponse({ ...value, mcpCalls }), /invalid broker frame/u, JSON.stringify(mcpCalls));
   // A v1 record predates the instrument; a v1 frame that carries it is forged.
   assert.throws(() => parseEngineBrokerV1TerminalResponse({ version: "noopolis.daimon.engine-broker.v1", kind: "failed", requestId: "request-1", turnId: "turn-1", code: "engine_failed", mcpCalls: value.mcpCalls }), /invalid broker frame/u);
+
+  /**
+   * The session's standalone GET SSE tunnel rides the same member, under the
+   * same rules. It is optional for exactly one reason — a turn sealed before
+   * the facade observed that channel replays without it — so its absence means
+   * "not measured" and never zero, and a record that carries it must still be
+   * a measurement: nothing closes before it opens, nothing delivers without
+   * opening, and no more can be open than `opened - closed`.
+   */
+  const tunnels = { opened: 2, closed: 1, delivered: 1, open: [{ openMs: 428_004, delivered: false }] } as const;
+  const observed = { ...value, mcpCalls: { ...value.mcpCalls, tunnels } } as const;
+  assert.deepEqual(parseEngineBrokerResponse(observed), observed);
+  assert.deepEqual(parseEngineBrokerResponse(value), value, "a frame sealed before the tunnel was observed still replays, without the member");
+  for (const forged of [
+    { ...tunnels, closed: 3 },
+    { ...tunnels, delivered: 3 },
+    { ...tunnels, opened: 1, closed: 1, open: [{ openMs: 1, delivered: false }] },
+    { ...tunnels, open: Array.from({ length: 9 }, () => ({ openMs: 1, delivered: false })), opened: 12, closed: 0 },
+    { ...tunnels, open: [{ openMs: -1, delivered: false }] },
+    { ...tunnels, open: [{ openMs: 1, delivered: "yes" }] },
+    { ...tunnels, open: [{ openMs: 1, delivered: false, sessionId: "mcp-session-0" }] },
+    { opened: 1, closed: 0, open: [] }
+  ]) assert.throws(() => parseEngineBrokerResponse({ ...value, mcpCalls: { ...value.mcpCalls, tunnels: forged } }), /invalid broker frame/u, JSON.stringify(forged));
 });
