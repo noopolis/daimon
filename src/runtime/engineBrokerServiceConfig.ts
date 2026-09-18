@@ -12,7 +12,7 @@ export const ENGINE_BROKER_SERVICE_V2 = "noopolis.daimon.engine-broker-service.v
 /** One root-provisioned broker slot. Every field is fixed at provisioning time; a wake can only lower `limits`. */
 export type EngineBrokerServiceRegistration = Readonly<{
   agentId: string; slot: number; workerUid: number; workspace: string; profilePath: string; eventsPath: string; profileSha256: string;
-  /** Per-slot usage ledger the broker appends turn rows to; per-request rows go to `requests.jsonl` beside it. */
+  /** Per-slot usage ledger the broker appends turn rows to; per-request rows go to `requests.jsonl` and per-turn seals to `turns.jsonl` beside it. */
   usageLedgerPath: string;
   limits: EngineBrokerTurnLimits;
   model: GrokBrokerModelPolicy;
@@ -42,6 +42,13 @@ const absolute = (item: unknown): item is string => typeof item === "string" && 
 export const engineBrokerRequestLedgerPathFor = (usageLedgerPath: string): string => path.posix.join(path.posix.dirname(usageLedgerPath), "requests.jsonl");
 
 /**
+ * The per-turn seal stream written beside the other two
+ * (`engineBrokerSealLedger.ts`): the operator-visible half of a sealed terminal
+ * response, for the turn whose response never reaches a client.
+ */
+export const engineBrokerSealLedgerPathFor = (usageLedgerPath: string): string => path.posix.join(path.posix.dirname(usageLedgerPath), "turns.jsonl");
+
+/**
  * Strict `service.json` parser.
  *
  * v2 requires every registration to declare its usage ledger, limits and model
@@ -67,7 +74,7 @@ export function parseEngineBrokerServiceConfig(value: unknown): EngineBrokerServ
     const base = { agentId, slot: slot as number, workerUid: workerUid as number, workspace, profilePath, eventsPath, profileSha256 };
     if (!v2) return { ...base, usageLedgerPath: TURN_USAGE_LEDGER.filePath, limits: DEFAULT_GROK_BROKER_TURN_LIMITS, model: DEFAULT_GROK_BROKER_MODEL_POLICY };
     const usageLedgerPath = entry.usageLedgerPath;
-    if (!ledgerPath(usageLedgerPath) || usageLedgerPath === engineBrokerRequestLedgerPathFor(usageLedgerPath)) throw invalid();
+    if (!ledgerPath(usageLedgerPath) || usageLedgerPath === engineBrokerRequestLedgerPathFor(usageLedgerPath) || usageLedgerPath === engineBrokerSealLedgerPathFor(usageLedgerPath)) throw invalid();
     let limits: EngineBrokerTurnLimits;
     try { limits = parseEngineBrokerTurnLimits(entry.limits); } catch { throw invalid(); }
     return { ...base, usageLedgerPath, limits, model: parseServiceModel(entry.model) };
@@ -76,7 +83,7 @@ export function parseEngineBrokerServiceConfig(value: unknown): EngineBrokerServ
   if (!Object.hasOwn(value, "inferenceLedgerPath")) return base;
   const inferenceLedgerPath = value.inferenceLedgerPath;
   if (!ledgerPath(inferenceLedgerPath)) throw invalid();
-  const subject = new Set<string>([TURN_USAGE_LEDGER.filePath, TURN_REQUEST_LEDGER.filePath, ...registrations.flatMap((entry) => [entry.usageLedgerPath, engineBrokerRequestLedgerPathFor(entry.usageLedgerPath)])]);
+  const subject = new Set<string>([TURN_USAGE_LEDGER.filePath, TURN_REQUEST_LEDGER.filePath, ...registrations.flatMap((entry) => [entry.usageLedgerPath, engineBrokerRequestLedgerPathFor(entry.usageLedgerPath), engineBrokerSealLedgerPathFor(entry.usageLedgerPath)])]);
   if (subject.has(inferenceLedgerPath)) throw invalid();
   return { ...base, inferenceLedgerPath };
 }

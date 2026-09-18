@@ -17,7 +17,8 @@ export { GROK_INFERENCE_AUTH_STALE_BODY } from "./grokInferenceProxy.js";
 export { assertGrokWorkerDenyPathPlacement, assertGrokWorkerDenyPathShape, assertGrokWorkerDenyPathsPlaceable, GROK_WORKER_BASE_PROFILE_GRANTS, grokWorkerCanSearch, grokWorkerDenyPathChain, GrokWorkerDenyPlacementError, readGrokWorkerDenyPathChain } from "./grokWorkerDenyPlacement.js";
 export type { GrokWorkerDenyPathEntry, GrokWorkerDenyPathStep, GrokWorkerDenyPathWorker } from "./grokWorkerDenyPlacement.js";
 export { grokWorkerSandboxProfileSha256, renderGrokWorkerSandboxProfile } from "./grokWorkerSandboxProfile.js";
-export { engineBrokerRequestLedgerPathFor, parseEngineBrokerServiceConfig, type EngineBrokerServiceConfig, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
+export { engineBrokerRequestLedgerPathFor, engineBrokerSealLedgerPathFor, parseEngineBrokerServiceConfig, type EngineBrokerServiceConfig, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
+export { TURN_SEAL_LEDGER, TURN_SEAL_LEDGER_VERSION } from "./engineBrokerSealLedger.js";
 export { DEFAULT_GROK_BROKER_TURN_LIMITS, ENGINE_BROKER_LIMIT_REASONS, type EngineBrokerLimitReason, type EngineBrokerTurnAccounting,
   type EngineBrokerTurnLimits, type EngineBrokerTurnUsage } from "./engineBrokerTurnAccounting.js";
 export { dedupeTurnUsageRows } from "./turnUsageLedger.js";

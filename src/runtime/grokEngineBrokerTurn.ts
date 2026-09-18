@@ -7,7 +7,7 @@ import type { EngineBrokerMcpCallObservation } from "./engineBrokerMcpCallLog.js
 import { lowerEngineBrokerTurnLimits, mapGrokReportedModel, type EngineBrokerTurnAccounting, type EngineBrokerTurnLimitOverrides, type EngineBrokerTurnUsage } from "./engineBrokerTurnAccounting.js";
 import { NativeBrokerTurnFailure, type NativeBrokerDiagnostic, type NativeBrokerTurn, type NativeBrokerTurnResult } from "./engineBrokerNativeClient.js";
 import type { EngineBrokerTurnRegistry } from "./engineBrokerTurnRegistry.js";
-import { engineBrokerRequestLedgerPathFor, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
+import { engineBrokerRequestLedgerPathFor, engineBrokerSealLedgerPathFor, type EngineBrokerServiceRegistration } from "./engineBrokerServiceConfig.js";
 import { ensureBrokerTurnLedgered } from "./grokEngineBrokerLedger.js";
 import { finishBrokerTurnWithUsage, type BrokerTurnMetering, type BrokerTurnMeteringDetail } from "./grokEngineBrokerMetering.js";
 import type { GrokBrokerProxyTurn } from "./grokBrokerProxy.js";
@@ -53,7 +53,7 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
   const turnId = createHash("sha256").update(`${agentId}\0${wakeId}`).digest("hex");
   const request = { version: ENGINE_BROKER_VERSION, kind: "start_turn", requestId: randomUUID(), turnId, agentId, wakeId, prompt, mcpEndpoint, ...(overrides === undefined ? {} : { limits: overrides }) } as const;
   const begun = await deps.turns.begin(request, declared);
-  const metering: BrokerTurnMetering = { usageLedgerPath: registration.usageLedgerPath, requestLedgerPath: engineBrokerRequestLedgerPathFor(registration.usageLedgerPath), agentId, wakeId };
+  const metering: BrokerTurnMetering = { usageLedgerPath: registration.usageLedgerPath, requestLedgerPath: engineBrokerRequestLedgerPathFor(registration.usageLedgerPath), sealLedgerPath: engineBrokerSealLedgerPathFor(registration.usageLedgerPath), agentId, wakeId };
   if (begun !== "start") { await ensureBrokerTurnLedgered(begun.ledger, turnId, metering); return replay(begun.replay); }
   const controller = new AbortController();
   const meter = new GrokBrokerTurnMeter(limits, () => controller.abort());

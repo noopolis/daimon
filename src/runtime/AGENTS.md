@@ -314,6 +314,40 @@ answer, so the call it was blocked on stays outstanding with the elapsed time
 it had reached — otherwise the turn's death would erase the evidence the
 instrument exists to keep.
 
+That seam is enough for a turn that *fails with a reply* and not for the turn
+the instrument was built for. A worker that crashes still produces a terminal
+response; a worker that HANGS is cancelled by its client's deadline, and a
+cancelled turn has no client left to answer, so the sealed response — with
+`mcpCalls` and the worker's redacted last words riding on it — is sealed into a
+turn record in the broker's own `0700` turn store and dies with the slot's
+tmpfs. Six live runs reproduced that exactly. What *does* survive a slot is the
+broker's ledger directory, which Paideia already recovers `usage.jsonl` and
+`requests.jsonl` from on the failure path, so `engineBrokerSealLedger.ts` writes
+a third stream beside them: one `noopolis.daimon.turn-seal.v1` row per sealed
+terminal turn (`turns.jsonl`, `engineBrokerSealLedgerPathFor`), rendered from
+the sealed response and nothing else. Its members are the accounting, the
+failure `code`, the diagnostic's closed `status`/`stage`/`failure_class` with
+the reason `engineBrokerNativeClient.ts` already redacted and bounded, and the
+facade's `mcp` observation — names, counts and elapsed milliseconds. Never a
+prompt, body, reply, bearer, capability or session id; the terminal response
+carries none of those in the first place, and the projection is an allow-list
+rather than a spread, so a future additive member of the response cannot become
+a ledger field by accident.
+
+Two invariants make it worth having. The row is rendered for *every* terminal
+turn including one whose `usage` is `null` — a turn cancelled before any spend
+could be attributed writes no usage row at all, and is precisely the turn whose
+outstanding call has no other route out. And absence stays absence three ways:
+no `mcp` member when the facade never observed the turn, `started: 0` when it
+observed a turn that called nothing, and no row when nothing sealed. Reading
+any of those three as another is the failure this stream exists to prevent. The
+line is sealed into the turn record's ledger bytes with the other two and
+appended last, so a replay completes an interrupted append the same way and
+readers dedupe on `turn`; `seal` is optional in `parseBrokerTurnLedgerLines`, so
+a record written before the stream existed still replays. It is advisory
+throughout: `recordLedgerLines` swallows every I/O fault, and nothing here can
+refuse, delay or fail a turn.
+
 Worker `GROK_HOME` layout the deployment must provision (attested before every
 turn by `grokWorkerHomeAttestation.ts`, recorded in `GROK_ENGINE_BROKER.worker.home`):
 `$GROK_HOME` and `$GROK_HOME/sessions` `root:<worker> 1771`; `config.toml`,
