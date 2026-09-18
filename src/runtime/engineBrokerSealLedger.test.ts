@@ -224,7 +224,7 @@ test("a completed turn's seal row carries exactly its declared fields, and never
       turns: new EngineBrokerTurnRegistry(path.join(root, "turns")), proxy, credentialStale: () => false,
       mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => undefined, observe: () => ({ started: 1, answered: 1, undecoded: 0, outstanding: [] }) },
       prepareIsolation: async () => async () => undefined,
-      runNative: async () => ({ text: answered(reply), workerPid: 4_242, workerUid: 2_200, startTicks: 99n })
+      runNative: async () => ({ text: answered(reply), workerPid: 4_242, workerUid: 2_200, startTicks: 99n, diagnostic: { status: "ok", stage: "output", failureClass: "none", profileApplied: false, exitCode: 0, termSignal: 0, workerPid: 4_242, workerUid: 2_200, startTicks: "99" } })
     };
     const result = await runGrokEngineBrokerTurn(deps, registration(usageLedgerPath), "wake-done", "prompt", "http://127.0.0.1:43124/mcp");
     assert.equal(result.text, reply, "the turn itself still answers with the model's reply");
