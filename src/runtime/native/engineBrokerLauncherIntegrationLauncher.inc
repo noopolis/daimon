@@ -153,6 +153,54 @@ static void worker_flood_case(void) {
   close(p);
   close(c);
 }
+/* A worker's single write larger than the pipe buffer must complete, not kill
+   it. The launcher created its stdout/stderr pipe O_NONBLOCK as a whole, and
+   O_NONBLOCK is a property of the open file description, so the worker
+   inherited a non-blocking stdout: Grok 1.0.34 turns the first EAGAIN from a
+   headless stdout write into `stdout write failed: Resource temporarily
+   unavailable` and exits 1 before it ever reaches the model. Once its init
+   frame outgrew a pipe buffer that was every turn, at $0 apiece.
+   The fixture shrinks its own stdout pipe to the kernel minimum, reports the
+   capacity it actually got, and writes four times that in ONE write, so the
+   case straddles the buffer on any host instead of assuming 64 KiB — and
+   stays under DBL_MAX_OUTPUT, so it is the write that is bounded here, never
+   the turn's output. */
+static void worker_spill_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("spill-output", "mcp.Spill-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  unsigned capacity = 0, count = 0;
+  size_t head, filler = 0;
+  char *out, *line, extra;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
+            r.status == DBL_STATUS_OK && r.stage == DBL_STAGE_OUTPUT &&
+            r.failure_class == DBL_FAILURE_NONE && r.exit_code == 0 &&
+            r.term_signal == 0 && r.diagnostic_length == 0 &&
+            r.worker_pid > 0 && r.worker_uid == 2200 &&
+            r.output_length > 0 && r.output_length <= DBL_MAX_OUTPUT,
+        "worker spill survived its own oversized write");
+  out = calloc(1, (size_t)r.output_length + 1u);
+  check(out && read_all(s, out, r.output_length), "worker spill output");
+  line = strchr(out, '\n');
+  check(line && sscanf(out, "SPILL cap=%u count=%u", &capacity, &count) == 2 &&
+            capacity > 0 && count == r.output_length &&
+            count >= capacity * 4u,
+        "worker spill straddles the pipe buffer");
+  head = (size_t)(line - out) + 1u;
+  while (head + filler + 10u < (size_t)r.output_length &&
+         out[head + filler] == 's')
+    filler++;
+  check(head + filler + 10u == (size_t)r.output_length &&
+            !memcmp(out + r.output_length - 10, "SPILL-TAIL", 10),
+        "worker spill bytes arrived intact");
+  check(read(s, &extra, 1) == 0, "worker spill EOF");
+  free(out);
+  close(s);
+  close(p);
+  close(c);
+}
 static void org_cases(void) {
   check(!setgid(DBL_BROKER_UID) && !setuid(DBL_BROKER_UID), "drop broker uid");
   client_case();
@@ -162,6 +210,7 @@ static void org_cases(void) {
   output_boundary_case("overflow-output", 1);
   worker_failure_case();
   worker_flood_case();
+  worker_spill_case();
   int s = connect_socket(), p = sealed("prompt"),
       c = sealed_bundle("provider.Token-1", "mcp.Token-2");
   struct dbl_request q = request();
