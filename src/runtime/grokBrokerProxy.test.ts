@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
+import { connect } from "node:net";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { startGrokBrokerProxy } from "./grokBrokerProxy.js";
 import { GROK_SESSION_TITLE_SINK_KEY } from "./grokBrokerWorkerConfig.js";
 import { estimateGrokRequestUsage, GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
+import { DEFAULT_GROK_BROKER_MODEL_POLICY } from "./grokBrokerModelPolicy.js";
 import { ENGINE_BROKER_AUTH_STALE } from "./engineBrokerProtocol.js";
 import { GROK_INFERENCE_AUTH_STALE_BODY } from "./grokInferenceProxy.js";
 
@@ -226,4 +229,18 @@ test("a response whose usage cannot be decoded is still delivered, and charged t
     assert.deepEqual(snapshot.usage, estimateGrokRequestUsage(Buffer.byteLength(payload)), "charged the documented conservative estimate, never zero and never nothing");
     assert.equal(snapshot.timings[0]?.toolCalls, undefined, "an undecodable response records no tool-call attempt either");
   } finally { await proxy.close(); }
+});
+
+test("proxy shutdown ends a worker's leftover keep-alive socket instead of waiting for it", async () => {
+  const proxy = await startGrokBrokerProxy({ accessToken: async () => "token", markRejected: async () => undefined }, async () => ({ status: 200, headers: { "content-type": "text/event-stream" }, body: Buffer.from("data: done\n\n") }), DEFAULT_GROK_BROKER_MODEL_POLICY, 0);
+  // A worker's HTTP client keeps its connection to the proxy pooled; nothing
+  // in the proxy's own state accounts for it, so a shutdown that waits for the
+  // client to release it has no bound.
+  const socket = connect({ host: "127.0.0.1", port: proxy.port });
+  socket.on("error", () => undefined);
+  await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+  try {
+    const outcome = await Promise.race([proxy.close().then(() => "closed" as const), delay(5_000).then(() => "parked" as const)]);
+    assert.equal(outcome, "closed", "proxy shutdown parked on a socket the proxy does not track");
+  } finally { socket.destroy(); }
 });

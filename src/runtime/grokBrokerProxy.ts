@@ -35,7 +35,7 @@ export async function startGrokBrokerProxy(authority: GrokBrokerCredentialAuthor
   const guards=new Map<string,()=>Promise<void>>();const turns=new Map<string,GrokBrokerProxyTurn>();const server = createServer((request, response) => { void serve(request, response, authority, upstream, capabilities,guards,turns,declared,grants); });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(listenPort, "127.0.0.1", () => { server.off("error", reject); resolve(); }); });
   const address = server.address() as AddressInfo;
-  return { port: address.port, capabilities,registerIsolationGuard(turnId,guard){guards.set(turnId,guard);},revokeIsolationGuard(turnId){guards.delete(turnId);},registerTurn(turnId,turn){turns.set(turnId,{policy:parseGrokBrokerModelPolicy(turn.policy),meter:turn.meter});},revokeTurn(turnId){turns.delete(turnId);}, close: () => new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error))) };
+  return { port: address.port, capabilities,registerIsolationGuard(turnId,guard){guards.set(turnId,guard);},revokeIsolationGuard(turnId){guards.delete(turnId);},registerTurn(turnId,turn){turns.set(turnId,{policy:parseGrokBrokerModelPolicy(turn.policy),meter:turn.meter});},revokeTurn(turnId){turns.delete(turnId);}, close: () => new Promise<void>((resolve, reject) => { server.close((error) => error === undefined ? resolve() : reject(error)); /* `close` waits for every open connection, and a worker keeps its client pool's socket to this proxy open with nothing here accounting for it — so that wait has no bound. Ending them is this listener's to do, exactly as the MCP facade does. */ server.closeAllConnections(); }) };
 }
 
 /**
