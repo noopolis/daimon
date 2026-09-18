@@ -46,8 +46,9 @@ const startFacade = async (): Promise<Facade> => {
 };
 
 test("MCP facade routes only valid active capabilities to the registered mount", async () => {
+  const facade=await sharedFacade();
   let calls=0;const target=createServer((_request,response)=>{calls++;response.writeHead(200,{"content-type":"application/json"});response.end('{"ok":true}');});await new Promise<void>((resolve)=>target.listen(0,"127.0.0.1",resolve));const address=target.address();if(address===null||typeof address==="string")throw new Error();
-  const facade=await sharedFacade();const token=facade.register("agent","turn-capabilities",`http://127.0.0.1:${address.port}/mcp`);const call=(value:string)=>fetch(FACADE_URL,{method:"POST",headers:{authorization:`Bearer ${value}`,"content-type":"application/json"},body:"{}"});
+  const token=facade.register("agent","turn-capabilities",`http://127.0.0.1:${address.port}/mcp`);const call=(value:string)=>fetch(FACADE_URL,{method:"POST",headers:{authorization:`Bearer ${value}`,"content-type":"application/json"},body:"{}"});
   try{assert.equal((await call("wrong-token-abcdefghijklmnopqrstuvwxyz0123456789")).status,403);assert.equal((await call(token)).status,200);assert.equal(calls,1);facade.revoke("turn-capabilities");assert.equal((await call(token)).status,403);assert.equal(calls,1);}finally{facade.revoke("turn-capabilities");await new Promise<void>((resolve)=>target.close(()=>resolve()));}
 });
 
@@ -231,6 +232,9 @@ test("the facade forwards a closed header allowlist and never the worker's beare
 });
 
 test("the facade withholds a mount response header that is not on the allowlist", async () => {
+  // The facade comes first: nothing must be listening while the fixed port is
+  // still in doubt, or a refused start leaks this mount and parks the runner.
+  const facade = await sharedFacade();
   const target = createServer((_request, response) => {
     response.writeHead(200, {
       "content-type": "application/json",
@@ -244,7 +248,6 @@ test("the facade withholds a mount response header that is not on the allowlist"
   await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
   const address = target.address();
   if (address === null || typeof address === "string") throw new Error("target address unavailable");
-  const facade = await sharedFacade();
   const capability = facade.register("alpha", "turn-response-headers", `http://127.0.0.1:${address.port}/mcp`);
   try {
     const answered = await fetch(FACADE_URL, {
