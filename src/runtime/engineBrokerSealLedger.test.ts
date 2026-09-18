@@ -185,3 +185,63 @@ test("a turn whose MCP requests were refused seals the refusals by reason, and a
   const unobserved = await cancelledTurn(() => ({ started: 1, answered: 1, undecoded: 0, outstanding: [] }));
   assert.equal(Object.hasOwn(unobserved.seal?.mcp as Record<string, unknown>, "refusals"), false);
 });
+
+/**
+ * The projection is an allow-list, and this is the assertion that makes it one.
+ *
+ * `renderBrokerTurnSealLine` copies a closed field set out of the sealed
+ * terminal response. Replacing that copy with `...terminal` passed every other
+ * test in this suite while writing `usage`, `diagnostic`, `mcpCalls` — and, for
+ * a completed turn, `text`: the model's entire reply, into a ledger whose whole
+ * rule is that it carries no prompt, body or reply. Nothing sealed a completed
+ * turn and read the file back, so nothing was watching the one row that
+ * carries a reply at all.
+ *
+ * The boundary: the exact key set of a written row, for the turn kind that has
+ * the most to leak.
+ *
+ * Mutation: spread the terminal into the row (`...terminal, v: ..., agent: ...`)
+ * and this goes red on both halves — the key set gains `text`, `kind`,
+ * `version`, `requestId`, `workerPid`, `workerUid`, `workerStartTime` and
+ * `usage`, and the reply itself appears in the file's bytes.
+ */
+const reply = "TANGERINE-7-IS-THE-MODELS-OWN-REPLY";
+const answered = (text: string): string => {
+  const session = "01a0ad21-a90f-7f71-8054-93fdb4334d6a";
+  const usage = { input_tokens: 2_677, output_tokens: 92, cache_read_input_tokens: 2_816, cache_creation_input_tokens: 0 };
+  return [
+    { type: "system", subtype: "init", session_id: session },
+    { type: "assistant", message: { id: "msg_0", type: "message", role: "assistant", model: "daimon-broker-grok", content: [{ type: "text", text }], stop_reason: "end_turn", usage }, parent_tool_use_id: null, session_id: session },
+    { type: "result", subtype: "success", is_error: false, num_turns: 1, result: text, stop_reason: "end_turn", total_cost_usd: 0.0024, usage, modelUsage: { "grok-4.6-build": {} }, session_id: session }
+  ].map((frame) => JSON.stringify(frame)).join("\n");
+};
+
+test("a completed turn's seal row carries exactly its declared fields, and never the model's reply", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daimon-broker-seal-completed-"));
+  try {
+    const usageLedgerPath = path.join(root, "usage.jsonl");
+    const deps: GrokEngineBrokerTurnDependencies = {
+      turns: new EngineBrokerTurnRegistry(path.join(root, "turns")), proxy, credentialStale: () => false,
+      mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => undefined, observe: () => ({ started: 1, answered: 1, undecoded: 0, outstanding: [] }) },
+      prepareIsolation: async () => async () => undefined,
+      runNative: async () => ({ text: answered(reply), workerPid: 4_242, workerUid: 2_200, startTicks: 99n })
+    };
+    const result = await runGrokEngineBrokerTurn(deps, registration(usageLedgerPath), "wake-done", "prompt", "http://127.0.0.1:43124/mcp");
+    assert.equal(result.text, reply, "the turn itself still answers with the model's reply");
+
+    const bytes = await readFile(engineBrokerSealLedgerPathFor(usageLedgerPath), "utf8");
+    const lines = bytes.split("\n").filter((line) => line.length > 0);
+    assert.equal(lines.length, 1);
+    const row = JSON.parse(lines[0]!) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(row).sort(), ["agent", "at", "engine", "limit_reason", "model", "outcome", "requests", "turn", "v", "wake"]);
+    assert.deepEqual([row.v, row.agent, row.wake, row.engine, row.outcome, row.model, row.limit_reason, row.requests], [TURN_SEAL_LEDGER_VERSION, "foreman", "wake-done", "grok", "completed", "grok-4.6", "none", 1]);
+    // The second half of the same guarantee, on the bytes rather than the keys:
+    // a reply that reached the ledger under any name is the failure.
+    assert.ok(!bytes.includes(reply), "the model's reply must never reach the ledger");
+    // A completed turn carries no failure members at all, and the facade's
+    // observation is a failed turn's member: neither may appear here.
+    for (const absent of ["text", "code", "diagnostic", "mcp", "usage", "workerPid", "workerUid", "kind", "version"]) {
+      assert.equal(Object.hasOwn(row, absent), false, absent);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
