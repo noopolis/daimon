@@ -80,6 +80,21 @@ export const renderGrokLeanBaseConfig = (): string => [
 ].join("\n");
 
 /**
+ * `max_retries = 0` on the worker's own model, for the same reason its two
+ * siblings already carry it (the session-title sink above,
+ * `grokInferenceClientConfig.ts` for the evaluator): with Grok 1.0.34's
+ * default, a refused or failed request is retried with backoff **past 45 s**
+ * instead of failing in ~0.35 s, and the retries are blind — one live turn
+ * emitted the same refusal fifteen times over five minutes, spent $0, and died
+ * with no account of why. Only this model block was left on the default, so
+ * the one request path that spends money was also the only one that could
+ * stall a turn for minutes after its work was done. Daimon owns the retry
+ * decision here because the proxy is the thing being retried: a genuinely
+ * transient fault is already answered 503 and is the broker's to retry, and
+ * anything else is a refusal that repeating cannot fix. The worker instead
+ * fails fast and the turn reaches the host with a status.
+ */
+/**
  * The only source of broker worker `config.toml` bytes.
  *
  * Effort is declared here, not on the compiled launcher argv: the argv is one
@@ -107,7 +122,7 @@ export function renderGrokBrokerWorkerConfigWith(policy: GrokBrokerModelPolicy, 
     "[models]", `default = "${GROK_BROKER_WORKER_MODEL_ID}"`, `default_reasoning_effort = "${declared.reasoningEffort}"`, `session_summary = "${GROK_SESSION_TITLE_SINK_MODEL_ID}"`, "",
     ...renderSessionTitleSink(proxyPort),
     `[model.${GROK_BROKER_WORKER_MODEL_ID}]`, `model = "${declared.model}"`, `base_url = "http://127.0.0.1:${proxyPort}/v1"`, `env_key = "${GROK_BROKER_PROVIDER_CAPABILITY_ENV}"`,
-    'api_backend = "chat_completions"', "context_window = 131072", "supports_backend_search = false", "",
+    'api_backend = "chat_completions"', "context_window = 131072", "supports_backend_search = false", "max_retries = 0", "",
     `[[model.${GROK_BROKER_WORKER_MODEL_ID}.reasoning_efforts]]`, `value = "${declared.reasoningEffort}"`, `label = "${label}"`, "default = true", "",
     "[mcp_servers.daimon]", `url = "${mcpUrl}"`, 'bearer_token_env_var = "DAIMON_MCP_CAPABILITY"', ""
   ].join("\n");

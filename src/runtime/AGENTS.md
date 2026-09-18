@@ -173,6 +173,22 @@ must be run with `--model daimon-inference-grok`. The inference ledger
 directory must be provisioned setgid to the organization group (e.g.
 `2100:2000 2750`) for uid 2000 to read rows the broker creates `0640`.
 
+Every model block the worker can reach carries `max_retries = 0`. Grok 1.0.34's
+default retries a refused or failed request with backoff **past 45 s**, blindly:
+one live turn emitted the same refusal fifteen times over five minutes, spent
+$0 and died with no account of why. The session-title sink and the evaluator
+client (`grokInferenceClientConfig.ts`) always pinned it; the worker's own
+model — the single path that spends money — was left on the default, so the one
+place a stall costs a wake was the only one that could idle for minutes after
+its work was done, silently, because a retried request that never reaches
+upstream writes no ledger row and prints no proxy line. Daimon owns the retry
+decision here because the thing being retried is Daimon's own proxy: a
+genuinely transient fault is already answered 503 and is the broker's to
+retry, and everything else is a refusal that repeating cannot fix. The worker
+fails fast instead and the turn reaches the host with a status. These bytes are
+manifest-pinned per model and effort, so changing them rotates
+`GROK_ENGINE_BROKER.worker.configSha256` and every deployment must re-vendor.
+
 `grokBrokerProjection.ts` is the public, I/O-free projection of one brokered
 Grok agent's slot (`noopolis.daimon.grok-broker-projection.v1`): Daimon's own
 deny collectors plus the caller's evaluator paths, profile/config/prompt
