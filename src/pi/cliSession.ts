@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir } from "node:fs/promises";
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -35,7 +34,7 @@ import { decodeGrokHeadlessResult } from "./grokHeadlessResult.js";
 import { terminateChild, trackCliChild } from "./cliProcess.js";
 import type { PiSessionLike } from "./piAgentHandle.js";
 import type { PiSessionFactoryInput } from "./piHarness.js";
-import { RUNTIME_HOME_SUBDIRECTORY_MODE } from "../runtime/runtimeHomeLayout.js";
+import { ensureRuntimeHome, ensureRuntimeHomeDirectory } from "../runtime/runtimeHomeLayout.js";
 
 export type CliEngineKind = "agy" | "codex" | "grok";
 
@@ -139,14 +138,9 @@ type CliTurnEnd = Extract<SessionEvent, { type: "turn_end" }>;
 
 export const prepareCliRuntimeHome = async (runtimeHomePath: string | undefined): Promise<void> => {
   if (runtimeHomePath === undefined) return;
-  await Promise.all([
-    runtimeHomePath,
-    `${runtimeHomePath}/.config`,
-    `${runtimeHomePath}/.local/share`,
-    `${runtimeHomePath}/.local/state`,
-    `${runtimeHomePath}/.cache`,
-    `${runtimeHomePath}/.tmp`
-  ].map((directory) => mkdir(directory, { recursive: true, mode: RUNTIME_HOME_SUBDIRECTORY_MODE })));
+  await ensureRuntimeHome(runtimeHomePath);
+  await Promise.all([".config", ".local/share", ".local/state", ".cache", ".tmp"]
+    .map((relative) => ensureRuntimeHomeDirectory(runtimeHomePath, relative)));
 };
 
 const childSecretValues = (redactedNames: readonly string[]): readonly string[] =>

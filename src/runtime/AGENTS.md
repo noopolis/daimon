@@ -462,7 +462,20 @@ in `deny` (verified: `/tmp`, `/var/tmp`, `/run`, `/etc`, `sessions` all fail;
   (`runtimeHomeLayout.ts`: telemetry, turn traces, world trajectories,
   `tool-state`, the engine XDG directories, `.tmp`), so a traversable home
   still exposes nothing but `tool-output/`. A deployment-provisioned memory
-  home under that runtime home must stay `0700` for the same reason;
+  home under that runtime home must stay `0700` for the same reason. That mode
+  is *asserted and corrected*, not merely passed to `mkdir`, because `mkdir`'s
+  `mode` decides nothing for a directory that already exists: a `telemetry/`
+  left at `0755` by a pre-branch Daimon or pre-created by a deployment stayed
+  `0755` forever, and under a `0710` home that is the worker reading its own
+  agent's prompts, replies and causal history. `ensureRuntimeHomeDirectory`
+  walks every level below the home, opens each through
+  `O_DIRECTORY|O_NOFOLLOW` and `fchmod`s the directory it stat'd; one owned by
+  another uid is **refused**, never widened, and a symlink planted where a
+  directory belongs is refused rather than followed. The home itself is
+  create-only (`ensureRuntimeHome`) — whether it should be `0700` or a Grok
+  agent's `0710` is `physicalReadiness.ts`'s judgement, not the layout's. The
+  mode constant lives only in that module, and a test fails the build if any
+  writer imports it again;
 - spills (`toolResultSpill.ts`) are written `0640`; provision
   `<runtimeHome>/tool-output` as `2000:<worker gid> 2750` (setgid) under a
   runtime home the worker can traverse, so each spill carries that agent's

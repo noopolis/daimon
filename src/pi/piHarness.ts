@@ -23,7 +23,7 @@ import { type PiWakeEnvironmentContextRef } from "./piAgentWakeSupport.js";
 import { DAIMON_WAKE_ID_ENV } from "./cliEnvironment.js";
 import { createPiWorldTools, piWorldToolNames, type PiWorldBinding } from "./worldTools.js";
 import type { PiWorldToolContextRef } from "./worldNudge.js";
-import { RUNTIME_HOME_SUBDIRECTORY_MODE } from "../runtime/runtimeHomeLayout.js";
+import { ensureRuntimeHome, ensureRuntimeHomeDirectory } from "../runtime/runtimeHomeLayout.js";
 import {
   bindPiRawTrainingCapture,
   validatePiRawTrainingCaptureOptions,
@@ -98,18 +98,12 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
 
   async startAgent(input: AgentStartInput): Promise<AgentHandle> {
     validatePiRawTrainingCaptureOptions(this.options.rawTrainingCapture);
-    await Promise.all([
-      input.runtimeHomePath,
-      `${input.runtimeHomePath}/.config`,
-      `${input.runtimeHomePath}/.local/share`,
-      `${input.runtimeHomePath}/.local/state`,
-      `${input.runtimeHomePath}/.cache`,
-      `${input.runtimeHomePath}/.tmp`,
-      `${input.runtimeHomePath}/tool-state`
-    ].map((directory) => mkdir(directory, { recursive: true, mode: RUNTIME_HOME_SUBDIRECTORY_MODE })));
+    await ensureRuntimeHome(input.runtimeHomePath);
+    await Promise.all([".config", ".local/share", ".local/state", ".cache", ".tmp", "tool-state"]
+      .map((relative) => ensureRuntimeHomeDirectory(input.runtimeHomePath, relative)));
     await mkdir(input.workspacePath, { recursive: true });
     const memoryRuntimeHomePath = this.options.memory?.runtimeHomePath ?? input.runtimeHomePath;
-    await mkdir(memoryRuntimeHomePath, { recursive: true, mode: RUNTIME_HOME_SUBDIRECTORY_MODE });
+    await ensureRuntimeHome(memoryRuntimeHomePath);
     const modelSpec = this.options.model ?? {
       auth: { method: "codex" as const },
       provider: "openai",
