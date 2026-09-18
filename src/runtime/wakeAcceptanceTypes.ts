@@ -71,6 +71,12 @@ export type OrganizationRuntimeActivityV2Item = OrganizationRuntimeWakeReceiptSt
 }>;
 export type OrganizationRuntimeActivityV2 = Readonly<{
   version: typeof ACTIVITY_V2_VERSION;
+  /**
+   * Whether this projection was read from a live runtime or sealed as the host
+   * stopped. Optional on the wire because a projection published before the seal
+   * existed must still parse; its absence means "not stated", never "running".
+   */
+  state?: "running" | "stopped";
   items: readonly OrganizationRuntimeActivityV2Item[];
   executions?: readonly Readonly<{ agent_id: string; execution_id: string; state: "running"; delivery_ids: readonly string[] }>[];
 }>;

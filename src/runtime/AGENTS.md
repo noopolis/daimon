@@ -725,3 +725,24 @@ unmarked/deferred deliveries wait for new input without a self-wake loop.
 Live turn authority is `activity.executions`, independent of receipt completion;
 its execution id must equal the engine wake id. Budget pauses retain acceptance,
 and operator stop remains a hard latch.
+
+That authority has to outlive the host, because the caller who needs it reads it
+last. `activityV2` used to answer `undefined` once `stop()` closed the acceptance
+store — HTTP 503 `native_host_unavailable` through a caller's route — and the one
+caller that must prove an execution closed asks *after* the runtime stopped: a
+harness worker stops its host the moment a delivery closes its execution and
+stays deferred awaiting external input. So a trial whose subject really ran,
+spent its budget and simply did not do the work could not be told from a hung or
+crashed one, and reported as an unscorable infrastructure failure. `stop()` now
+seals the projection between the dispatcher's own shutdown — which awaits every
+admitted turn, so `executions` is settled rather than momentary — and the store's
+close, and `activityV2` serves that seal afterwards with `state: "stopped"`. A
+stopped host has *more* certainty about quiescence than a live poll, not less,
+because nothing can be admitted after the seal. Three things it is not: a bypass
+of the control token, a fabricated idle runtime (a host that never started and
+one whose seal could not be read both still answer nothing, because absence must
+stay absence), and a claim about the store-backed routes beside it —
+`availability` and `wakeReceipt` keep answering `undefined` after a stop, since
+neither settles a closure proof. `state` is optional on the wire for the reason
+every additive member here is: a projection published before the seal existed
+must still parse, and its absence means "not stated", never "running".
