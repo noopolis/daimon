@@ -38,7 +38,12 @@ int main(int argc, char **argv) {
       continue;
     }
     if (handler == 0) {
-      if (prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() == 1)
+      /* A child subreaper so the worker's orphaned descendants reparent here
+         instead of to pid 1: `reap_worker_identity` can then reap what it
+         kills, and a turn leaves no `<defunct>` behind for a process-name
+         gate to read as work in flight. */
+      if (prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() == 1 ||
+          prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0))
         die();
       close(s);
       serve(c);

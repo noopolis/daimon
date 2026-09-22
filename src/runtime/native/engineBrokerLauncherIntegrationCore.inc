@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "engineBrokerLauncher.h"
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/sha.h>
@@ -62,6 +63,75 @@ static int result_padding_zero(const struct dbl_result *result) {
     if (bytes[padding[index]] != 0)
       return 0;
   return 1;
+}
+/* How many processes the worker identity still owns, in ANY state. A
+   killed-but-unreaped `<defunct>` counts: it is still a `bwrap` or a `grok` to
+   anything matching on process names, and a process-name match is exactly what
+   the organization's pre-run gate read as work in flight. Read from `status`
+   rather than from the directory owner, which follows the effective uid alone. */
+static int worker_identity_processes(uid_t uid) {
+  DIR *proc = opendir("/proc");
+  struct dirent *entry;
+  int owned = 0;
+  check(proc != NULL, "scan /proc");
+  while ((entry = readdir(proc))) {
+    char path[64], status[512], *cursor;
+    unsigned long long real = 0, effective = 0, saved = 0;
+    long pid = strtol(entry->d_name, &cursor, 10);
+    int fd;
+    ssize_t n;
+    if (*cursor || pid < 2)
+      continue;
+    snprintf(path, sizeof(path), "/proc/%ld/status", pid);
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+      continue;
+    n = read(fd, status, sizeof(status) - 1);
+    close(fd);
+    if (n < 1)
+      continue;
+    status[n] = 0;
+    cursor = strstr(status, "\nUid:");
+    if (!cursor ||
+        sscanf(cursor + 5, "%llu %llu %llu", &real, &effective, &saved) != 3)
+      continue;
+    if (real == uid || effective == uid || saved == uid)
+      owned++;
+  }
+  closedir(proc);
+  return owned;
+}
+/* The launcher reaps before it writes the result frame, so a turn that has
+   answered has already settled; the poll is only for the cancelled path, which
+   answers nothing. Two seconds is far past a SIGKILL that is not refusable. */
+static void check_worker_identity_settled(uid_t uid, const char *label) {
+  for (int attempt = 0; attempt < 100; attempt++) {
+    if (worker_identity_processes(uid) == 0)
+      return;
+    usleep(20000);
+  }
+  fprintf(stderr, "%s: uid %u still owns %d process(es)\n", label, uid,
+          worker_identity_processes(uid));
+  check(0, label);
+}
+/* Where the escapee recorded itself. Proves the case actually produced a
+   process outside the worker's group and session, so a settled uid cannot be a
+   turn that escaped nothing. */
+static void read_escape_marker(const char *provider, long *pid, long *group,
+                               long *session) {
+  char path[128];
+  snprintf(path, sizeof(path), "/tmp/worker-%s", provider);
+  for (int attempt = 0; attempt < 250; attempt++) {
+    FILE *marker = fopen(path, "r");
+    if (marker) {
+      int fields = fscanf(marker, "%ld %ld %ld", pid, group, session);
+      fclose(marker);
+      if (fields == 3)
+        return;
+    }
+    usleep(20000);
+  }
+  check(0, "worker escape marker");
 }
 static void wait_launcher_ready(pid_t pid) {
   for (int attempt = 0; attempt < 250; attempt++) {

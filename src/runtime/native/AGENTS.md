@@ -12,6 +12,50 @@ descriptors, not protocol strings. Workers must start in a private process
 group with no-new-privileges, no capabilities, no core dump, and a parent-death
 signal. Unsupported platforms fail closed.
 
+**The worker's process group is not a container, and the identity is.** The
+launcher owns the whole lifecycle of what it starts, and it used to end a turn
+with `kill(-pid, SIGKILL)` alone. That reaches the process this launcher
+forked and nothing the sandbox started under it: Grok 1.0.34 re-executes itself
+inside bubblewrap, and what comes out the other side is no longer in the group
+`launch` put the worker in. In production two `grok` workers outlived their
+turns by 48 minutes that way, alive under live `bwrap` parents, and the
+organization's pre-run gate counted them as work in flight and refused to run.
+It is not a bubblewrap quirk to special-case, either: one `setsid()` leaves a
+process group and a session, and a double fork leaves no ancestry to walk.
+
+So `supervise` also calls `reap_worker_identity(uid)`, which SIGKILLs every
+process owned by the registration's worker uid and then proves the identity
+owns nothing. That works because the uid cannot be left: `valid_registration`
+admits only a dedicated worker identity (>= 2200, one per agent, `nologin`),
+nothing else in the deployment runs as it, and the organization runtime holds
+one execution claim per agent — **one identity carries at most one turn at a
+time, and the reap depends on that.** It runs on every closing path (completed,
+worker failure, output limit, cancellation, failed wait) and before the result
+frame is written, so the broker has not yet been told the turn is over and
+cannot have started this agent's next one.
+
+Zombies count as unsettled on purpose: a killed-but-unreaped `[bwrap]
+<defunct>` is still a `bwrap` to anything matching on process names, which is
+the symptom this exists to end. The connection handler is therefore a
+`PR_SET_CHILD_SUBREAPER`, so orphans reparent to it and the reap's `waitpid`
+drain collects them instead of leaving them to pid 1. The five-second bound is
+not a deadline a turn can trip — SIGKILL is not refusable and this settles in
+milliseconds — it only stops a process wedged in uninterruptible I/O from
+parking the turn's answer forever.
+
+`worker_escape_complete_case`, `worker_escape_failure_case` and
+`worker_escape_cancel_case` are the cover, and the cancel case is the deadline
+path: a brokered turn past its token, request or wall-clock limit is cancelled
+by killing the launcher's client, which arrives here as the client disconnect.
+The fixture reproduces the escape rather than bubblewrap — `setsid()` and then
+a second fork, so the survivor shares neither group, session nor ancestry with
+the turn — and each case proves the escapee existed before asserting the
+identity is empty. Removing the reap turns all three red and nothing else in
+the suite notices. **Do not trust the assertion that was here before:** the
+only cleanup check the suite had ran `pgrep -u 2200 fixture-worker` against a
+fixture installed as `grok`, so it matched nothing on any build and passed
+whether or not the turn leaked.
+
 The worker argv is one compiled constant: the lean Grok 1.0.34 flags, the
 `DBL_GROK_SYSTEM_PROMPT` operating contract, the `--tools` allowlist and the
 `--max-turns` backstop live in `engineBrokerLauncher.h`, mirrored byte-for-byte

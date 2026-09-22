@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "engineBrokerLauncher.h"
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -237,6 +238,89 @@ bad:
     close(fd);
   return -1;
 }
+/* One pass over `/proc`: SIGKILL everything owned by `uid`, and report how many
+   entries it still has. Ownership is read from `status` rather than from the
+   `/proc/<pid>` directory's owner, because that directory follows the effective
+   uid alone; a process that kept the identity in any of its real, effective or
+   saved uid is this worker's. Zombies are counted, and signalling one is a
+   no-op — see `reap_worker_identity`. */
+static int worker_identity_pass(uid_t uid) {
+  DIR *proc = opendir("/proc");
+  struct dirent *entry;
+  int owned = 0;
+  if (!proc)
+    return -1;
+  while ((entry = readdir(proc))) {
+    char path[64], status[512], *cursor;
+    unsigned long long real = 0, effective = 0, saved = 0;
+    long pid = strtol(entry->d_name, &cursor, 10);
+    int fd;
+    ssize_t n;
+    if (*cursor || pid < 2)
+      continue;
+    snprintf(path, sizeof(path), "/proc/%ld/status", pid);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+      continue;
+    n = read(fd, status, sizeof(status) - 1);
+    close(fd);
+    if (n < 1)
+      continue;
+    status[n] = 0;
+    cursor = strstr(status, "\nUid:");
+    if (!cursor ||
+        sscanf(cursor + 5, "%llu %llu %llu", &real, &effective, &saved) != 3)
+      continue;
+    if (real != uid && effective != uid && saved != uid)
+      continue;
+    owned++;
+    kill((pid_t)pid, SIGKILL);
+  }
+  closedir(proc);
+  return owned;
+}
+
+/* Everything this turn's worker identity still owns, killed and proved gone.
+ *
+ * The worker's process group is not a container, and the launcher used to
+ * treat it as one. Grok 1.0.34 re-executes itself inside bubblewrap, and what
+ * comes out the other side is no longer in the group `launch` put the worker
+ * in, so `kill(-pid, SIGKILL)` reaches the process forked here and nothing the
+ * sandbox started under it. Two `grok` workers outlived their turns by 48
+ * minutes that way, alive under live `bwrap` parents, and the organization's
+ * pre-run gate read them as work in flight and refused to run. This is not a
+ * bubblewrap quirk to special-case: one `setsid()` leaves a process group and
+ * a session, and a double fork leaves no ancestry to walk either.
+ *
+ * The uid cannot be left. `valid_registration` admits only a dedicated worker
+ * identity (>= 2200, one per agent, `nologin`), nothing else in the deployment
+ * ever runs as it, and the organization runtime holds one execution claim per
+ * agent, so one identity carries at most one turn at a time. The set of
+ * processes owned by `uid` is therefore exactly the set this turn started,
+ * however it forked, re-execed, `setsid()`ed or detached.
+ *
+ * Zombies count as unsettled deliberately: a killed-but-unreaped `[bwrap]
+ * <defunct>` is still a `bwrap` to anything matching on process names, which is
+ * the symptom this exists to end. The handler is a child subreaper, so every
+ * orphan this kills reparents to it and is reaped by the drain below instead of
+ * being left to pid 1.
+ *
+ * The bound is not a timeout the turn can trip: SIGKILL is not refusable, so
+ * this settles in milliseconds, and the five seconds only keep a process wedged
+ * in uninterruptible I/O from parking the turn's answer forever. Every caller
+ * runs it before the result frame is written, so the broker has not yet been
+ * told the turn is over and cannot have started this agent's next one. */
+static void reap_worker_identity(uid_t uid) {
+  for (int attempt = 0; attempt < 500; attempt++) {
+    int owned = worker_identity_pass(uid);
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+    }
+    if (!owned)
+      return;
+    poll(NULL, 0, 10);
+  }
+}
+
 static uint64_t start_ticks(pid_t pid) {
   char p[64], b[1024], *x;
   int fd;
