@@ -205,7 +205,7 @@ static int output_limit_crossed(size_t used, struct dbl_result *out) {
   out->failure_class = DBL_FAILURE_OUTPUT_LIMIT;
   return 1;
 }
-static void supervise(int client, pid_t pid, int output,
+static void supervise(int client, pid_t pid, uid_t uid, int output,
                       struct dbl_result *out) {
   unsigned char bytes[DBL_MAX_OUTPUT + 1] = {0};
   size_t used = 0;
@@ -245,7 +245,13 @@ static void supervise(int client, pid_t pid, int output,
       wait_failed = 1;
     }
   }
+  /* The group kill is the fast stop for what is still in the group; the
+     identity reap is what actually ends the turn, because the sandboxed worker
+     is no longer in it. Both run on EVERY closing path — completed, worker
+     failure, output limit, cancellation and a failed wait alike — and before
+     the result frame is written. */
   kill(-pid, SIGKILL);
+  reap_worker_identity(uid);
   while (!output_limited && used < sizeof(bytes)) {
     ssize_t got = read(output, bytes + used, sizeof(bytes) - used);
     if (got <= 0)
@@ -364,7 +370,7 @@ static void serve(int client) {
   out.worker_pid = pid;
   out.worker_uid = r.uid;
   out.start_ticks = launch_start_ticks;
-  supervise(client, pid, pipes[0], &out);
+  supervise(client, pid, r.uid, pipes[0], &out);
   goto cleanup;
 done:
   (void)launch_failure;
