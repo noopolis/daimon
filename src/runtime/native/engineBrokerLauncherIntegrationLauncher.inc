@@ -275,6 +275,110 @@ static void worker_stream_case(void) {
   close(p);
   close(c);
 }
+/* Reaping the worker is the launcher's job on every path that closes a turn,
+   and the process group it forked the worker into cannot carry it: Grok 1.0.34
+   re-executes itself inside bubblewrap and what comes out is no longer in that
+   group, so `kill(-pid, SIGKILL)` reaches the forked process and nothing the
+   sandbox started under it. In production two `grok` workers outlived their
+   turns by 48 minutes under live `bwrap` parents, and the organization's
+   pre-run gate counted them as work in flight and refused to run.
+
+   The fixture reproduces the escape rather than bubblewrap: a `setsid()` and
+   then a second fork, so the survivor shares neither group, session nor
+   ancestry with the turn — only the worker uid. Each case then closes the turn
+   a different way, because the completed path is not where this leaked: the
+   error and deadline paths are.
+
+   Deleting `reap_worker_identity(uid)` from `supervise` is the mutation, and
+   all three go red on it. No other case in this suite notices, which is the
+   point: the only cleanup assertion that existed before this ran
+   `pgrep -u 2200 fixture-worker` against a fixture installed as `grok`, so it
+   could never match anything and passed on every build, leak or no leak. */
+static void worker_escape_complete_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("escape-complete", "mcp.Escape-1");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  long escaped = 0, group = 0, session = 0;
+  char *out, extra;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
+            r.status == DBL_STATUS_OK && r.stage == DBL_STAGE_OUTPUT &&
+            r.failure_class == DBL_FAILURE_NONE && r.exit_code == 0 &&
+            r.worker_pid > 0 && r.worker_uid == 2200 && r.output_length > 0,
+        "escaped worker completed its turn");
+  out = calloc(1, (size_t)r.output_length + 1u);
+  check(out && read_all(s, out, r.output_length) &&
+            strstr(out, "ESCAPED-AND-COMPLETED"),
+        "escaped worker output");
+  check(read(s, &extra, 1) == 0, "escaped worker EOF");
+  free(out);
+  close(s);
+  close(p);
+  close(c);
+  read_escape_marker("escape-complete", &escaped, &group, &session);
+  check(escaped > 0 && group != (long)r.worker_pid &&
+            session != (long)r.worker_pid,
+        "the escapee left the worker's process group and session");
+  check_worker_identity_settled(2200, "completed turn left nothing behind");
+}
+/* The failure path. A worker that exits nonzero still publishes its bounded
+   diagnostic, and it must still leave nothing running. */
+static void worker_escape_failure_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("escape-failure", "mcp.Escape-2");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  long escaped = 0, group = 0, session = 0;
+  char *reason, extra;
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
+            r.status == DBL_STATUS_WORKER_FAILED && r.stage == DBL_STAGE_WAIT &&
+            r.failure_class == DBL_FAILURE_EXEC && r.exit_code == 1 &&
+            r.worker_pid > 0 && r.worker_uid == 2200 &&
+            r.output_length == 0 && r.diagnostic_length > 0,
+        "escaped worker failed its turn");
+  reason = calloc(1, r.diagnostic_length + 1);
+  check(reason && read_all(s, reason, r.diagnostic_length) &&
+            strstr(reason, "worker failed after its sandbox escaped"),
+        "escaped worker failure reason");
+  check(read(s, &extra, 1) == 0, "escaped worker failure EOF");
+  free(reason);
+  close(s);
+  close(p);
+  close(c);
+  read_escape_marker("escape-failure", &escaped, &group, &session);
+  check(escaped > 0 && group != (long)r.worker_pid &&
+            session != (long)r.worker_pid,
+        "the failed turn's escapee left the group and session");
+  check_worker_identity_settled(2200, "failed turn left nothing behind");
+}
+/* The deadline path. A brokered turn that runs past its token, request or
+   wall-clock limit is cancelled by killing the launcher's client, which
+   arrives here as the client disconnect `supervise` also takes for an operator
+   cancellation — so this is the timeout case, and it is the one that ran for
+   48 minutes in production. The turn is closed only once the escapee exists
+   and the identity demonstrably owns live processes, so it cannot pass by
+   racing the worker to the socket. */
+static void worker_escape_cancel_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("escape-cancel", "mcp.Escape-3");
+  struct dbl_request q = request();
+  long escaped = 0, group = 0, session = 0;
+  send_request(s, &q, p, c);
+  read_escape_marker("escape-cancel", &escaped, &group, &session);
+  /* `setsid()` ran in the middle process, so the survivor's group and session
+     are both that process and neither is the survivor itself: it is outside
+     everything the launcher could name about the worker it forked. */
+  check(escaped > 0 && group > 0 && group == session && group != escaped,
+        "the cancelled turn's escapee left the worker's group and session");
+  check(worker_identity_processes(2200) > 0,
+        "the cancelled turn still owns processes at the moment it is cancelled");
+  close(s);
+  close(p);
+  close(c);
+  check_worker_identity_settled(2200, "cancelled turn left nothing behind");
+}
 static void org_cases(void) {
   check(!setgid(DBL_BROKER_UID) && !setuid(DBL_BROKER_UID), "drop broker uid");
   client_case();
@@ -287,6 +391,9 @@ static void org_cases(void) {
   worker_spill_case();
   worker_turn_case();
   worker_stream_case();
+  worker_escape_complete_case();
+  worker_escape_failure_case();
+  worker_escape_cancel_case();
   int s = connect_socket(), p = sealed("prompt"),
       c = sealed_bundle("provider.Token-1", "mcp.Token-2");
   struct dbl_request q = request();
@@ -350,9 +457,5 @@ static void org_cases(void) {
   int sleepfd = sealed_bundle("sleep", "mcp.Sleep-2");
   send_request(s, &q, p, sleepfd);
   close(s);
-  sleep(1);
-  char command[128];
-  snprintf(command, sizeof(command),
-           "! pgrep -u 2200 fixture-worker >/dev/null");
-  check(system(command) == 0, "disconnect cleanup");
+  check_worker_identity_settled(2200, "disconnect cleanup");
 }
