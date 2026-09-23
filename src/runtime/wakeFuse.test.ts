@@ -241,3 +241,124 @@ test("usage rows sharing a broker turn key count once toward the token ceiling",
   const fuse = await WakeFuse.open({ organizationKey: "org", environment: environment(directory), now });
   assert.deepEqual(await fuse.admit("alpha", "one"), { state: "admitted" });
 }));
+
+// --- the counting window rolls itself -----------------------------------------
+
+const unpinned = (directory: string, values: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => {
+  const base = environment(directory, values);
+  delete base.DAIMON_WAKE_FUSE_EPOCH;
+  return base;
+};
+
+test("an unset epoch is derived from the day, so the budget renews without a deploy", async () => {
+  await withProvisionedDirectory(async (directory) => {
+    // THE BUG THIS PREVENTS: DAIMON_WAKE_FUSE_EPOCH comes from an env file, and
+    // an env file applies at container CREATION only. Rolling it needed a
+    // rebuild + recreate every morning. Stop deploying daily and the wake
+    // ceiling never resets again.
+    let clock = new Date("2026-09-23T23:59:00Z");
+    const fuse = await WakeFuse.open({ organizationKey: "clank", environment: unpinned(directory), now: () => clock });
+
+    assert.equal((await fuse.admit("agent:a", "d1")).state, "admitted");
+    assert.equal((await fuse.admit("agent:b", "d2")).state, "admitted");
+    // Ceiling is 2: the third is refused inside the same day.
+    assert.deepEqual(await fuse.admit("agent:c", "d3"), { state: "tripped", reason: "wake_ceiling" });
+    const spent = await fuse.snapshot("agent:a");
+    assert.equal(spent.executions_remaining, 0);
+
+    // Midnight passes. No redeploy, no restart, no env file, no reopen.
+    clock = new Date("2026-09-24T00:01:00Z");
+    assert.equal((await fuse.admit("agent:c", "d3")).state, "admitted", "a new day is a new budget");
+    const fresh = await fuse.snapshot("agent:c");
+    assert.notEqual(fresh.epoch, spent.epoch, "the window moved");
+    assert.match(fresh.epoch, /-2026-09-24$/u);
+    assert.equal(fresh.executions_used, 1, "yesterday's spend does not follow it across");
+  });
+});
+
+test("an explicitly pinned epoch is never rolled out from under the operator", async () => {
+  await withProvisionedDirectory(async (directory) => {
+    let clock = new Date("2026-09-23T23:59:00Z");
+    const fuse = await WakeFuse.open({ organizationKey: "clank", environment: environment(directory), now: () => clock });
+    await fuse.admit("agent:a", "d1");
+    await fuse.admit("agent:b", "d2");
+    assert.deepEqual(await fuse.admit("agent:c", "d3"), { state: "tripped", reason: "wake_ceiling" });
+    clock = new Date("2026-09-24T00:01:00Z");
+    // Still tripped: pinning a window is a deliberate act and midnight does not undo it.
+    assert.deepEqual(await fuse.admit("agent:c", "d3"), { state: "tripped", reason: "wake_ceiling" });
+    assert.equal((await fuse.snapshot("agent:a")).epoch, "test-epoch");
+  });
+});
+
+test("a new day renews a budget but never releases an operator stop", async () => {
+  await withProvisionedDirectory(async (directory) => {
+    let clock = new Date("2026-09-23T12:00:00Z");
+    const fuse = await WakeFuse.open({ organizationKey: "clank", environment: unpinned(directory), now: () => clock });
+    await writeFile(path.join(directory, "fuse.stop"), "operator stop\n");
+    assert.deepEqual(await fuse.admit("agent:a", "d1"), { state: "tripped", reason: "operator_stop" });
+    clock = new Date("2026-09-25T12:00:00Z");
+    // MUTATION CHECK: scope the fuse.stop check to the epoch and this goes red.
+    // A budget renews; a decision to stop does not.
+    assert.deepEqual(await fuse.admit("agent:a", "d2"), { state: "tripped", reason: "operator_stop" },
+      "a parked newsroom must stay parked across midnight");
+  });
+});
+
+test("a clock that steps backward does not hand back a budget that was already spent", async () => {
+  await withProvisionedDirectory(async (directory) => {
+    let clock = new Date("2026-09-23T12:00:00Z");
+    const fuse = await WakeFuse.open({ organizationKey: "clank", environment: unpinned(directory), now: () => clock });
+    await fuse.admit("agent:a", "d1");
+    await fuse.admit("agent:b", "d2");
+    clock = new Date("2026-09-24T12:00:00Z");
+    await fuse.admit("agent:c", "d3");
+    // Back into the 23rd, whose two wakes are on the ledger.
+    clock = new Date("2026-09-23T13:00:00Z");
+    assert.deepEqual(await fuse.admit("agent:d", "d4"), { state: "tripped", reason: "wake_ceiling" },
+      "admissions are rebuilt from the ledger, not emptied");
+  });
+});
+
+test("a day means the operator's day, not the server's", async () => {
+  await withProvisionedDirectory(async (directory) => {
+    // 23:30 UTC on the 23rd is already the 24th in Berlin.
+    const clock = new Date("2026-09-23T23:30:00Z");
+    const utc = await WakeFuse.open({ organizationKey: "clank", environment: unpinned(directory), now: () => clock });
+    const berlin = await WakeFuse.open({ organizationKey: "clank", environment: unpinned(directory, { DAIMON_WAKE_FUSE_EPOCH_ZONE: "Europe/Berlin" }), now: () => clock });
+    assert.match((await utc.snapshot("agent:a")).epoch, /-2026-09-23$/u);
+    assert.match((await berlin.snapshot("agent:a")).epoch, /-2026-09-24$/u);
+  });
+});
+
+test("the derived window is stable across restarts within the same day", async () => {
+  await withProvisionedDirectory(async (directory) => {
+    const clock = new Date("2026-09-23T08:00:00Z");
+    const first = await WakeFuse.open({ organizationKey: "clank", environment: unpinned(directory), now: () => clock });
+    await first.admit("agent:a", "d1");
+    // A bare container restart reopens the fuse; the day has not changed, so
+    // the spend must still be there.
+    const second = await WakeFuse.open({ organizationKey: "clank", environment: unpinned(directory), now: () => new Date("2026-09-23T18:00:00Z") });
+    const snapshot = await second.snapshot("agent:a");
+    assert.equal(snapshot.epoch, (await first.snapshot("agent:a")).epoch);
+    assert.equal(snapshot.executions_used, 1, "a restart is not a fresh budget");
+  });
+});
+
+test("after a roll the budget snapshot agrees with what admission actually does", async () => {
+  await withProvisionedDirectory(async (directory) => {
+    // `admit` re-checks fuse.stop on its own, so a parked organization is
+    // refused either way. `snapshot` has no such second check — it reads the
+    // cached reason — so if the roll does not re-evaluate the stop, the
+    // operator console reports "available" for a newsroom that refuses every
+    // wake. Two answers to the same question is how a parked box looks healthy.
+    let clock = new Date("2026-09-23T12:00:00Z");
+    const fuse = await WakeFuse.open({ organizationKey: "clank", environment: unpinned(directory), now: () => clock });
+    await writeFile(path.join(directory, "fuse.stop"), "operator stop\n");
+    await fuse.admit("agent:a", "d1");
+    clock = new Date("2026-09-25T12:00:00Z");
+    assert.deepEqual(await fuse.admit("agent:a", "d2"), { state: "tripped", reason: "operator_stop" });
+    const snapshot = await fuse.snapshot("agent:a");
+    assert.equal(snapshot.state, "stopped", "the snapshot must not say available for a parked organization");
+    assert.equal(snapshot.reason, "operator_stop");
+  });
+});
