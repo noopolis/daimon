@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
   if (bind(s, (struct sockaddr *)&a,
            offsetof(struct sockaddr_un, sun_path) + strlen(a.sun_path) + 1) ||
       chown(DBL_SOCKET, 0, DBL_BROKER_UID) || chmod(DBL_SOCKET, 0660) ||
-      listen(s, 16))
+      listen(s, DBL_LISTEN_BACKLOG))
     die();
   umask(old);
   for (;;) {

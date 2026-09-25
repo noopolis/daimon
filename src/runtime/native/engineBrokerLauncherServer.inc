@@ -205,44 +205,97 @@ static int output_limit_crossed(size_t used, struct dbl_result *out) {
   out->failure_class = DBL_FAILURE_OUTPUT_LIMIT;
   return 1;
 }
+/* The launcher's own clock on one turn. CLOCK_MONOTONIC so a clock step cannot
+   shorten or extend a turn, and an unreadable clock means NO ceiling rather than
+   a false trip: refusing to bound a turn is recoverable, cutting a working one
+   short is not. */
+static int supervise_expired(int clocked, const struct timespec *started) {
+  struct timespec now;
+  if (!clocked || clock_gettime(CLOCK_MONOTONIC, &now))
+    return 0;
+  return now.tv_sec - started->tv_sec >= DBL_MAX_TURN_SECONDS;
+}
 static void supervise(int client, pid_t pid, uid_t uid, int output,
                       struct dbl_result *out) {
   unsigned char bytes[DBL_MAX_OUTPUT + 1] = {0};
   size_t used = 0;
   int status = 0, done = 0, disconnected = 0, output_limited = 0,
-      wait_failed = 0;
+      wait_failed = 0, forced = 0, clocked;
+  unsigned long idle = 0;
+  struct timespec started;
   struct pollfd p[2] = {{client, POLLIN | POLLHUP | POLLERR, 0},
                         {output, POLLIN | POLLHUP | POLLERR, 0}};
+  clocked = clock_gettime(CLOCK_MONOTONIC, &started) == 0;
   while (!done) {
+    size_t seen = used;
+    int settled = disconnected + output_limited * 2 + (p[1].fd < 0 ? 4 : 0);
     int n = poll(p, 2, 250);
     if (n < 0 && errno != EINTR) {
       disconnected = 1;
       wait_failed = 1;
     }
-    if (p[0].revents & (POLLHUP | POLLERR))
+    if (p[0].revents & (POLLHUP | POLLERR | POLLNVAL))
       disconnected = 1;
     if (p[0].revents & POLLIN) {
       char b;
       (void)recv(client, &b, 1, MSG_PEEK | MSG_DONTWAIT);
       disconnected = 1;
     }
-    if (p[1].revents & POLLIN) {
+    if (p[1].fd >= 0 && (p[1].revents & POLLIN)) {
       ssize_t got = read(output, bytes + used, sizeof(bytes) - used);
       if (got > 0)
         used += (size_t)got;
+      /* A pipe whose every write end has closed is readable for ever and yields
+         nothing: `read` returns 0, this branch consumes nothing, and the next
+         `poll` returns immediately again. That is the spin that burned a whole
+         core for 25 hours while the worker it was supposed to be supervising sat
+         alive and idle beside it. A worker CAN outlive its own stdout, so the
+         answer is to stop watching the descriptor, not to assume EOF means the
+         turn is over. */
+      else if (got == 0)
+        p[1].fd = -1;
       if (output_limit_crossed(used, out)) {
         output_limited = 1;
-        p[1].events = 0;
+        p[1].fd = -1;
       }
     }
+    /* POLLHUP, POLLERR and POLLNVAL are reported whatever `events` asks for, so
+       clearing `events` cannot stop them waking `poll` — only removing the
+       descriptor can. The output bound used to clear `events` and carried the
+       same latent spin; it now removes the descriptor too. */
+    if (p[1].fd >= 0 && (p[1].revents & (POLLHUP | POLLERR | POLLNVAL)))
+      p[1].fd = -1;
     if (disconnected || output_limited)
       kill(-pid, SIGKILL);
+    /* Two bounds the loop did not have. The first is the turn's own ceiling. The
+       second is a spin detector: a healthy pass blocks on the 250 ms timeout, so
+       a healthy loop cannot run thousands of consecutive passes that change
+       nothing, while a spin does it in under a second. Both end the turn the
+       same way a failed wait does, and both kill the worker first so the frame
+       is not published over a process that is still running. */
+    if (!done && supervise_expired(clocked, &started)) {
+      kill(-pid, SIGKILL);
+      done = 1;
+      wait_failed = 1;
+      forced = 1;
+    }
     pid_t w = waitpid(pid, &status, WNOHANG);
     if (w == pid)
       done = 1;
     else if (w < 0 && errno != EINTR) {
       done = 1;
       wait_failed = 1;
+    }
+    if (n > 0 && used == seen &&
+        settled == disconnected + output_limited * 2 + (p[1].fd < 0 ? 4 : 0)) {
+      if (++idle >= DBL_MAX_IDLE_PASSES) {
+        kill(-pid, SIGKILL);
+        done = 1;
+        wait_failed = 1;
+        forced = 1;
+      }
+    } else {
+      idle = 0;
     }
   }
   /* The group kill is the fast stop for what is still in the group; the
@@ -264,6 +317,10 @@ static void supervise(int client, pid_t pid, uid_t uid, int output,
     out->exit_code = WEXITSTATUS(status);
   else if (WIFSIGNALED(status))
     out->term_signal = WTERMSIG(status);
+  /* A turn this loop ended itself was killed, and the frame should say so: it is
+     what separates a ceiling or spin trip from a `waitpid` that failed. */
+  if (forced && out->term_signal == 0)
+    out->term_signal = SIGKILL;
   if (output_limited) {
     out->status = DBL_STATUS_OUTPUT_FAILED;
     out->stage = DBL_STAGE_OUTPUT;

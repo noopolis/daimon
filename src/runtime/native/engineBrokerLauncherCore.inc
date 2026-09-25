@@ -22,6 +22,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 

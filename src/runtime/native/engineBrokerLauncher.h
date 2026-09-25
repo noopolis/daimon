@@ -19,6 +19,34 @@
    output must cross: a larger launcher bound would only move the refusal one
    layer up. A runaway worker is still stopped here — crossing it stops
    reading, SIGKILLs the worker's process group and reports `output_limit`. */
+/* The launcher's OWN wall-clock ceiling on one supervised turn.
+   The launcher had no deadline of its own: `supervise` waited for the worker to
+   exit or the client to disappear, and if neither happened it waited forever. A
+   handler was found alive after 25 hours with its worker still running, burning
+   a whole core, long after the broker had closed the turn — see
+   `docs`/AGENTS.md. A turn that hangs and a turn that fails are very different
+   to the caller: the second is reported, sealed and retried, the first is
+   silent. This is the bound that makes the second one always true.
+   It sits above every legitimate turn rather than near one: the control
+   protocol caps a turn's `timeoutMs` at 3,600,000 ms, so this is that maximum
+   plus ten minutes. Crossing it kills the worker's process group and reports
+   the ordinary `DBL_STATUS_WORKER_FAILED`/`DBL_FAILURE_WAIT` frame — no new
+   wire status, because an unresponsive turn IS a failed wait. */
+#ifndef DBL_MAX_TURN_SECONDS
+#define DBL_MAX_TURN_SECONDS 4200
+#endif
+/* Consecutive `poll()` wakeups that changed nothing, past which the loop is
+   spinning rather than waiting. A healthy pass blocks on the 250 ms timeout, so
+   a healthy loop cannot reach four passes a second, let alone this many with no
+   state change; a spin reaches it in under a second. Belt and braces behind the
+   specific spins fixed in `supervise`, so an fd condition neither of us has
+   thought of costs a turn instead of a core. */
+#define DBL_MAX_IDLE_PASSES 10000
+/* The accept queue. Concurrency is structurally bounded well below this — the
+   dispatcher runs at most one execution per agent — but the queue used to be 16
+   with twelve agents, which is headroom measured in one agent. Past the queue a
+   client's connect fails silently, which is the worst shape this boundary has. */
+#define DBL_LISTEN_BACKLOG 128
 #define DBL_MAX_OUTPUT 262144u
 /* Bounded tail of the worker's own merged stdout/stderr, kept only for a
    worker that exited on its own account (`DBL_STATUS_WORKER_FAILED`), so the
