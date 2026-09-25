@@ -12,12 +12,72 @@ descriptors, not protocol strings. Workers must start in a private process
 group with no-new-privileges, no capabilities, no core dump, and a parent-death
 signal. Unsupported platforms fail closed.
 
+**A supervised turn now has a ceiling, because it used to have none.**
+`supervise` waited for the worker to exit or the client to disappear, and if
+neither happened it waited for ever. A handler was found alive after 25 hours
+with its worker still running — 87,000 seconds of CPU, two thirds of it in the
+kernel — long after the broker had closed the turn and its client was gone. A
+turn that hangs and a turn that fails are not the same thing to the caller: the
+second is reported, sealed and retried, the first is silent and costs whatever
+was waiting on it. `DBL_MAX_TURN_SECONDS` (4200: the control protocol's
+3,600,000 ms maximum plus ten minutes) is measured on `CLOCK_MONOTONIC`, and
+crossing it kills the worker's process group and publishes the ordinary
+`DBL_STATUS_WORKER_FAILED`/`DBL_FAILURE_WAIT` frame. No new wire status: an
+unresponsive turn IS a failed wait. `term_signal` is set to SIGKILL on a turn
+this loop ended itself, which is what distinguishes a ceiling or spin trip from
+a `waitpid` that failed. An unreadable clock means no ceiling rather than a
+false one — refusing to bound a turn is recoverable, cutting a working one short
+is not.
+
+**What burned the core: a pipe at EOF is readable for ever and yields nothing.**
+A worker can outlive its own stdout. Once every write end is closed, `poll`
+reports the read end ready immediately and `read` returns 0 — and the loop only
+consumed POLLIN and only acted on a positive read, so it consumed nothing and
+polled again, for ever. Two corrections: `read` returning 0 removes the
+descriptor from the poll set, and so does POLLHUP/POLLERR/POLLNVAL on it.
+**Clearing `events` is not enough and never was** — POLLHUP, POLLERR and
+POLLNVAL are reported whatever `events` asks for, so only `fd = -1` stops them
+waking `poll`. The output bound used to clear `events` and carried exactly the
+same latent spin; it now removes the descriptor too. POLLNVAL on the client
+socket is also a disconnect now, which it was not.
+
+**And a spin detector behind both, for the fd condition nobody has thought of.**
+A healthy pass blocks on the 250 ms timeout, so a healthy loop cannot run
+`DBL_MAX_IDLE_PASSES` consecutive passes that change nothing, while a spin gets
+there in under a second. Crossing it ends the turn the same way the ceiling
+does. It exists because the 25-hour handler was an *unexplained* spin: the
+specific cause is fixed above, and this is what makes the next one cost a turn
+instead of a core.
+
+`worker_eof_spin_case` and `worker_ceiling_case` are the cover, and they assert
+on the only observable that separates a fixed launcher from a wedged one while
+the worker is still alive — the handler's CPU, read from `/proc`, because the
+protocol says nothing at all during a spin. Reverting the descriptor removal and
+the guard reproduces production exactly and the case reports it:
+`handler 46 burned 201 ticks in 2s while its worker sat at EOF` — a full core.
+The suite compiles the launcher with `-DDBL_MAX_TURN_SECONDS=8` because it
+cannot wait 4200 seconds to prove a bound; drop that `-D` and the ceiling case
+fails on its socket deadline instead of passing on a timeout.
+
+**`DBL_LISTEN_BACKLOG` is 128 and was 16.** Concurrency is structurally bounded
+well below either — the dispatcher runs at most one execution per agent, so
+twelve agents is a ceiling of twelve — and a measured 19,110-sample census of a
+live deployment never saw more than 9 workers at once. So this never caused
+anything, and it is corrected as a latent defect, not an explanation: at 16 the
+headroom over a twelve-agent org was one agent, and past the queue a client's
+connect fails silently, which is the worst shape this boundary has.
+
 **The worker's process group is not a container, and the identity is.** The
 launcher owns the whole lifecycle of what it starts, and it used to end a turn
-with `kill(-pid, SIGKILL)` alone. That reaches the process this launcher
-forked and nothing the sandbox started under it: Grok 1.0.34 re-executes itself
-inside bubblewrap, and what comes out the other side is no longer in the group
-`launch` put the worker in. In production two `grok` workers outlived their
+with `kill(-pid, SIGKILL)` alone. A process group is not a container in
+principle: one `setsid()` leaves a group and a session, and a double fork leaves
+no ancestry to walk, so a group-scoped kill is not a lifecycle guarantee.
+**Correction to what this file used to claim:** real Grok 1.0.34 does NOT leave
+the group — its bubblewrap re-exec IS the process the launcher forked, pgid ==
+pid, with the sandboxed CLI in the same group, measured on the live deployment.
+The identity reap below is sound and it is shipped, but it is defence in depth
+against a future engine that detaches, not the fix for the 25-hour wedge. That
+was the spin above. In production two `grok` workers outlived their
 turns by 48 minutes that way, alive under live `bwrap` parents, and the
 organization's pre-run gate counted them as work in flight and refused to run.
 It is not a bubblewrap quirk to special-case, either: one `setsid()` leaves a
