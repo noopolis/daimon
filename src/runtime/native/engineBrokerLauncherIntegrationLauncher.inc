@@ -275,84 +275,118 @@ static void worker_stream_case(void) {
   close(p);
   close(c);
 }
-/* Reaping the worker is the launcher's job on every path that closes a turn,
-   and the process group it forked the worker into cannot carry it: Grok 1.0.34
-   re-executes itself inside bubblewrap and what comes out is no longer in that
-   group, so `kill(-pid, SIGKILL)` reaches the forked process and nothing the
-   sandbox started under it. In production two `grok` workers outlived their
-   turns by 48 minutes under live `bwrap` parents, and the organization's
-   pre-run gate counted them as work in flight and refused to run.
+/* A worker that outlives its own stdout must not make the launcher spin.
+   This is the observed production failure, and it is the one the escape cases
+   below do NOT cover. Grok 1.0.34 closes its output and can stay alive; the read
+   end of that pipe is then readable for ever and yields nothing, so a loop that
+   only consumes POLLIN and only acts on a positive read consumed nothing and
+   polled again, for ever. One handler was found after 25 hours in exactly that
+   state — 87,000 seconds of CPU, two thirds of it in the kernel, with its worker
+   alive and idle beside it and the turn already closed at the broker.
 
-   The fixture reproduces the escape rather than bubblewrap: a `setsid()` and
-   then a second fork, so the survivor shares neither group, session nor
-   ancestry with the turn — only the worker uid. Each case then closes the turn
-   a different way, because the completed path is not where this leaked: the
-   error and deadline paths are.
-
-   Deleting `reap_worker_identity(uid)` from `supervise` is the mutation, and
-   all three go red on it. No other case in this suite notices, which is the
-   point: the only cleanup assertion that existed before this ran
-   `pgrep -u 2200 fixture-worker` against a fixture installed as `grok`, so it
-   could never match anything and passed on every build, leak or no leak. */
-static void worker_escape_complete_case(void) {
+   The only observable that separates a fixed launcher from a wedged one while
+   the worker is still alive is the handler's CPU: waiting in poll() burns
+   nothing, spinning burns a core. So that is what this asserts, and it is why
+   it reads /proc rather than the protocol.
+   Mutations that turn it red: restore `p[1].events = 0` in place of
+   `p[1].fd = -1`, or delete the `got == 0` branch. */
+static void worker_eof_spin_case(void) {
   int s = connect_socket(), p = sealed("prompt"),
-      c = sealed_bundle("escape-complete", "mcp.Escape-1");
+      c = sealed_bundle("eof-hang", "mcp.Eof-1");
   struct dbl_request q = request();
   struct dbl_result r;
-  long escaped = 0, group = 0, session = 0;
-  char *out, extra;
+  struct timeval deadline = {.tv_sec = 30, .tv_usec = 0};
+  unsigned long before, after;
+  pid_t handler;
+  char extra;
+  check(!setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline)),
+        "eof spin deadline");
   send_request(s, &q, p, c);
-  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
-            r.status == DBL_STATUS_OK && r.stage == DBL_STAGE_OUTPUT &&
-            r.failure_class == DBL_FAILURE_NONE && r.exit_code == 0 &&
-            r.worker_pid > 0 && r.worker_uid == 2200 && r.output_length > 0,
-        "escaped worker completed its turn");
-  out = calloc(1, (size_t)r.output_length + 1u);
-  check(out && read_all(s, out, r.output_length) &&
-            strstr(out, "ESCAPED-AND-COMPLETED"),
-        "escaped worker output");
-  check(read(s, &extra, 1) == 0, "escaped worker EOF");
-  free(out);
-  close(s);
-  close(p);
-  close(c);
-  read_escape_marker("escape-complete", &escaped, &group, &session);
-  check(escaped > 0 && group != (long)r.worker_pid &&
-            session != (long)r.worker_pid,
-        "the escapee left the worker's process group and session");
-  check_worker_identity_settled(2200, "completed turn left nothing behind");
-}
-/* The failure path. A worker that exits nonzero still publishes its bounded
-   diagnostic, and it must still leave nothing running. */
-static void worker_escape_failure_case(void) {
-  int s = connect_socket(), p = sealed("prompt"),
-      c = sealed_bundle("escape-failure", "mcp.Escape-2");
-  struct dbl_request q = request();
-  struct dbl_result r;
-  long escaped = 0, group = 0, session = 0;
-  char *reason, extra;
-  send_request(s, &q, p, c);
+  sleep(3); /* the worker has written, closed both descriptors and is sleeping */
+  handler = worker_handler_pid(2200);
+  check(handler > 1, "eof spin found the supervising handler");
+  before = process_cpu_ticks(handler);
+  sleep(2);
+  after = process_cpu_ticks(handler);
+  if (after - before >= 20)
+    fprintf(stderr, "handler %ld burned %lu ticks in 2s while its worker sat at EOF\n",
+            (long)handler, after - before);
+  check(after - before < 20, "the launcher waits instead of spinning on a pipe at EOF");
+  /* And the turn still ends, on the launcher's own ceiling, rather than hanging
+     for as long as the worker feels like sleeping. */
   check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r) &&
             r.status == DBL_STATUS_WORKER_FAILED && r.stage == DBL_STAGE_WAIT &&
-            r.failure_class == DBL_FAILURE_EXEC && r.exit_code == 1 &&
-            r.worker_pid > 0 && r.worker_uid == 2200 &&
-            r.output_length == 0 && r.diagnostic_length > 0,
-        "escaped worker failed its turn");
-  reason = calloc(1, r.diagnostic_length + 1);
-  check(reason && read_all(s, reason, r.diagnostic_length) &&
-            strstr(reason, "worker failed after its sandbox escaped"),
-        "escaped worker failure reason");
-  check(read(s, &extra, 1) == 0, "escaped worker failure EOF");
-  free(reason);
+            r.failure_class == DBL_FAILURE_WAIT && r.worker_pid > 0 &&
+            r.worker_uid == 2200 && r.start_ticks > 0 && r.output_length == 0,
+        "a worker at EOF is ended by the launcher, not waited on for ever");
+  if (r.diagnostic_length) {
+    char *reason = calloc(1, r.diagnostic_length + 1);
+    check(reason && read_all(s, reason, r.diagnostic_length), "eof spin diagnostic");
+    free(reason);
+  }
+  check(read(s, &extra, 1) == 0, "eof spin EOF");
   close(s);
   close(p);
   close(c);
-  read_escape_marker("escape-failure", &escaped, &group, &session);
-  check(escaped > 0 && group != (long)r.worker_pid &&
-            session != (long)r.worker_pid,
-        "the failed turn's escapee left the group and session");
-  check_worker_identity_settled(2200, "failed turn left nothing behind");
+  check_worker_identity_settled(2200, "a turn ended at EOF left nothing behind");
 }
+/* THE CEILING. A turn that never ends on its own account, with its output pipe
+   still open so no other bound can trip, and a client that never disconnects.
+   Before this the launcher had no deadline of its own and waited for ever; the
+   whole point is that a turn now always reaches a terminal frame.
+   The suite compiles the launcher with DBL_MAX_TURN_SECONDS=8 (see
+   Dockerfile.integration) because it cannot wait 4200 seconds to prove a bound.
+   Mutation: drop that -D and the fixture's 600-second sleep outlives the socket
+   deadline, so the case fails red on a park instead of passing on a timeout. */
+static void worker_ceiling_case(void) {
+  int s = connect_socket(), p = sealed("prompt"),
+      c = sealed_bundle("wall-hang", "mcp.Wall-1");
+  struct dbl_request q = request();
+  struct dbl_result r;
+  struct timeval deadline = {.tv_sec = 30, .tv_usec = 0};
+  time_t sent, answered;
+  char extra;
+  check(!setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline)),
+        "ceiling deadline");
+  sent = time(NULL);
+  send_request(s, &q, p, c);
+  check(read_all(s, &r, sizeof(r)) && result_padding_zero(&r),
+        "the launcher answered a turn that would never end on its own");
+  answered = time(NULL);
+  check(r.status == DBL_STATUS_WORKER_FAILED && r.stage == DBL_STAGE_WAIT &&
+            r.failure_class == DBL_FAILURE_WAIT && r.worker_pid > 0 &&
+            r.worker_uid == 2200 && r.start_ticks > 0 && r.output_length == 0 &&
+            r.term_signal == SIGKILL,
+        "the ceiling reports a killed failed wait");
+  /* Near the ceiling, not near the fixture's own sleep: a pass must be the
+     launcher ending the turn, never the worker finishing by itself. */
+  check(answered - sent < 20, "the ceiling ended the turn on its own clock");
+  if (r.diagnostic_length) {
+    char *reason = calloc(1, r.diagnostic_length + 1);
+    check(reason && read_all(s, reason, r.diagnostic_length), "ceiling diagnostic");
+    free(reason);
+  }
+  check(read(s, &extra, 1) == 0, "ceiling EOF");
+  close(s);
+  close(p);
+  close(c);
+  check_worker_identity_settled(2200, "a turn ended by the ceiling left nothing behind");
+}
+/* Defence in depth for the identity reap, honestly scoped.
+   `supervise` also reaps every process owned by the worker's uid, because a
+   process group is not a container in principle: one `setsid()` leaves a group
+   and a session, and a double fork leaves no ancestry to walk. That reap is
+   sound and it is shipped.
+   But it is NOT the observed production failure, and this file used to imply it
+   was. Real Grok 1.0.34 does not leave the group: its bubblewrap re-exec IS the
+   process the launcher forked, pgid == pid, with the sandboxed CLI in the same
+   group — measured on the live deployment. Three cases that reproduced an escape
+   Grok does not perform read as coverage while proving nothing about the bug we
+   actually had, which is why two of them are gone and the observed failure is
+   covered by `worker_eof_spin_case` and `worker_ceiling_case` above.
+   One escape case remains, on the cancellation path, as a guard against a future
+   engine that does detach. It is defence in depth, not a regression test for
+   something we have seen. */
 /* The deadline path. A brokered turn that runs past its token, request or
    wall-clock limit is cancelled by killing the launcher's client, which
    arrives here as the client disconnect `supervise` also takes for an operator
@@ -391,8 +425,8 @@ static void org_cases(void) {
   worker_spill_case();
   worker_turn_case();
   worker_stream_case();
-  worker_escape_complete_case();
-  worker_escape_failure_case();
+  worker_eof_spin_case();
+  worker_ceiling_case();
   worker_escape_cancel_case();
   int s = connect_socket(), p = sealed("prompt"),
       c = sealed_bundle("provider.Token-1", "mcp.Token-2");

@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static void check(int ok, const char *m) {
@@ -63,6 +64,73 @@ static int result_padding_zero(const struct dbl_result *result) {
     if (bytes[padding[index]] != 0)
       return 0;
   return 1;
+}
+/* The launcher handler supervising the current worker, and its CPU burn. The
+   handler is the worker's parent; a handler waiting in poll() burns nothing,
+   and one spinning on a ready descriptor burns a core. That difference is the
+   only observable that separates a fixed launcher from a wedged one while the
+   worker is still alive, so it is what the spin case asserts on. */
+static pid_t worker_handler_pid(uid_t uid) {
+  DIR *proc = opendir("/proc");
+  struct dirent *entry;
+  pid_t handler = -1;
+  check(proc != NULL, "scan /proc for the worker");
+  while ((entry = readdir(proc))) {
+    char path[64], status[512], *cursor;
+    unsigned long long real = 0;
+    long pid = strtol(entry->d_name, &cursor, 10), parent = -1;
+    int fd;
+    ssize_t n;
+    if (*cursor || pid < 2)
+      continue;
+    snprintf(path, sizeof(path), "/proc/%ld/status", pid);
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+      continue;
+    n = read(fd, status, sizeof(status) - 1);
+    close(fd);
+    if (n < 1)
+      continue;
+    status[n] = 0;
+    cursor = strstr(status, "\nUid:");
+    if (!cursor || sscanf(cursor + 5, "%llu", &real) != 1 || real != uid)
+      continue;
+    cursor = strstr(status, "\nPPid:");
+    if (cursor && sscanf(cursor + 6, "%ld", &parent) == 1 && parent > 1)
+      handler = (pid_t)parent;
+  }
+  closedir(proc);
+  return handler;
+}
+static unsigned long process_cpu_ticks(pid_t pid) {
+  char path[64], buffer[1024], *cursor;
+  unsigned long utime = 0, stime = 0;
+  unsigned field = 3;
+  int fd;
+  ssize_t n;
+  snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+  fd = open(path, O_RDONLY);
+  if (fd < 0)
+    return 0;
+  n = read(fd, buffer, sizeof(buffer) - 1);
+  close(fd);
+  if (n < 1)
+    return 0;
+  buffer[n] = 0;
+  cursor = strrchr(buffer, ')');
+  if (!cursor)
+    return 0;
+  for (cursor += 2; *cursor; cursor++) {
+    if (*cursor == ' ')
+      field++;
+    if (field == 14 && utime == 0)
+      utime = strtoul(cursor, NULL, 10);
+    if (field == 15) {
+      stime = strtoul(cursor, NULL, 10);
+      break;
+    }
+  }
+  return utime + stime;
 }
 /* How many processes the worker identity still owns, in ANY state. A
    killed-but-unreaped `<defunct>` counts: it is still a `bwrap` or a `grok` to
