@@ -7,6 +7,7 @@ import { resolveTurnUsageLedgerPath, TURN_USAGE_LEDGER, TURN_USAGE_MAX_IDENTIFIE
 
 export const WAKE_FUSE_VERSION = "noopolis.daimon.wake-fuse.v1" as const;
 export const WAKE_FUSE_DIRECTORY_ENV = "DAIMON_WAKE_FUSE_DIRECTORY" as const;
+export const WAKE_FUSE_EPOCH_ZONE_ENV = "DAIMON_WAKE_FUSE_EPOCH_ZONE" as const;
 export const DEFAULT_WAKE_FUSE_MAX_WAKES = 100;
 export const DEFAULT_WAKE_FUSE_MAX_TOKENS = 5_000_000;
 
@@ -14,6 +15,32 @@ export type WakeFuseTripReason = "wake_ceiling" | "token_ceiling" | "operator_st
 export type WakeBudgetLimits = Readonly<{ maxExecutions?: number; maxTokens?: number }>;
 export type WakeBudgetSnapshot = Readonly<{ armed: boolean; epoch: string; state: "available" | "paused" | "stopped"; reason?: string; executions_used: number; executions_remaining: number; tokens_used: number; tokens_remaining: number; agent_executions_used: number; agent_executions_remaining?: number; agent_tokens_used: number; agent_tokens_remaining?: number }>;
 export type WakeFuseVerdict = Readonly<{ state: "admitted" }> | Readonly<{ state: "tripped"; reason: WakeFuseTripReason }> | Readonly<{ state: "paused"; reason: "agent_execution_ceiling" | "agent_token_ceiling" }>;
+/**
+ * The counting window, when the operator has not named one.
+ *
+ * WHY THIS IS DERIVED AND NOT CONFIGURED
+ * --------------------------------------
+ * `DAIMON_WAKE_FUSE_EPOCH` is read from the container's env file, and an env
+ * file is applied at container CREATION only. So an operator who wants a daily
+ * budget has to rewrite that file and RECREATE THE CONTAINER every day, and
+ * the only thing that ever did that was a daily rebuild. The budget was
+ * therefore coupled to a deploy: stop deploying daily and the wake ceiling
+ * never resets, and the organization stops admitting wakes for good.
+ *
+ * A date-derived epoch removes the coupling instead of moving it. There is no
+ * file to rewrite, no deploy, no restart, and no clock for anybody to forget.
+ *
+ * An explicitly configured epoch still wins, unchanged: an operator pinning one
+ * window is doing it deliberately, and this must not roll it out from under
+ * them.
+ */
+export function derivedEpoch(organizationKey: string, at: Date, zone: string): string {
+  // `en-CA` renders ISO-8601 (YYYY-MM-DD), which is what makes this sortable
+  // and stable; the zone is what makes "a day" mean the operator's day.
+  const day = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(at);
+  return `organization-${createHash("sha256").update(organizationKey).digest("hex")}-${day}`;
+}
+
 export type WakeFuseOptions = Readonly<{
   organizationKey: string;
   environment?: NodeJS.ProcessEnv;
@@ -41,13 +68,14 @@ export class WakeFuse {
   private constructor(
     private readonly armed: boolean,
     private readonly directory: string,
-    private readonly epoch: string,
-    private readonly epochStartedAt: string,
+    private epoch: string,
+    private epochStartedAt: string,
     private readonly maxWakes: number,
     private readonly maxTokens: number,
-    private readonly admissions: Set<string>,
+    private admissions: Set<string>,
     private readonly usageLedgerPath: string,
-    private readonly now: () => Date
+    private readonly now: () => Date,
+    private readonly nextEpoch: (at: Date) => string
   ) {}
 
   static async open(options: WakeFuseOptions): Promise<WakeFuse> {
@@ -55,20 +83,23 @@ export class WakeFuse {
     const setting = environment.DAIMON_WAKE_FUSE;
     if (setting !== undefined && setting !== "off") throw new Error("DAIMON_WAKE_FUSE must be exactly 'off' when set");
     if (environment.DAIMON_WAKE_FUSE_EPOCH !== undefined && nonBlank(environment.DAIMON_WAKE_FUSE_EPOCH) === undefined) throw new Error("DAIMON_WAKE_FUSE_EPOCH must be non-blank");
-    const epoch = nonBlank(environment.DAIMON_WAKE_FUSE_EPOCH)
-      // Agent ids are the stable organization identity available to Daimon.
-      ?? `organization-${createHash("sha256").update(options.organizationKey).digest("hex")}`;
+    const pinned = nonBlank(environment.DAIMON_WAKE_FUSE_EPOCH);
+    const zone = nonBlank(environment[WAKE_FUSE_EPOCH_ZONE_ENV]) ?? "UTC";
+    // A pinned epoch never rolls; a derived one rolls with the operator's day.
+    // Agent ids are the stable organization identity available to Daimon.
+    const nextEpoch = (at: Date): string => pinned ?? derivedEpoch(options.organizationKey, at, zone);
     const maxWakes = ceiling(environment.DAIMON_WAKE_FUSE_MAX_WAKES, DEFAULT_WAKE_FUSE_MAX_WAKES, "DAIMON_WAKE_FUSE_MAX_WAKES");
     const maxTokens = ceiling(environment.DAIMON_WAKE_FUSE_MAX_TOKENS, DEFAULT_WAKE_FUSE_MAX_TOKENS, "DAIMON_WAKE_FUSE_MAX_TOKENS");
     const directory = resolveWakeFuseDirectory(environment);
     const now = options.now ?? (() => new Date());
+    const epoch = nextEpoch(now());
     const usageLedgerPath = resolveTurnUsageLedgerPath(environment);
     if (setting === "off") {
       if (!warnedDisarmed) {
         warnedDisarmed = true;
         console.error("DAIMON WAKE FUSE IS OFF: wake admission is unbounded");
       }
-      return new WakeFuse(false, directory, epoch, now().toISOString(), maxWakes, maxTokens, new Set(), usageLedgerPath, now);
+      return new WakeFuse(false, directory, epoch, now().toISOString(), maxWakes, maxTokens, new Set(), usageLedgerPath, now, nextEpoch);
     }
 
     // Unbounded defaults would reproduce exactly the failure this module prevents.
@@ -81,7 +112,7 @@ export class WakeFuse {
     const admissions = new Set(records
       .filter((record): record is Admission => record.kind === "admission" && record.epoch === epoch)
       .map((record) => key(record.agent, record.delivery)));
-    const fuse = new WakeFuse(true, directory, epoch, epochStartedAt, maxWakes, maxTokens, admissions, usageLedgerPath, now);
+    const fuse = new WakeFuse(true, directory, epoch, epochStartedAt, maxWakes, maxTokens, admissions, usageLedgerPath, now, nextEpoch);
     if (await exists(path.join(directory, "fuse.stop"))) fuse.reason = "operator_stop";
     else fuse.reason = await readTripMarker(directory, epoch);
     return fuse;
@@ -96,7 +127,27 @@ export class WakeFuse {
     return result;
   }
 
+  /**
+   * The budget as the caller should act on it NOW — which means after the day
+   * has been allowed to roll.
+   *
+   * This is the gate the scheduler actually consults: `AttentionDispatcher.drain()`
+   * returns at `snapshot().state !== "available"` before it ever reaches
+   * `admit()`. Rolling only inside `admitNow` therefore never fired for an
+   * organization that had hit its ceiling — it stayed paused across midnight
+   * and only a process restart could renew the budget. The roll is serialized
+   * with admissions so a snapshot and an admission never see two windows.
+   */
   async snapshot(agentId: string, limits: WakeBudgetLimits = {}): Promise<WakeBudgetSnapshot> {
+    const result = this.serial.catch(() => undefined).then(async () => {
+      if (this.armed) await this.rollEpochIfDue();
+      return await this.snapshotNow(agentId, limits);
+    });
+    this.serial = result.then(() => undefined, () => undefined);
+    return await result;
+  }
+
+  private async snapshotNow(agentId: string, limits: WakeBudgetLimits = {}): Promise<WakeBudgetSnapshot> {
     const used = this.admissions.size;
     const agentUsed = [...this.admissions].filter((entry) => entry.startsWith(`${bounded(agentId)}\u0000`)).length;
     const tokens = this.armed ? await sumTokens(this.usageLedgerPath, this.epochStartedAt) : 0;
@@ -116,13 +167,60 @@ export class WakeFuse {
   tripped(): WakeFuseTripReason | undefined { return this.reason; }
   async close(): Promise<void> { await this.serial; }
 
+  /**
+   * Moves the counting window when the derived day has changed.
+   *
+   * Called at admission, which is the only moment the answer can matter: the
+   * organization runtime is a long-lived process, so an epoch computed once at
+   * open() would be the same epoch a week later.
+   *
+   * WHAT ROLLS AND WHAT DOES NOT
+   * ----------------------------
+   * A new window clears a CEILING trip, exactly as selecting a new epoch by
+   * hand always did: `readTripMarker` only honours a marker belonging to the
+   * current epoch. It does NOT clear an operator stop. `fuse.stop` is checked
+   * by existence and is deliberately not epoch-scoped, so a parked newsroom
+   * stays parked across midnight. That asymmetry is the whole point: a budget
+   * is a thing that renews, an operator stop is a decision that does not.
+   *
+   * Admissions are rebuilt from the ledger rather than emptied, so a clock that
+   * steps BACKWARD into a window that already spent wakes does not hand the
+   * organization a fresh budget.
+   */
+  private async rollEpochIfDue(): Promise<void> {
+    const wanted = this.nextEpoch(this.now());
+    if (wanted === this.epoch) return;
+    const records = await readFuseRecords(this.directory);
+    const existingStart = records.filter((record): record is EpochStart => record.kind === "epoch_start" && record.epoch === wanted).at(-1);
+    const startedAt = existingStart?.at ?? this.now().toISOString();
+    if (existingStart === undefined) await append(this.directory, { v: WAKE_FUSE_VERSION, kind: "epoch_start", epoch: wanted, at: startedAt });
+    this.epoch = wanted;
+    this.epochStartedAt = startedAt;
+    this.admissions = new Set(records
+      .filter((record): record is Admission => record.kind === "admission" && record.epoch === wanted)
+      .map((record) => key(record.agent, record.delivery)));
+    // Re-evaluate the trip for the NEW window. Clearing a CEILING is the part
+    // that does work here, and it is what makes the budget renew.
+    //
+    // The operator-stop branch is deliberately BELT AND BRACES, not the guard:
+    // `admitNow` checks `fuse.stop` itself on every admission, unscoped by
+    // epoch, and `trip()` sets the reason — so a park is already enforced
+    // whatever this line does. I could not write a failing test for it, and
+    // said so rather than dressing it up as a guarantee. It stays because it
+    // keeps the object's own state coherent at the moment it rolls; the test
+    // above pins the BEHAVIOUR, which is what must not regress.
+    this.reason = await exists(path.join(this.directory, "fuse.stop")) ? "operator_stop" : await readTripMarker(this.directory, wanted);
+  }
+
   private async admitNow(agentId: string, deliveryId: string, limits: WakeBudgetLimits): Promise<WakeFuseVerdict> {
+    // Before the trip is consulted: a new day may have cleared a ceiling.
+    await this.rollEpochIfDue();
     if (this.reason !== undefined) return await this.trip(this.reason);
     try {
       if (await exists(path.join(this.directory, "fuse.stop"))) return await this.trip("operator_stop");
       const admissionKey = key(bounded(agentId), bounded(deliveryId));
       if (this.admissions.has(admissionKey)) return { state: "admitted" };
-      const budget = await this.snapshot(agentId, limits);
+      const budget = await this.snapshotNow(agentId, limits);
       if (budget.agent_executions_remaining === 0) return { state: "paused", reason: "agent_execution_ceiling" };
       if (budget.agent_tokens_remaining === 0) return { state: "paused", reason: "agent_token_ceiling" };
       if (this.admissions.size >= this.maxWakes) return await this.trip("wake_ceiling");
