@@ -127,7 +127,27 @@ export class WakeFuse {
     return result;
   }
 
+  /**
+   * The budget as the caller should act on it NOW — which means after the day
+   * has been allowed to roll.
+   *
+   * This is the gate the scheduler actually consults: `AttentionDispatcher.drain()`
+   * returns at `snapshot().state !== "available"` before it ever reaches
+   * `admit()`. Rolling only inside `admitNow` therefore never fired for an
+   * organization that had hit its ceiling — it stayed paused across midnight
+   * and only a process restart could renew the budget. The roll is serialized
+   * with admissions so a snapshot and an admission never see two windows.
+   */
   async snapshot(agentId: string, limits: WakeBudgetLimits = {}): Promise<WakeBudgetSnapshot> {
+    const result = this.serial.catch(() => undefined).then(async () => {
+      if (this.armed) await this.rollEpochIfDue();
+      return await this.snapshotNow(agentId, limits);
+    });
+    this.serial = result.then(() => undefined, () => undefined);
+    return await result;
+  }
+
+  private async snapshotNow(agentId: string, limits: WakeBudgetLimits = {}): Promise<WakeBudgetSnapshot> {
     const used = this.admissions.size;
     const agentUsed = [...this.admissions].filter((entry) => entry.startsWith(`${bounded(agentId)}\u0000`)).length;
     const tokens = this.armed ? await sumTokens(this.usageLedgerPath, this.epochStartedAt) : 0;
@@ -200,7 +220,7 @@ export class WakeFuse {
       if (await exists(path.join(this.directory, "fuse.stop"))) return await this.trip("operator_stop");
       const admissionKey = key(bounded(agentId), bounded(deliveryId));
       if (this.admissions.has(admissionKey)) return { state: "admitted" };
-      const budget = await this.snapshot(agentId, limits);
+      const budget = await this.snapshotNow(agentId, limits);
       if (budget.agent_executions_remaining === 0) return { state: "paused", reason: "agent_execution_ceiling" };
       if (budget.agent_tokens_remaining === 0) return { state: "paused", reason: "agent_token_ceiling" };
       if (this.admissions.size >= this.maxWakes) return await this.trip("wake_ceiling");

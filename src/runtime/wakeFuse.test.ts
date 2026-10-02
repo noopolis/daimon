@@ -276,6 +276,29 @@ test("an unset epoch is derived from the day, so the budget renews without a dep
   });
 });
 
+test("the scheduler's budget gate renews at midnight on its own, before any admission", async () => {
+  await withProvisionedDirectory(async (directory) => {
+    // THE BUG THIS PREVENTS: AttentionDispatcher.drain() returns at
+    // `snapshot().state !== "available"` and never reaches `admit()`. If only
+    // admission rolled the day, a newsroom that hit its ceiling stayed paused
+    // forever and needed a container restart every morning.
+    // MUTATION CHECK: remove the roll from snapshot() and this goes red.
+    let clock = new Date("2026-09-23T23:59:00Z");
+    const fuse = await WakeFuse.open({ organizationKey: "clank", environment: unpinned(directory), now: () => clock });
+    await fuse.admit("agent:a", "d1");
+    await fuse.admit("agent:b", "d2");
+    assert.deepEqual(await fuse.admit("agent:c", "d3"), { state: "tripped", reason: "wake_ceiling" });
+    assert.equal((await fuse.snapshot("agent:c")).state, "paused");
+
+    clock = new Date("2026-09-24T00:01:00Z");
+    const gate = await fuse.snapshot("agent:c");
+    assert.equal(gate.state, "available", "the gate the scheduler reads must see the new day");
+    assert.match(gate.epoch, /-2026-09-24$/u);
+    assert.equal(gate.executions_used, 0);
+    assert.equal(fuse.tripped(), undefined, "yesterday's ceiling trip does not survive the roll");
+  });
+});
+
 test("an explicitly pinned epoch is never rolled out from under the operator", async () => {
   await withProvisionedDirectory(async (directory) => {
     let clock = new Date("2026-09-23T23:59:00Z");
