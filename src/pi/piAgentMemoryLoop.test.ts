@@ -69,7 +69,7 @@ const makeStubSession = (
   };
 };
 
-test("second wake's prompt carries content recorded from the first wake (write-back loop closes)", async () => {
+test("a recorded wake is kept for audit but never recalled into the next wake's prompt", async () => {
   const root = await tempDir();
   const runtimeHomePath = path.join(root, "runtime");
   const memory: MemoryRuntime = createMemoryRuntime({
@@ -79,6 +79,9 @@ test("second wake's prompt carries content recorded from the first wake (write-b
     tokenBudget: 4000
   });
 
+  // Raw wake envelopes and turn output used to be recalled into every later
+  // wake, crowding out real memories with stale instructions. Durable recall
+  // now comes only from the agent's own memory tool writes.
   const marker = "GALAXY_BRAIN_MARKER_7421";
   const session = makeStubSession((index) => (index === 0 ? `Noted: ${marker}` : "ack-2"));
   const handle = new PiAgentHandle(
@@ -90,13 +93,18 @@ test("second wake's prompt carries content recorded from the first wake (write-b
     memory
   );
 
-  await handle.wake(wake("daimon:wake-1", `Remember this for later: ${marker}`));
+  await handle.wake(wake("daimon:wake-1", `Carry out this delivery. <delivery id=d1>${marker}</delivery>`));
   await handle.wake(wake("daimon:wake-2", "What did I tell you before?"));
 
   assert.equal(session.prompts.length, 2);
   assert.ok(
-    session.prompts[1]?.includes(marker),
-    `expected second wake's prompt to include marker recorded from the first turn, got: ${session.prompts[1]}`
+    !session.prompts[1]?.includes(marker),
+    `expected second wake's prompt to exclude the first wake's raw envelope and output, got: ${session.prompts[1]}`
+  );
+  const events = await new JsonlMemoryStore(runtimeHomePath).read({ principalAgentId: "loop-agent" });
+  assert.ok(
+    events.some((event) => event.content.kind === "text" && event.content.text.includes(marker)),
+    "expected the first turn to stay in the audit ledger"
   );
 
   await handle.stop();
