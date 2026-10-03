@@ -328,21 +328,31 @@ test("memory activity can be reloaded through Pi adapter across turns", async ()
     runtimeHomePath: setup.runtimeHomePath
   });
 
-  await runtime.recordTurn({
-    principal: { agentId: "mapper", scope: "room", qualifier: "noopolis:agora" },
-    prompt: {
-      principal: { agentId: "mapper", scope: "room", qualifier: "noopolis:agora" },
-      sections: [{ heading: "Preseed", text: "Legacy activity context." }],
-      rawHint: "seeded"
-    },
-    request: {
-      eventId: "daimon:seed-legacy",
-      kind: "manual",
-      text: "seed legacy event for continuity",
-      context: {}
-    },
-    result: "completed",
-    outputText: "seeded legacy output"
+  // Seed through the kernel (the path the agent's own memory notes take);
+  // recordTurn audit records are never recall candidates.
+  const seedPrincipal = { agentId: "mapper", scope: "room", qualifier: "noopolis:agora" } as const;
+  const seedArgs = { scope: "current", kind: "text", content: { kind: "text", text: "Legacy activity context." }, visibility: "room", sensitivity: "normal", source_type: "test" };
+  const seedEnvelope = {
+    version: "mneme.memory.tool.v1",
+    mode: "awake",
+    wake_id: "daimon:seed-legacy",
+    thread_id: "seed-legacy-thread",
+    principal: seedPrincipal,
+    conversation_scope: "noopolis:agora",
+    audience_key: "seed-legacy",
+    policy_version: "test",
+    allowed_scope_aliases: ["all", "current", "global"],
+    transport: "in_process",
+    nonce: "seed-legacy-register",
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    capability: "memory"
+  } as const;
+  if (!runtime.authority) throw new Error("test runtime has no authority");
+  await runtime.kernel.register({
+    request_id: "seed-legacy-register",
+    tool: "memory.register",
+    arguments: seedArgs,
+    envelope: { ...seedEnvelope, authority: runtime.authority.issue({ request_id: "seed-legacy-register", tool: "memory.register", arguments: seedArgs, envelope: seedEnvelope }) }
   });
 
   const handle = await setup.adapter.startAgent({
@@ -365,7 +375,7 @@ test("memory activity can be reloaded through Pi adapter across turns", async ()
   });
 
   const secondPrompt = setup.sessions[0]?.prompts[0] ?? "";
-  assert.ok(secondPrompt.includes("Legacy activity context.") || secondPrompt.includes("seed legacy event for continuity"));
+  assert.ok(secondPrompt.includes("Legacy activity context."));
 
   const events = await runtime.prepareTurn({
     eventId: "daimon:noop-wake",
