@@ -747,6 +747,20 @@ neither settles a closure proof. `state` is optional on the wire for the reason
 every additive member here is: a projection published before the seal existed
 must still parse, and its absence means "not stated", never "running".
 
+Deferral is bounded. A delivery that sits in `accepted` past
+`STALE_QUEUED_DELIVERY_MS` (48 h, `wakeAcceptanceRetention.ts`) without a live
+claim is no longer offered by `recoverable()`, and the next compaction stops it
+`queued_wake_stopped` so it can be collected. Without that bound every
+undisposed or failed delivery returned to `accepted` forever, headed every later
+batch ahead of new mail, and on 2026-10-05 213 of them (some two weeks old) held
+the store at its record bound, so every `POST /v2/wakes` was refused for an
+hour. For the same reason terminal compaction keeps the idempotency horizon only
+while active work leaves room for it (`terminalFilesToCompact`), opening a store
+prunes `.host-online-*` markers of hosts provably dead in its PID namespace
+(148 had accumulated, one per crash or recreate, all counting against the
+directory bound), and a store over its bound refuses as `WakeInboxFullError` —
+the control host's `queue_full`, never a 400 `invalid_request`.
+
 A delivery returned to the inbox for restart records the outcome that returned it,
 and **only a wake outcome can return one**. `attentionDispatcher` reclaims an
 undisposed delivery to `accepted` on exactly one condition — a wake result of
