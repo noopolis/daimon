@@ -1,5 +1,16 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
+/**
+ * How long a turn's capabilities outlive the turn's own wall-clock limit.
+ *
+ * A capability that expires before its turn does strands the worker mid-turn:
+ * on 2026-10-05 a 30-minute turn kept a fixed 15-minute grant, lost every tool
+ * at minute 16 (MCP 403, mcp_refused=expired) and then timed out unfiled. The
+ * turn timer is what ends a turn; the grant only has to not end it first.
+ */
+export const ENGINE_BROKER_CAPABILITY_TTL_MARGIN_MS = 60_000;
+export const engineBrokerCapabilityTtlMs = (turnTimeoutMs: number): number => turnTimeoutMs + ENGINE_BROKER_CAPABILITY_TTL_MARGIN_MS;
+
 type Grant = Readonly<{ agentId: string; turnId: string; digest: Buffer; expiresAt: number; maxRequests: number }>;
 
 export class EngineBrokerCapabilities {

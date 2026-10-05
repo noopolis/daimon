@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { engineBrokerCapabilityTtlMs } from "./engineBrokerCapabilities.js";
 import { decodeGrokHeadlessTurn } from "../pi/grokHeadlessResult.js";
 import { decodeGrokStreamUsage, type GrokStreamUsage } from "../pi/grokStreamUsage.js";
 import { ENGINE_BROKER_VERSION, type EngineBrokerFailureCode, type EngineBrokerTerminalResponse } from "./engineBrokerProtocol.js";
@@ -22,8 +23,8 @@ export class EngineBrokerTurnFailure extends Error {
 /** Everything one broker turn touches, injected so the accounting and limit paths run under test without a native launcher. */
 export type GrokEngineBrokerTurnDependencies = Readonly<{
   turns: EngineBrokerTurnRegistry;
-  proxy: Readonly<{ capabilities: Readonly<{ issue(agentId: string, turnId: string): string; revoke(turnId: string): void }>; registerIsolationGuard(turnId: string, guard: () => Promise<void>): void; revokeIsolationGuard(turnId: string): void; registerTurn(turnId: string, turn: GrokBrokerProxyTurn): void; revokeTurn(turnId: string): void }>;
-  mcp: Readonly<{ register(agentId: string, turnId: string, endpoint: string): string; revoke(turnId: string): void; observe?(turnId: string): EngineBrokerMcpCallObservation | undefined }>;
+  proxy: Readonly<{ capabilities: Readonly<{ issue(agentId: string, turnId: string, ttlMs?: number): string; revoke(turnId: string): void }>; registerIsolationGuard(turnId: string, guard: () => Promise<void>): void; revokeIsolationGuard(turnId: string): void; registerTurn(turnId: string, turn: GrokBrokerProxyTurn): void; revokeTurn(turnId: string): void }>;
+  mcp: Readonly<{ register(agentId: string, turnId: string, endpoint: string, ttlMs?: number): string; revoke(turnId: string): void; observe?(turnId: string): EngineBrokerMcpCallObservation | undefined }>;
   credentialStale(): boolean;
   prepareIsolation(registration: EngineBrokerServiceRegistration): Promise<() => Promise<void>>;
   runNative(input: NativeBrokerTurn, signal: AbortSignal): Promise<Readonly<NativeBrokerTurnResult>>;
@@ -65,7 +66,8 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     const isolationGuard = await deps.prepareIsolation(registration);
     deps.proxy.registerIsolationGuard(turnId, isolationGuard);
     deps.proxy.registerTurn(turnId, { policy: registration.model, meter });
-    const providerCapability = deps.proxy.capabilities.issue(agentId, turnId), mcpCapability = deps.mcp.register(agentId, turnId, mcpEndpoint);
+    const capabilityTtlMs = engineBrokerCapabilityTtlMs(limits.timeoutMs);
+    const providerCapability = deps.proxy.capabilities.issue(agentId, turnId, capabilityTtlMs), mcpCapability = deps.mcp.register(agentId, turnId, mcpEndpoint, capabilityTtlMs);
     const result = await deps.runNative({ slot: registration.slot, requestId: request.requestId, turnId, agentId, wakeId, prompt, providerCapability, mcpCapability }, controller.signal);
     nativeDiagnostic = result.diagnostic; output = result.text;
     if (result.workerUid !== registration.workerUid) throw new Error("engine broker worker identity mismatch");

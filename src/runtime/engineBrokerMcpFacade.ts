@@ -72,6 +72,7 @@ export const ENGINE_BROKER_MCP_SESSION_REQUESTS = 5;
  * two multiplicands above each say what they are.
  */
 export const ENGINE_BROKER_MCP_CAPABILITY_REQUESTS = GROK_WORKER_MAX_TURNS * ENGINE_BROKER_MCP_ROUND_REQUESTS + ENGINE_BROKER_MCP_SESSION_REQUESTS;
+/** Fallback only: a brokered turn passes `engineBrokerCapabilityTtlMs(limits.timeoutMs)`. */
 export const ENGINE_BROKER_MCP_CAPABILITY_TTL_MS = 15 * 60_000;
 
 class FacadeRefusal extends Error {}
@@ -182,13 +183,13 @@ export async function startEngineBrokerMcpFacade() {
   });
 
   return {
-    register(agentId: string, turnId: string, endpoint: string): string {
+    register(agentId: string, turnId: string, endpoint: string, ttlMs: number = ENGINE_BROKER_MCP_CAPABILITY_TTL_MS): string {
       const url = new URL(endpoint);
       if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.pathname !== "/mcp") throw new TypeError("invalid scoped MCP mount");
       if (targets.has(turnId)) throw new Error("MCP turn already registered");
       targets.set(turnId, url.href);
       calls.open(turnId);
-      return capabilities.issue(agentId, turnId, ENGINE_BROKER_MCP_CAPABILITY_TTL_MS, ENGINE_BROKER_MCP_CAPABILITY_REQUESTS);
+      return capabilities.issue(agentId, turnId, ttlMs, ENGINE_BROKER_MCP_CAPABILITY_REQUESTS);
     },
     revoke(turnId: string): void {
       targets.delete(turnId);
