@@ -28,6 +28,26 @@ export async function releaseHostRegistration(root: string, directory: Awaited<R
   await directory.sync();
 }
 
+/**
+ * Remove `.host-online-*` markers left by hosts that are provably dead in this
+ * PID namespace. A host only ever removes its own marker on a clean close, so
+ * every crash, kill or container recreate left one behind (148 by 2026-10-05),
+ * and the markers count against the store's directory bound. The opening host,
+ * live owners, other namespaces and anything unreadable are left untouched.
+ */
+export async function pruneDeadHostRegistrations(root: string, directory: Awaited<ReturnType<typeof open>>, self: StoreHostRegistration, liveness: (owner: StoreHostRegistration & Readonly<{ generation: string }>) => Promise<boolean>): Promise<number> {
+  let pruned = 0;
+  for (const entry of await readdir(root)) {
+    if (!/^\.host-online-[0-9a-f-]{36}\.json$/iu.test(entry) || entry === `.host-online-${self.owner_id}.json`) continue;
+    const owner = await readRegistration(path.join(root, entry)).catch(() => undefined);
+    // This very process is alive by definition, whichever store in it registered the marker.
+    if (owner === undefined || !sameNamespace(owner, self) || (owner.pid === self.pid && owner.process_start === self.process_start && owner.boot_id === self.boot_id) || await liveness({ ...owner, generation: owner.owner_id }).catch(() => true)) continue;
+    await unlink(path.join(root, entry)).catch(() => undefined); pruned += 1;
+  }
+  if (pruned > 0) await directory.sync();
+  return pruned;
+}
+
 /** Admin callers hold their durable offline lease before calling this. */
 export async function listHostRegistrations(root: string): Promise<readonly StoreHostRegistrationIdentity[]> { const result: StoreHostRegistrationIdentity[] = []; for (const entry of await readdir(root)) { if (/^\.host-online-[0-9a-f-]{36}\.json$/iu.test(entry)) result.push(await readRegistration(path.join(root, entry))); } return result; }
 /** Returns undefined when any registration is live, unknown, or changed. */

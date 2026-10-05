@@ -15,8 +15,8 @@ import {
 } from "./wakeAcceptanceTypes.js";
 import { sanitizeExecutionError, parseStoredWakeAcceptance, publicAcceptance, publicStatus, type StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
 import { assertOfflineReconciliationLeaseAvailable } from "./wakeAcceptanceReconciliation.js";
-import { acquireHostRegistration, releaseHostRegistration, type StoreHostRegistration } from "./storeCoordination.js";
-import { MAX_WAKE_ACCEPTANCE_RECORDS, terminalFilesToCompact } from "./wakeAcceptanceRetention.js";
+import { acquireHostRegistration, pruneDeadHostRegistrations, releaseHostRegistration, type StoreHostRegistration } from "./storeCoordination.js";
+import { MAX_WAKE_ACCEPTANCE_RECORDS, WAKE_ACCEPTANCE_COMPACTION_THRESHOLD, staleQueuedFilesToStop, terminalFilesToCompact } from "./wakeAcceptanceRetention.js";
 type Stored = StoredWakeAcceptanceRecord;
 type ActivityRow = OrganizationRuntimeWakeReceiptStatus & Readonly<{ active: boolean; queue_position?: number; execution_error?: string }>;
 export type WakeExecutionClaim = Readonly<{ acceptance_id: string; owner_id: string; generation: string; expires_at: string; acceptance_ids?: readonly string[]; execution_id?: string }>;
@@ -47,6 +47,7 @@ export class WakeAcceptanceStore {
       const real = await realpath(root);
       if (!same(identity(before), identity(after))) throw new Error("wake acceptance store changed during validation");
       const registration = await acquireHostRegistration(real, directory, owner);
+      await pruneDeadHostRegistrations(real, directory, registration, options.ownerLiveness ?? processIsAlive);
       return new WakeAcceptanceStore(real, directory, identity(before), registration, claimTtlMs, options.nowForTest ?? Date.now, owner, options.ownerLiveness ?? processIsAlive, options.afterFinalLockAssertion);
     } catch (error) {
       await directory.close().catch(() => undefined);
@@ -113,6 +114,8 @@ export class WakeAcceptanceStore {
       if (!agentIds.has(record.agent_id)) throw new Error("wake acceptance store contains an unknown agent authority");
       if (record.state === "accepted" || record.state === "running") {
         const claim = await this.readClaimOptional(this.claimFor(record));
+        // A long-parked delivery is no longer offered: it would head every batch ahead of today's mail. Compaction stops it.
+        if (staleQueuedFilesToStop([{ file, state: record.state, updatedAt: record.updated_at, acceptedAt: record.accepted_at, acceptanceId: record.acceptance_id, claimed: claim !== undefined && !expired(claim, this.now()) }], this.now()).length) continue;
         result.push(!record.deferred && record.execution_id === undefined && claim?.acceptance_ids?.includes(record.acceptance_id) && claim.execution_id !== undefined ? { ...record, execution_id: claim.execution_id } : record);
       }
     }
@@ -299,7 +302,7 @@ export class WakeAcceptanceStore {
     await this.verify();
     const entries = await readdir(this.root);
     const files = entries.filter((entry) => /^[a-f0-9]{64}\.json$/.test(entry));
-    if (files.length > MAX_WAKE_ACCEPTANCE_RECORDS || entries.length > MAX_WAKE_ACCEPTANCE_RECORDS + 128) throw new Error("wake acceptance store exceeds its bounded record limit");
+    if (files.length > MAX_WAKE_ACCEPTANCE_RECORDS || entries.length > MAX_WAKE_ACCEPTANCE_RECORDS + 128) throw new WakeInboxFullError("wake acceptance store exceeds its bounded record limit");
     return files;
   }
   private async claimFiles(): Promise<readonly string[]> { return (await readdir(this.root)).filter((entry) => /^[a-f0-9]{64}\.agent-claim$/.test(entry)); }
@@ -347,8 +350,10 @@ export class WakeAcceptanceStore {
   }
   private async compactTerminalRecords(): Promise<void> {
     const files = await this.files();
-    if (files.length < 2_112) return;
+    if (files.length < WAKE_ACCEPTANCE_COMPACTION_THRESHOLD) return;
     const records = await Promise.all(files.map(async (file) => ({ file, record: await this.read(path.join(this.root, file)) })));
+    const candidates = await Promise.all(records.map(async ({ file, record }) => ({ file, state: record.state, updatedAt: record.updated_at, acceptedAt: record.accepted_at, acceptanceId: record.acceptance_id, claimed: await this.readClaimOptional(this.claimFor(record)).then((claim) => claim !== undefined && !expired(claim, this.now())) })));
+    for (const file of staleQueuedFilesToStop(candidates, this.now())) { const entry = records.find((candidate) => candidate.file === file)!; entry.record = { ...entry.record, state: "stopped", code: "queued_wake_stopped", updated_at: new Date(this.now()).toISOString() }; await this.replace(path.join(this.root, file), entry.record); }
     for (const file of terminalFilesToCompact(records.map(({ file, record }) => ({ file, state: record.state, updatedAt: record.updated_at, acceptanceId: record.acceptance_id })))) {
       const record = records.find((candidate) => candidate.file === file)?.record;
       if (record !== undefined) this.acceptanceFiles.delete(record.acceptance_id);
@@ -372,7 +377,7 @@ export class WakeAcceptanceStore {
     if (!same(identity(entry), this.identity) || !same(identity(opened), this.identity) || (await realpath(this.root)) !== this.root) throw new Error("wake acceptance store changed after validation");
   }
 }
-export class WakeInboxFullError extends Error { constructor() { super("wake acceptance store has no capacity without deleting active work"); } }
+export class WakeInboxFullError extends Error { constructor(message = "wake acceptance store has no capacity without deleting active work") { super(message); } }
 export class WakeAcceptanceConflictError extends Error { constructor() { super("delivery id is already bound to a different request"); } }
 export class WakeExecutionClaimLostError extends Error { constructor() { super("wake execution claim was lost"); } }
 /** A container boundary requires deployment-authorized offline reconciliation. */
