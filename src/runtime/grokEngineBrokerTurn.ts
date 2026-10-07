@@ -66,14 +66,25 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
   const metering: BrokerTurnMetering = { usageLedgerPath: registration.usageLedgerPath, requestLedgerPath: engineBrokerRequestLedgerPathFor(registration.usageLedgerPath), sealLedgerPath: engineBrokerSealLedgerPathFor(registration.usageLedgerPath), agentId, wakeId };
   if (begun !== "start") { await ensureBrokerTurnLedgered(begun.ledger, turnId, metering); return replay(begun.replay); }
   const controller = new AbortController();
+  let worker: Promise<GrokWorkerProcess | undefined> | undefined;
   const meter = new GrokBrokerTurnMeter(limits, () => controller.abort());
   let cancelledByCaller = false;
   const onAbort = () => { cancelledByCaller = true; controller.abort(); }; signal?.addEventListener("abort", onAbort, { once: true }); if (signal?.aborted) { cancelledByCaller = true; controller.abort(); }
   const timer = setTimeout(() => meter.trip("timeout"), limits.timeoutMs); timer.unref?.();
+  // What was in flight, and which worker held the final reply, at the instant the
+  // turn ended — read before killing the worker can close its calls or empty its
+  // identity. A final reply the 1 s watchdog poll never saw is caught here too.
+  let inFlightAtEnd = false;
+  controller.signal.addEventListener("abort", () => {
+    let mcp = 0;
+    try { mcp = deps.mcp.activity?.(turnId)?.inFlight ?? 0; } catch { mcp = 0; }
+    inFlightAtEnd = mcp > 0 || meter.busy();
+    if (meter.finalReply() !== undefined) worker ??= (deps.observeWorker ?? findGrokWorkerProcess)(registration.workerUid).catch(() => undefined);
+  }, { once: true });
 
   let nativeDiagnostic: NativeBrokerDiagnostic | undefined, attested = false, output: string | undefined, rejected = false, sealed: GrokEngineBrokerTurnResult | undefined;
   // Set when the broker itself ended the turn (`grokEngineBrokerTurnEnd.ts`); the worker seen at the final reply names the turn it ended.
-  let endedBy: GrokBrokerTurnEndReason | undefined, worker: Promise<GrokWorkerProcess | undefined> | undefined;
+  let endedBy: GrokBrokerTurnEndReason | undefined;
   let watchdog: Readonly<{ stop(): void }> | undefined, isolationGuard: (() => Promise<void>) | undefined;
   try {
     isolationGuard = await deps.prepareIsolation(registration);
@@ -113,9 +124,7 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     // empty (bounded): the agent's next turn must not start a worker the
     // previous launcher handler's identity-wide reap would kill.
     if (controller.signal.aborted) await awaitGrokWorkerIdentityEmpty(registration.workerUid, deps.workerReapWaitMs ?? GROK_WORKER_REAP_WAIT_MS, deps.workerIdentityEmpty ?? grokWorkerIdentityEmpty);
-    let mcpInFlight = 0;
-    try { mcpInFlight = deps.mcp.activity?.(turnId)?.inFlight ?? 0; } catch { mcpInFlight = 0; }
-    const vetoed = cancelledByCaller || rejected || (output !== undefined && !attested) || mcpInFlight > 0 || meter.busy();
+    const vetoed = cancelledByCaller || rejected || (output !== undefined && !attested) || inFlightAtEnd;
     // Finished work is completed work. A worker that gave its final reply and was
     // then ended by the broker, refused its stdout by the launcher's output bound,
     // or left idle into the deadline did its job; only its exit went wrong.

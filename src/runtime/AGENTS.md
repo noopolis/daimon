@@ -158,8 +158,11 @@ used) and a final reply that idled into the deadline; never a token or request
 limit, a caller cancellation, a rejected or unattested stdout, a failed
 isolation attestation, or a model request or MCP tool call still in flight. Only
 `finish_reason: "stop"` is final — `length` was cut off and `content_filter`
-withheld. A turn the broker aborted is sealed only after its worker identity is
-empty (polled from `/proc`, bounded at `GROK_WORKER_REAP_WAIT_MS`, 10 s), so the
+withheld. What was in flight, and the worker that holds a final reply, are read
+synchronously at the instant the turn is aborted, before killing the worker can
+close its calls or empty its identity. A turn the broker aborted is sealed only
+after its worker identity — zombies included — has stayed empty for 300 ms
+(polled from `/proc`, bounded at `GROK_WORKER_REAP_WAIT_MS`, 10 s), so the
 agent's next worker is never started where the previous launcher handler's
 identity-wide reap would kill it. The reply is
 bounded at `GROK_FINAL_REPLY_MAX_BYTES` (64 KiB) with a marker naming what was

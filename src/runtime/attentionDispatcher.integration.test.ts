@@ -9,6 +9,7 @@ import { createOrganizationRuntimeHostForTest } from "./organizationRuntimeHost.
 import { createOrganizationRuntimeControlHostWithCoreForTest } from "./organizationRuntimeControl.js";
 import { parseOrganizationRuntimeWakeRequest } from "./organizationRuntime.js";
 import { wakeAcceptanceDigest } from "./wakeAcceptanceTypes.js";
+import { WakeAcceptanceStore } from "./wakeAcceptanceStore.js";
 
 const tokenEnv = "DAIMON_ATTENTION_INTEGRATION_TOKEN";
 const token = "attention-integration";
@@ -230,4 +231,31 @@ test("a delivery unhandled past a day is stopped where the dispatcher meets it, 
     assert.ok(f.calls.slice(before).every((event) => !event.text.includes("old work")), "the expired delivery is never offered again");
     assert.ok(logged.some((line) => /daimon: wake expired agent=alpha delivery=yesterday .* past 24h; stopped queued_wake_stopped/u.test(line)), logged.join("\n"));
   } finally { console.error = original; await f.cleanup(); }
+});
+
+test("a delivery stopped between selection and claim is never handed to cognition", async () => {
+  const original = WakeAcceptanceStore.prototype.transitionClaimed;
+  let raced = false;
+  // Another host's expiry lands after this dispatcher selected the delivery: on disk it is
+  // already `stopped` when this side moves it to `running`, which the store refuses as terminal.
+  WakeAcceptanceStore.prototype.transitionClaimed = async function (this: WakeAcceptanceStore, acceptanceId, claim, state, ...rest) {
+    if (state === "running" && !raced) {
+      raced = true;
+      const root = (this as unknown as { root: string }).root;
+      for (const file of await readdir(root)) {
+        if (!/^[0-9a-f]{64}\.json$/u.test(file)) continue;
+        const record = JSON.parse(await readFile(path.join(root, file), "utf8"));
+        if (record.acceptance_id === acceptanceId) await writeFile(path.join(root, file), JSON.stringify({ ...record, state: "stopped", code: "queued_wake_stopped" }), { mode: 0o600 });
+      }
+    }
+    return original.call(this, acceptanceId, claim, state, ...rest);
+  };
+  const f = await fixture();
+  try {
+    await f.control.accept(request("expired-elsewhere", "work"));
+    await until(() => raced);
+    await pause(60);
+    // Mutation guard: waking the batch anyway runs cognition on a stopped delivery.
+    assert.equal(f.calls.length, 0);
+  } finally { WakeAcceptanceStore.prototype.transitionClaimed = original; await f.cleanup(); }
 });

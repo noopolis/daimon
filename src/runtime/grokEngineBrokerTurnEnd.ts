@@ -115,7 +115,7 @@ export async function findGrokWorkerProcess(uid: number, procRoot = "/proc"): Pr
   return newest === undefined ? undefined : { pid: newest[0], startTicks: newest[1].startTicks };
 }
 
-/** No live (non-zombie) process owned by `uid` — the launcher's identity reap has finished, or nothing was left. */
+/** No process at all, zombies included, owned by `uid`. */
 export async function grokWorkerIdentityEmpty(uid: number, procRoot = "/proc"): Promise<boolean> {
   let entries: string[];
   try { entries = await readdir(procRoot); } catch { return true; }
@@ -123,8 +123,8 @@ export async function grokWorkerIdentityEmpty(uid: number, procRoot = "/proc"): 
     if (!/^\d+$/u.test(entry)) continue;
     try {
       const status = await readFile(`${procRoot}/${entry}/status`, "utf8");
+      // Zombies count, exactly as the launcher's own reap counts them.
       if (Number(/^Uid:\s+(\d+)/mu.exec(status)?.[1]) !== uid) continue;
-      if (/^State:\s+Z/mu.test(status)) continue;
       return false;
     } catch { /* exiting mid-scan */ }
   }
@@ -139,11 +139,16 @@ export async function grokWorkerIdentityEmpty(uid: number, procRoot = "/proc"): 
  * handler's identity-wide reap then kills. The bound keeps a wedged launcher
  * from holding the agent: past it the turn is sealed anyway, as before.
  */
-export async function awaitGrokWorkerIdentityEmpty(uid: number, timeoutMs: number, empty: (uid: number) => Promise<boolean> = grokWorkerIdentityEmpty, pollMs = 100): Promise<boolean> {
+export async function awaitGrokWorkerIdentityEmpty(uid: number, timeoutMs: number, empty: (uid: number) => Promise<boolean> = grokWorkerIdentityEmpty, pollMs = 100, stableMs = 300): Promise<boolean> {
+  // Empty must hold across a window longer than the launcher's own reap pass
+  // (10 ms between scans): one empty glimpse can fall between its kill and its
+  // re-scan, and that re-scan would kill the agent's next worker.
   const deadline = Date.now() + timeoutMs;
+  let emptySince: number | undefined;
   for (;;) {
-    if (await empty(uid).catch(() => true)) return true;
-    if (Date.now() >= deadline) return false;
+    const now = Date.now();
+    if (await empty(uid).catch(() => false)) { emptySince ??= now; if (now - emptySince >= stableMs) return true; } else emptySince = undefined;
+    if (now >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 }

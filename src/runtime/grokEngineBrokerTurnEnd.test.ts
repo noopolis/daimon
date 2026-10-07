@@ -31,7 +31,7 @@ function post(port: number, token: string): Promise<number> {
 }
 
 type Worker = (send: () => Promise<number>, signal: AbortSignal) => Promise<string>;
-type Extra = Readonly<{ signal?: AbortSignal; mcpInFlight?: () => number; identityEmpty?: (uid: number) => Promise<boolean>; maxRequests?: number }>;
+type Extra = Readonly<{ observe?: (uid: number) => Promise<{ pid: number; startTicks: string } | undefined>; signal?: AbortSignal; mcpInFlight?: () => number; identityEmpty?: (uid: number) => Promise<boolean>; maxRequests?: number }>;
 type Harness = Readonly<{ turn(wakeId: string, worker: Worker, timeoutMs?: number, extra?: Extra): ReturnType<typeof runGrokEngineBrokerTurn>; rows(): Promise<Record<string, unknown>[]>; endedStreams(): number }>;
 
 /** The real proxy, meter, registry and ledgers; the launcher is a scripted worker that answers the upstream bodies in order. */
@@ -49,7 +49,7 @@ async function withBroker(bodies: readonly string[], run: (harness: Harness) => 
           mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => { ended++; }, activity: () => ({ inFlight: extra.mcpInFlight?.() ?? 0, lastActivityAt: 0 }) },
           workerIdentityEmpty: extra.identityEmpty ?? (async () => true), workerReapWaitMs: 2_000,
           prepareIsolation: async () => async () => undefined,
-          observeWorker: async (uid) => uid === 2_200 ? { pid: 5_151, startTicks: "777" } : undefined,
+          observeWorker: extra.observe ?? (async (uid) => uid === 2_200 ? { pid: 5_151, startTicks: "777" } : undefined),
           turnEnd,
           runNative: async (input: NativeBrokerTurn, signal: AbortSignal): Promise<NativeBrokerTurnResult> => {
             const text = await worker(() => post(proxy.port, input.providerCapability), signal);
@@ -204,9 +204,10 @@ test("a broker-ended turn is sealed only after its worker identity empties", asy
   await withBroker([finalReply("DONE")], async ({ turn }) => {
     let polls = 0;
     // Mutation guard: sealing straight after the abort never polls the identity.
-    const result = await turn("wake-reap", async (send, signal) => { await send(); return untilAborted(signal); }, 30_000, { identityEmpty: async () => ++polls >= 3 });
+    const result = await turn("wake-reap", async (send, signal) => { await send(); return untilAborted(signal); }, 30_000, { identityEmpty: async () => ++polls >= 3 && polls !== 4 });
     assert.equal(result.outcome, "completed");
-    assert.equal(polls, 3);
+    // Empty must hold for a stable window: the glimpse at poll 3 is undone at 4, so it waits on from 5.
+    assert.ok(polls >= 8, `polled ${polls} times`);
   });
 });
 
@@ -243,4 +244,21 @@ test("stdout that reports an undeclared model is rejected even when a final repl
     // The worker exits after the grace would have expired, so the watchdog had already claimed the turn.
     await assert.rejects(turn("wake-model", async (send) => { await send(); await new Promise((resolve) => setTimeout(resolve, 150)); return stdout; }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.accounting?.outcome === "failed");
   });
+});
+
+test("an MCP call in flight at the deadline vetoes completion even though killing the worker later closes it", async () => {
+  await withBroker([finalReply("NOT-YET")], async ({ turn }) => {
+    let ended = false;
+    await assert.rejects(turn("wake-mcp-close", async (send, signal) => { await send(); signal.addEventListener("abort", () => { setTimeout(() => { ended = true; }, 0); }); return untilAborted(signal); }, 300, { mcpInFlight: () => ended ? 0 : 1 }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.accounting?.limitReason === "timeout");
+  }, { finalGraceMs: 60_000, idleMs: 60_000, pollMs: 10 });
+});
+
+test("a final reply the watchdog never polled is still completed at the deadline, its worker read at the abort", async () => {
+  await withBroker([finalReply("JUST-IN-TIME")], async ({ turn }) => {
+    let aborted = false;
+    // The worker is only observable until the turn is aborted, as in production once the launcher reaps it.
+    const result = await turn("wake-late", async (send, signal) => { await send(); signal.addEventListener("abort", () => { setTimeout(() => { aborted = true; }, 0); }); return untilAborted(signal); }, 300, { observe: async () => aborted ? undefined : { pid: 6_262, startTicks: "888" } });
+    assert.equal(result.outcome, "completed");
+    assert.equal(result.workerPid, 6_262);
+  }, { finalGraceMs: 60_000, idleMs: 60_000, pollMs: 60_000 });
 });

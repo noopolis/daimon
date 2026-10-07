@@ -68,6 +68,12 @@ export class AttentionDispatcher {
       if (acquired.state === "terminal") continue;
       const claimed: Claimed[] = selected.map((record) => ({ record, claim: acquired.claim, done: false }));
       for (const item of claimed) item.record = await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "running", undefined, undefined, agent.attention === undefined ? undefined : { execution_id: executionId, deferred: false });
+      // A member ended between selection and claim (another host's expiry or stop
+      // reached it first): never wake cognition on a batch that includes it.
+      if (claimed.some((item) => item.record.state !== "running")) {
+        for (const item of claimed.filter((value) => value.record.state === "running")) await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
+        await this.options.store.releaseClaim(claimed[0]!.claim); continue;
+      }
       const verdict = await this.options.fuse.admit(agentId, randomUUID(), agent.attention);
       if (verdict.state !== "admitted" || this.stopping) {
         for (const item of claimed) await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
