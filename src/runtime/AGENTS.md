@@ -785,7 +785,16 @@ claim is no longer offered by `recoverable()`; the dispatcher stops it
 `queued_wake_stopped` the first time it meets it and logs
 `daimon: wake expired agent=… delivery=… accepted_at=…` on stderr (compaction
 still stops any it never met). At 48 h, deliveries from 2026-10-05 were still
-being retried, and failing, through the 10-07 edition.
+being retried, and failing, through the 10-07 edition. Without that bound every
+undisposed or failed delivery returned to `accepted` forever, headed every later
+batch ahead of new mail, and on 2026-10-05 213 of them (some two weeks old) held
+the store at its record bound, so every `POST /v2/wakes` was refused for an
+hour. For the same reason terminal compaction keeps the idempotency horizon only
+while active work leaves room for it (`terminalFilesToCompact`), opening a store
+prunes `.host-online-*` markers of hosts provably dead in its PID namespace
+(148 had accumulated, one per crash or recreate, all counting against the
+directory bound), and a store over its bound refuses as `WakeInboxFullError` —
+the control host's `queue_full`, never a 400 `invalid_request`.
 
 A failed inbox execution is retried **once, at once, under a fresh execution
 id** (`daimon: wake requeued once …` on stderr). Keeping the failed execution's
@@ -796,16 +805,7 @@ right after a validated revision) until unrelated mail happened to arrive. The
 bound is the record's `execution_error`: set by a failure, cleared only by a
 disposition or a completed execution, so a delivery that fails again is
 deferred, with its dead execution id cleared, like any other. A rejected wake
-never reached cognition and keeps its id. Without that bound every
-undisposed or failed delivery returned to `accepted` forever, headed every later
-batch ahead of new mail, and on 2026-10-05 213 of them (some two weeks old) held
-the store at its record bound, so every `POST /v2/wakes` was refused for an
-hour. For the same reason terminal compaction keeps the idempotency horizon only
-while active work leaves room for it (`terminalFilesToCompact`), opening a store
-prunes `.host-online-*` markers of hosts provably dead in its PID namespace
-(148 had accumulated, one per crash or recreate, all counting against the
-directory bound), and a store over its bound refuses as `WakeInboxFullError` —
-the control host's `queue_full`, never a 400 `invalid_request`.
+never reached cognition and keeps its id.
 
 A delivery returned to the inbox for restart records the outcome that returned it,
 and **only a wake outcome can return one**. `attentionDispatcher` reclaims an
