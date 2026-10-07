@@ -262,3 +262,32 @@ test("a final reply the watchdog never polled is still completed at the deadline
     assert.equal(result.workerPid, 6_262);
   }, { finalGraceMs: 60_000, idleMs: 60_000, pollMs: 60_000 });
 });
+
+test("the worker is recorded while alive, so a final reply the watchdog never claimed survives a slow /proc read at the deadline", async () => {
+  await withBroker([finalReply("RECORDED-EARLY")], async ({ turn }) => {
+    let aborted = false;
+    // A yielding observer that only sees the worker before the abort: an abort-time read would lose it.
+    const observe = async () => { await new Promise((resolve) => setTimeout(resolve, 20)); return aborted ? undefined : { pid: 7_373, startTicks: "999" }; };
+    const result = await turn("wake-early", async (send, signal) => { await send(); signal.addEventListener("abort", () => { aborted = true; }); return untilAborted(signal); }, 400, { observe });
+    assert.equal(result.outcome, "completed");
+    assert.equal(result.workerPid, 7_373);
+  }, { finalGraceMs: 60_000, idleMs: 60_000, pollMs: 50 });
+});
+
+test("an output-limit failure with an MCP call still in flight is not completed", async () => {
+  await withBroker([finalReply("DONE")], async ({ turn }) => {
+    const turnId = turnIdFor("foreman", "wake-output-mcp");
+    await assert.rejects(turn("wake-output-mcp", async (send) => { await send(); throw decodeNativeBrokerResult(outputLimitFrame(turnId), turnId, []) as never; }, 30_000, { mcpInFlight: () => 1 }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.diagnostic?.failureClass === "output_limit");
+  }, { finalGraceMs: 60_000, idleMs: 60_000, pollMs: 10 });
+});
+
+test("the worker is read as soon as it has made a request, before any final reply exists", async () => {
+  await withBroker([toolCall, finalReply("DONE")], async ({ turn }) => {
+    let answered = false; const seen: boolean[] = [];
+    const observe = async () => { seen.push(answered); return { pid: 8_484, startTicks: "1000" }; };
+    // Mutation guard: reading the worker only at the final reply or the abort never reads it here.
+    const result = await turn("wake-read-early", async (send, signal) => { await send(); await new Promise((resolve) => setTimeout(resolve, 150)); answered = true; await send(); return untilAborted(signal); }, 30_000, { observe });
+    assert.equal(result.outcome, "completed");
+    assert.equal(seen[0], false, `reads: ${JSON.stringify(seen)}`);
+  }, { finalGraceMs: 60, idleMs: 60_000, pollMs: 20 });
+});

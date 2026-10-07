@@ -94,7 +94,11 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     const providerCapability = deps.proxy.capabilities.issue(agentId, turnId, capabilityTtlMs), mcpCapability = deps.mcp.register(agentId, turnId, mcpEndpoint, capabilityTtlMs);
     watchdog = watchGrokBrokerTurnEnd({
       meter, activity: () => deps.mcp.activity?.(turnId), signal: controller.signal, ...(deps.turnEnd === undefined ? {} : { timing: deps.turnEnd }),
-      onFinalReply: () => { worker = (deps.observeWorker ?? findGrokWorkerProcess)(registration.workerUid).catch(() => undefined); },
+      // The worker is read once, as soon as it has made a request — long before
+      // anything can end the turn and reap it — so a final reply is never left
+      // without the worker that gave it.
+      onPoll: () => { if (worker === undefined && meter.snapshot().requests > 0) worker = (deps.observeWorker ?? findGrokWorkerProcess)(registration.workerUid).catch(() => undefined); },
+      onFinalReply: () => { worker ??= (deps.observeWorker ?? findGrokWorkerProcess)(registration.workerUid).catch(() => undefined); },
       // An idle stall is a deadline of its own: it trips the meter as a timeout, so it seals like one.
       onEnd: (reason) => { endedBy = reason; if (reason === "idle") meter.trip("timeout"); else controller.abort(); }
     });
@@ -124,6 +128,8 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     // empty (bounded): the agent's next turn must not start a worker the
     // previous launcher handler's identity-wide reap would kill.
     if (controller.signal.aborted) await awaitGrokWorkerIdentityEmpty(registration.workerUid, deps.workerReapWaitMs ?? GROK_WORKER_REAP_WAIT_MS, deps.workerIdentityEmpty ?? grokWorkerIdentityEmpty);
+    // Not aborted (an output-limit failure, say): nothing was killed, so the live view is the true one.
+    if (!controller.signal.aborted) { let mcp = 0; try { mcp = deps.mcp.activity?.(turnId)?.inFlight ?? 0; } catch { mcp = 0; } inFlightAtEnd = mcp > 0 || meter.busy(); }
     const vetoed = cancelledByCaller || rejected || (output !== undefined && !attested) || inFlightAtEnd;
     // Finished work is completed work. A worker that gave its final reply and was
     // then ended by the broker, refused its stdout by the launcher's output bound,

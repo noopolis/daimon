@@ -46,6 +46,8 @@ export function watchGrokBrokerTurnEnd(input: Readonly<{
   meter: Pick<GrokBrokerTurnMeter, "finalReply" | "busy" | "lastActivityAt">;
   activity: () => EngineBrokerMcpActivity | undefined;
   onFinalReply: () => void;
+  /** Every poll, before any decision: the broker records the worker while it is certainly alive. */
+  onPoll?: () => void;
   onEnd: (reason: GrokBrokerTurnEndReason) => void;
   timing?: GrokBrokerTurnEndTiming;
   now?: () => number;
@@ -57,6 +59,7 @@ export function watchGrokBrokerTurnEnd(input: Readonly<{
   const check = (): void => {
     if (done) return;
     if (input.signal?.aborted === true) { stop(); return; }
+    try { input.onPoll?.(); } catch { /* observation only */ }
     const final = input.meter.finalReply();
     if (final !== undefined && notified !== final.index) {
       notified = final.index;
