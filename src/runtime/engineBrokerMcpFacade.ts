@@ -197,14 +197,6 @@ export async function startEngineBrokerMcpFacade() {
       endTurnStreams(turnId);
       calls.close(turnId);
     },
-    /**
-     * Ends the turn's open streams — the standalone GET SSE tunnel above all —
-     * without revoking its capability. The broker calls this once the model has
-     * given its final reply: the tunnel is the one channel that outlives every
-     * request, and a worker that finished its turn must not be left holding it.
-     * A tool call still in flight is torn down too, but a final reply has none.
-     */
-    endStreams(turnId: string): void { endTurnStreams(turnId); },
     /** Tool-call activity for the broker's idle watchdog; `undefined` for a turn never registered. */
     activity: (turnId: string): EngineBrokerMcpActivity | undefined => calls.activity(turnId),
     /**

@@ -45,7 +45,7 @@ async function withBroker(bodies: readonly string[], run: (harness: Harness) => 
         const registration: EngineBrokerServiceRegistration = { agentId: "foreman", slot: 0, workerUid: 2_200, workspace: "/workspace", profilePath: "/workers/0/.grok/sandbox.toml", eventsPath: "/workers/0/.grok/sessions/sandbox-events.jsonl", profileSha256: "a".repeat(64), usageLedgerPath: ledger, limits: { maxRequests: 32, maxTokens: 300_000, timeoutMs }, model: { model: "grok-4.6", reasoningEffort: "low" } };
         const deps: GrokEngineBrokerTurnDependencies = {
           turns: new EngineBrokerTurnRegistry(path.join(root, "turns")), proxy, credentialStale: () => false,
-          mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => undefined, endStreams: () => { ended++; }, activity: () => ({ inFlight: 0, lastActivityAt: 0 }) },
+          mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => { ended++; }, activity: () => ({ inFlight: 0, lastActivityAt: 0 }) },
           prepareIsolation: async () => async () => undefined,
           observeWorker: async (uid) => uid === 2_200 ? { pid: 5_151, startTicks: "777" } : undefined,
           turnEnd,
@@ -80,7 +80,7 @@ test("a worker that gave its final reply and never exits is ended by the broker 
     // Mutation guard: without the watchdog this waits for the 30 s wall clock.
     assert.ok(Date.now() - started < 5_000, `ended after ${Date.now() - started} ms`);
     assert.deepEqual({ ...result }, { text: "FILED-REVISION-3", workerPid: 5_151, workerUid: 2_200, workerStartTime: "777", outcome: "completed", usage: { input: 5_136, cacheRead: 256, cacheWrite: 0, output: 158, total: 5_550 }, model: "grok-4.6", requests: 2, limitReason: "none" });
-    assert.equal(endedStreams(), 1, "the MCP tunnel is closed the moment the final reply is seen");
+    assert.equal(endedStreams(), 1, "the turn's MCP routes, tunnel included, are revoked when the broker ends it");
     assert.deepEqual((await rows()).map((row) => [row.outcome, row.limit_reason, row.total, row.calls]), [["completed", "none", 5_550, 2]]);
   });
 });

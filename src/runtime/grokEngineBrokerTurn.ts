@@ -26,7 +26,7 @@ export class EngineBrokerTurnFailure extends Error {
 export type GrokEngineBrokerTurnDependencies = Readonly<{
   turns: EngineBrokerTurnRegistry;
   proxy: Readonly<{ capabilities: Readonly<{ issue(agentId: string, turnId: string, ttlMs?: number): string; revoke(turnId: string): void }>; registerIsolationGuard(turnId: string, guard: () => Promise<void>): void; revokeIsolationGuard(turnId: string): void; registerTurn(turnId: string, turn: GrokBrokerProxyTurn): void; revokeTurn(turnId: string): void }>;
-  mcp: Readonly<{ register(agentId: string, turnId: string, endpoint: string, ttlMs?: number): string; revoke(turnId: string): void; observe?(turnId: string): EngineBrokerMcpCallObservation | undefined; endStreams?(turnId: string): void; activity?(turnId: string): EngineBrokerMcpActivity | undefined }>;
+  mcp: Readonly<{ register(agentId: string, turnId: string, endpoint: string, ttlMs?: number): string; revoke(turnId: string): void; observe?(turnId: string): EngineBrokerMcpCallObservation | undefined; activity?(turnId: string): EngineBrokerMcpActivity | undefined }>;
   credentialStale(): boolean;
   prepareIsolation(registration: EngineBrokerServiceRegistration): Promise<() => Promise<void>>;
   runNative(input: NativeBrokerTurn, signal: AbortSignal): Promise<Readonly<NativeBrokerTurnResult>>;
@@ -79,7 +79,7 @@ export async function runGrokEngineBrokerTurn(deps: GrokEngineBrokerTurnDependen
     const providerCapability = deps.proxy.capabilities.issue(agentId, turnId, capabilityTtlMs), mcpCapability = deps.mcp.register(agentId, turnId, mcpEndpoint, capabilityTtlMs);
     watchdog = watchGrokBrokerTurnEnd({
       meter, activity: () => deps.mcp.activity?.(turnId), ...(deps.turnEnd === undefined ? {} : { timing: deps.turnEnd }),
-      onFinalReply: () => { worker = (deps.observeWorker ?? findGrokWorkerProcess)(registration.workerUid).catch(() => undefined); deps.mcp.endStreams?.(turnId); },
+      onFinalReply: () => { worker = (deps.observeWorker ?? findGrokWorkerProcess)(registration.workerUid).catch(() => undefined); },
       // An idle stall is a deadline of its own: it trips the meter as a timeout, so it seals like one.
       onEnd: (reason) => { endedBy = reason; if (reason === "idle") meter.trip("timeout"); else controller.abort(); }
     });

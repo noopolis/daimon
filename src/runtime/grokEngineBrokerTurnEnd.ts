@@ -10,18 +10,21 @@ import type { GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
  * Grok 1.0.34 answers, logs `handle_prompt.done ok:true`, ends its session
  * `turn_ended completed` — and then does not exit. Production measured it: 61
  * of 128 turns over two days sat 8–27 minutes after their last model request
- * until the wall-clock limit killed them, every one with the MCP Streamable
- * HTTP GET tunnel still open, and each was then sealed `failed/timeout` with
- * its work already done. The launcher only publishes a worker's output when the
- * worker exits, so waiting for the exit made the deadline the only way a turn
- * could end.
+ * until the wall-clock limit killed them, and each was then sealed
+ * `failed/timeout` with its work already done. Every one still had its MCP GET
+ * tunnel open, but that is a symptom: against the real 1.0.34 binary the tunnel
+ * held open, closed, refused (405) or absent all exit ~55 ms after `result`,
+ * and Grok reopens a closed tunnel within milliseconds, so closing it cannot
+ * end a worker. The launcher only publishes a worker's output when the worker
+ * exits, so waiting for the exit made the deadline the only way a turn could
+ * end.
  *
  * The proxy sees every model answer, so the broker knows when the model has
  * given its final reply: a successful response that called no tool and
  * stopped. From that point:
  *
- * 1. `onFinalReply` runs once — the broker closes the turn's MCP streams, the
- *    tunnel included, so a worker parked on it can finish exiting by itself.
+ * 1. `onFinalReply` runs once — the broker notes the worker it will end while
+ *    that worker is certainly still alive.
  * 2. After {@link GROK_BROKER_TURN_END}`.finalGraceMs` with no new model request
  *    and no tool call in flight, `onEnd("final_reply")` runs: the broker ends
  *    the worker and seals the turn completed with that reply.
