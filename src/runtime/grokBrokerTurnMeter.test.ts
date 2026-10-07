@@ -48,23 +48,24 @@ test("maxRequests is hard: request N+1 is refused with 429 before any upstream c
   assert.deepEqual(snapshot.usage, { input: 20, cacheRead: 0, cacheWrite: 0, output: 10, total: 30 });
 });
 
-test("the token ceiling overshoots by at most one request, counting cached input", async () => {
-  // 60 tokens per request (40 cached) against a 100-token ceiling: requests 1 and
-  // 2 are admitted (0 and 60 < 100 before each), request 3 is refused at 120.
-  // Mutation guard: checking the ceiling after forwarding, or ignoring cached
-  // tokens, admits a third request and this goes red.
+test("the token ceiling overshoots by at most one request, counting cached input at its billed weight", async () => {
+  // 60 tokens per request (40 cached) count 10 + 10 + 40 × 0.25 = 30 against a
+  // 100-token ceiling: requests 1–4 are admitted (0, 30, 60, 90 < 100 before
+  // each), request 5 is refused at 120.
+  // Mutation guard: checking the ceiling after forwarding admits a fifth request;
+  // counting cached tokens in full refuses the third. Either goes red.
   const meter = new GrokBrokerTurnMeter({ maxRequests: 32, maxTokens: 100, timeoutMs: 60_000 });
   await withProxy({ prompt_tokens: 50, completion_tokens: 10, total_tokens: 60, prompt_tokens_details: { cached_tokens: 40 } }, meter, async (send, calls) => {
     const statuses = [];
-    for (let index = 0; index < 5; index++) statuses.push((await send()).status);
-    assert.deepEqual(statuses, [200, 200, 429, 429, 429]);
-    assert.equal(calls(), 2);
+    for (let index = 0; index < 6; index++) statuses.push((await send()).status);
+    assert.deepEqual(statuses, [200, 200, 200, 200, 429, 429]);
+    assert.equal(calls(), 4);
   });
   const snapshot = meter.snapshot();
   assert.equal(snapshot.limitReason, "tokens");
   assert.equal(snapshot.tokens, 120);
-  assert.ok(snapshot.tokens - meter.limits.maxTokens <= 60, "overshoot is bounded by the last admitted request");
-  assert.deepEqual(snapshot.usage, { input: 20, cacheRead: 80, cacheWrite: 0, output: 20, total: 120 });
+  assert.ok(snapshot.tokens - meter.limits.maxTokens <= 30, "overshoot is bounded by the last admitted request");
+  assert.deepEqual(snapshot.usage, { input: 40, cacheRead: 160, cacheWrite: 0, output: 40, total: 240 }, "the sealed usage keeps every cached token at its raw count");
 });
 
 test("a request after the elapsed deadline is refused, and every admitted request is timed", async () => {

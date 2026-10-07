@@ -122,7 +122,10 @@ type TurnLog = {
   started: number; answered: number; undecoded: number; readonly live: Set<CallRecord>; readonly ended: CallRecord[];
   tunnelsOpened: number; tunnelsClosed: number; tunnelsDelivered: number; readonly openTunnels: Set<TunnelRecord>;
   readonly refusals: Record<EngineBrokerMcpRefusalReason, number>;
+  activityAt: number;
 };
+/** Whether a turn has a tool call in flight, and when one last started or ended (the turn's registration before any). */
+export type EngineBrokerMcpActivity = Readonly<{ inFlight: number; lastActivityAt: number }>;
 const noRefusals = (): Record<EngineBrokerMcpRefusalReason, number> => ({ route: 0, expired: 0, exhausted: 0, unrouted: 0, oversized: 0 });
 
 export class EngineBrokerMcpCallLog {
@@ -130,7 +133,7 @@ export class EngineBrokerMcpCallLog {
   constructor(private readonly now: () => number = Date.now) {}
 
   /** A turn the facade registered. Re-opening an id resets it: a turn id is unique per turn. */
-  open(turnId: string): void { this.turns.set(turnId, { started: 0, answered: 0, undecoded: 0, live: new Set(), ended: [], tunnelsOpened: 0, tunnelsClosed: 0, tunnelsDelivered: 0, openTunnels: new Set(), refusals: noRefusals() }); }
+  open(turnId: string): void { this.turns.set(turnId, { started: 0, answered: 0, undecoded: 0, live: new Set(), ended: [], tunnelsOpened: 0, tunnelsClosed: 0, tunnelsDelivered: 0, openTunnels: new Set(), refusals: noRefusals(), activityAt: this.now() }); }
   close(turnId: string): void { this.turns.delete(turnId); }
 
   /** A POST body the facade is about to relay. Anything that is not a `tools/call` records nothing. */
@@ -143,17 +146,20 @@ export class EngineBrokerMcpCallLog {
     const startedAt = this.now();
     const records = names.map((name): CallRecord => ({ name, startedAt }));
     log.started += records.length;
+    log.activityAt = startedAt;
     for (const record of records) log.live.add(record);
     let settled = false;
     return {
       answer: (): void => {
         if (settled) return; settled = true;
+        log.activityAt = this.now();
         log.answered += records.length;
         for (const record of records) log.live.delete(record);
       },
       close: (): void => {
         if (settled) return; settled = true;
         const endedAt = this.now();
+        log.activityAt = endedAt;
         for (const record of records) {
           log.live.delete(record); record.endedAt = endedAt;
           // Retain only as many as can be reported; the earliest are the ones
@@ -191,6 +197,16 @@ export class EngineBrokerMcpCallLog {
 
   /** A POST whose body the facade refused to read (over its own bound), which is a call it cannot name. */
   undecodable(turnId: string): void { const log = this.turns.get(turnId); if (log !== undefined) log.undecoded += 1; }
+
+  /**
+   * Tool-call activity only — never the GET tunnel, which stays open for the
+   * whole session whether or not anything happens. This is what an idle
+   * watchdog reads: a call in flight is work, an open tunnel is not.
+   */
+  activity(turnId: string): EngineBrokerMcpActivity | undefined {
+    const log = this.turns.get(turnId);
+    return log === undefined ? undefined : { inFlight: log.live.size, lastActivityAt: log.activityAt };
+  }
 
   observe(turnId: string): EngineBrokerMcpCallObservation | undefined {
     const log = this.turns.get(turnId);

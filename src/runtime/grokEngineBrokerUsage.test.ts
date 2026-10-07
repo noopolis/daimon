@@ -256,6 +256,10 @@ test("the broker meters only through the single sealing helper, on both terminal
   assert.equal(body.includes("turns.finish("), false, "every terminal record is sealed through the metering helper");
   assert.equal((body.match(/finishBrokerTurnWithUsage\(/gu) ?? []).length, 2);
   assert.ok(body.indexOf("return replay(") < body.indexOf("finishBrokerTurnWithUsage("), "a replay returns before any metering");
+  // The third terminal branch — finished work sealed from the final reply — seals through the same helper.
+  const finished = source.slice(source.indexOf("async function completedFromFinalReply"));
+  assert.equal(finished.includes("turns.finish("), false);
+  assert.equal((finished.match(/finishBrokerTurnWithUsage\(/gu) ?? []).length, 1);
 });
 
 /**

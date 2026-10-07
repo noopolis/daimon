@@ -8,7 +8,7 @@ import { ENGINE_BROKER_AUTH_STALE } from "./engineBrokerProtocol.js";
 import { DEFAULT_GROK_BROKER_MODEL_POLICY, parseGrokBrokerModelPolicy, type GrokBrokerModelPolicy } from "./grokBrokerModelPolicy.js";
 import { authorizeGrokBrokerProxyRequest } from "./grokBrokerProxyRequest.js";
 import { GROK_SESSION_TITLE_SINK_KEY } from "./grokBrokerWorkerConfig.js";
-import { parseGrokResponseToolNames, parseGrokUpstreamUsage, type GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
+import { parseGrokFinalReply, parseGrokResponseToolNames, parseGrokUpstreamUsage, type GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
 import { GROK_ENGINE_BROKER } from "../contracts/runtimeContractManifest.js";
 import { serveGrokInferenceGrant } from "./grokInferenceProxy.js";
 import type { GrokInferenceGrants } from "./grokInferenceGrants.js";
@@ -52,7 +52,7 @@ export class GrokBrokerProxyRefusal extends Error {
 }
 
 async function serve(request: IncomingMessage, response: ServerResponse, authority: GrokBrokerCredentialAuthority, upstream: GrokBrokerUpstream, capabilities: EngineBrokerCapabilities,guards:Map<string,()=>Promise<void>>,turns:Map<string,GrokBrokerProxyTurn>,fallback:GrokBrokerModelPolicy,grants?:GrokInferenceGrants): Promise<void> {
-  let settle:((usage:ReturnType<typeof parseGrokUpstreamUsage>,toolCalls?:readonly string[])=>void)|undefined;
+  let settle:((usage:ReturnType<typeof parseGrokUpstreamUsage>,toolCalls?:readonly string[],finalReply?:string)=>void)|undefined;
   let titleSink = false;
   // Every credential this request holds, kept only for this request and only so
   // that a fault's own words can be redacted against them exactly as the CLI
@@ -77,14 +77,18 @@ async function serve(request: IncomingMessage, response: ServerResponse, authori
     const admission=turn.meter.admit();
     if("refused" in admission){response.writeHead(429,{"content-type":"application/json","cache-control":"no-store"});response.end(JSON.stringify({error:"turn limit reached",limit:admission.refused}));return;}
     if("busy" in admission){response.writeHead(429,{"content-type":"application/json","cache-control":"no-store"});response.end('{"error":"turn request in flight"}');return;}
-    settle=(usage,toolCalls)=>{turn.meter.settle(admission.index,usage,body.byteLength,toolCalls);settle=undefined;};
+    settle=(usage,toolCalls,finalReply)=>{turn.meter.settle(admission.index,usage,body.byteLength,toolCalls,finalReply);settle=undefined;};
     let result = await upstream(prepared,admission.signal);
     if (result.status === 401) { token = authority.refreshAfterRejection?await authority.refreshAfterRejection(rejectedDigest):await authority.accessToken(true);secrets.push(token);const refreshedDigest=createHash("sha256").update(token).digest("hex"); prepared = { ...prepared, headers: { ...prepared.headers, authorization: `Bearer ${token}` } }; token = ""; result = await upstream(prepared,admission.signal);if(result.status===401)await authority.markRejected(refreshedDigest); }
     // Names only, bounded, and never a reason to fail the request: the response
     // is already buffered here for its usage block, so what the model tried to
     // call is in hand. A decoder fault records no attempt rather than a false
     // empty one, and never disturbs the turn.
-    settle?.(usageOrEstimate(result.body,result.headers["content-type"]),toolCallsOrNothing(result.body,result.headers["content-type"]));
+    // A successful answer that called nothing and stopped is the turn's final
+    // reply: the broker ends a worker that finished but did not exit on it
+    // (`grokEngineBrokerTurnEnd.ts`), and reports it when the launcher refused
+    // the worker's stdout. Observation only, exactly like the tool names.
+    settle?.(usageOrEstimate(result.body,result.headers["content-type"]),toolCallsOrNothing(result.body,result.headers["content-type"]),result.status===200?finalReplyOrNothing(result.body,result.headers["content-type"]):undefined);
     response.writeHead(result.status, { "content-type": result.headers["content-type"] ?? "application/json", "cache-control": "no-store" }); response.end(result.body);
   } catch (error) {
     settle?.(undefined);
@@ -194,6 +198,11 @@ const usageOrEstimate = (body: Uint8Array, contentType: string | undefined): Ret
 /** Instrumentation must never fail a turn: a throwing decoder records nothing, exactly as an undecodable response does. */
 const toolCallsOrNothing = (body: Uint8Array, contentType: string | undefined): readonly string[] | undefined => {
   try { return parseGrokResponseToolNames(body, contentType); } catch { return undefined; }
+};
+
+/** Instrumentation must never fail a turn: a throwing decoder reports no final reply. */
+const finalReplyOrNothing = (body: Uint8Array, contentType: string | undefined): string | undefined => {
+  try { return parseGrokFinalReply(body, contentType); } catch { return undefined; }
 };
 
 /** The body gate, refused non-retryably: a rejected body is a policy miss, never a transient fault. */

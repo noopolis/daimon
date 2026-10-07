@@ -3,7 +3,8 @@ import type { AttentionRegistry } from "./attention.js";
 import type { OrganizationRuntimeAgentConfig, OrganizationRuntimeHost, OrganizationRuntimeWakeResult } from "./organizationRuntime.js";
 import { engineFailureDetail } from "./organizationRuntimeHost.js";
 import { WakeAcceptanceStore, WakeExecutionClaimLostError, type WakeExecutionClaim } from "./wakeAcceptanceStore.js";
-import type { StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
+import { sanitizeExecutionError, type StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
+import { STALE_QUEUED_DELIVERY_MS } from "./wakeAcceptanceRetention.js";
 import { WakeFuse } from "./wakeFuse.js";
 import { ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES } from "../contracts/organizationRuntimeContract.js";
 import { grokDaimonToolName } from "../contracts/grokWorkerContract.js";
@@ -52,7 +53,9 @@ export class AttentionDispatcher {
     let observedGeneration = 0;
     while (!this.stopping) {
       const generation = this.generations.get(agentId) ?? 0;
-      const records = (await this.options.store.recoverable(new Set(this.options.agents.map((value) => value.id)))).filter((record) => record.agent_id === agentId);
+      const stale: StoredWakeAcceptanceRecord[] = [];
+      const records = (await this.options.store.recoverable(new Set(this.options.agents.map((value) => value.id)), (record) => { if (record.agent_id === agentId) stale.push(record); })).filter((record) => record.agent_id === agentId);
+      for (const record of stale) await expireStaleDelivery(this.options.store, record);
       const selected = selectBatch(records, agent, generation > observedGeneration);
       observedGeneration = generation; this.observed.set(agentId, generation);
       this.errors.delete(agentId);
@@ -65,6 +68,12 @@ export class AttentionDispatcher {
       if (acquired.state === "terminal") continue;
       const claimed: Claimed[] = selected.map((record) => ({ record, claim: acquired.claim, done: false }));
       for (const item of claimed) item.record = await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "running", undefined, undefined, agent.attention === undefined ? undefined : { execution_id: executionId, deferred: false });
+      // A member ended between selection and claim (another host's expiry or stop
+      // reached it first): never wake cognition on a batch that includes it.
+      if (claimed.some((item) => item.record.state !== "running")) {
+        for (const item of claimed.filter((value) => value.record.state === "running")) await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
+        await this.options.store.releaseClaim(claimed[0]!.claim); continue;
+      }
       const verdict = await this.options.fuse.admit(agentId, randomUUID(), agent.attention);
       if (verdict.state !== "admitted" || this.stopping) {
         for (const item of claimed) await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
@@ -134,9 +143,20 @@ export class AttentionDispatcher {
           await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted", result.code);
         }
         else if (agent.attention !== undefined) {
-          // Successful reading is not completion. A failed execution also keeps
-          // unfinished deliveries, and its execution id for idempotent retry.
-          await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted", undefined, undefined, { deferred: true, clear_execution: result.status === "completed", execution_error: executionError });
+          // Successful reading is not completion: an undisposed delivery of a
+          // completed execution waits, deferred, for new input.
+          //
+          // A failed execution is retried ONCE, at once, under a fresh execution
+          // id. Keeping its id made every retry the same broker turn — a sealed
+          // failure replays forever and a changed prompt is a turn conflict — and
+          // deferring it left work a turn died on (a token ceiling after a
+          // validated revision) waiting for mail that might never come. The
+          // record's `execution_error` is the bound: it is set by the failure and
+          // cleared only by a disposition or a completed execution, so a delivery
+          // that fails again is deferred like any other.
+          const retry = result.status === "failed" && item.record.execution_error === undefined;
+          await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted", undefined, undefined, { deferred: !retry, clear_execution: result.status !== "rejected", execution_error: executionError });
+          if (retry) console.error(`daimon: wake requeued once agent=${agent.id} delivery=${item.record.delivery_id} after ${sanitizeExecutionError(executionError ?? "engine_failed")}`);
         } else if (result.status === "completed") await store.transitionClaimed(item.record.acceptance_id, item.claim, "completed", undefined, result.text);
         else await store.transitionClaimed(item.record.acceptance_id, item.claim, "failed", "engine_failed", result.status === "failed" ? result.detail : undefined);
       }
@@ -158,6 +178,22 @@ export class AttentionDispatcher {
       const finish = (): void => { clearTimeout(timer); this.waiters.delete(finish); resolve(); };
       const timer = setTimeout(finish, Math.max(1, Date.parse(timestamp) - Date.now())); this.waiters.add(finish);
     });
+  }
+}
+
+/**
+ * A delivery past `STALE_QUEUED_DELIVERY_MS` is stopped `queued_wake_stopped`
+ * where the dispatcher meets it, and the stop is logged: an expiry nobody can
+ * see reads, in every artifact, like work that was never sent. Stopping goes
+ * through the store's accepted-only seam, so a delivery claimed in the meantime
+ * is left alone; a failure to stop is logged and retried on the next drain.
+ */
+async function expireStaleDelivery(store: WakeAcceptanceStore, record: StoredWakeAcceptanceRecord): Promise<void> {
+  try {
+    const stopped = await store.transitionAcceptedToStopped(record.acceptance_id, "queued_wake_stopped");
+    if (stopped.state === "stopped") console.error(`daimon: wake expired agent=${record.agent_id} delivery=${record.delivery_id} accepted_at=${record.accepted_at} unhandled past ${STALE_QUEUED_DELIVERY_MS / 3_600_000}h; stopped queued_wake_stopped${record.execution_error === undefined ? "" : ` (last failure: ${record.execution_error})`}`);
+  } catch (error) {
+    console.error(`daimon: wake expiry failed agent=${record.agent_id} delivery=${record.delivery_id}: ${error instanceof Error ? error.message : "unknown error"}`);
   }
 }
 

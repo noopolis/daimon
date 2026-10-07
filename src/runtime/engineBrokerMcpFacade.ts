@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Readable } from "node:stream";
 import { GROK_WORKER_MAX_TURNS } from "../contracts/grokWorkerContract.js";
 import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
-import { EngineBrokerMcpCallLog, type EngineBrokerMcpCallObservation, type EngineBrokerMcpRefusalReason, type EngineBrokerMcpTunnelHandle } from "./engineBrokerMcpCallLog.js";
+import { EngineBrokerMcpCallLog, type EngineBrokerMcpActivity, type EngineBrokerMcpCallObservation, type EngineBrokerMcpRefusalReason, type EngineBrokerMcpTunnelHandle } from "./engineBrokerMcpCallLog.js";
 
 /**
  * The brokered worker's only route to its own per-wake Daimon MCP mount. The
@@ -197,6 +197,8 @@ export async function startEngineBrokerMcpFacade() {
       endTurnStreams(turnId);
       calls.close(turnId);
     },
+    /** Tool-call activity for the broker's idle watchdog; `undefined` for a turn never registered. */
+    activity: (turnId: string): EngineBrokerMcpActivity | undefined => calls.activity(turnId),
     /**
      * What the facade saw of this turn's tool calls, GET tunnels and refusals,
      * or `undefined` for a turn
