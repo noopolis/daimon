@@ -7,10 +7,14 @@ export const MAX_WAKE_ACCEPTANCE_RECORDS = 2_176;
  * Inbox agents return every delivery they did not dispose of to `accepted`
  * (deferred), and a failed execution keeps its batch for retry. Nothing ever
  * ended either, so by 2026-10-05 213 deliveries up to two weeks old sat in the
- * queue, were re-offered on every wake, and kept the store at its bound. Two
- * days is longer than any delivery stays actionable in a daily organization.
+ * queue, were re-offered on every wake, and kept the store at its bound. A
+ * day is longer than any delivery stays actionable in a daily organization: at
+ * two days, deliveries from 2026-10-05 were still being retried — and failing —
+ * through 10-07's edition. The dispatcher stops an expired delivery
+ * `queued_wake_stopped` the first time it meets one and says so on stderr
+ * (`attentionDispatcher.ts`), rather than leaving it hidden until compaction.
  */
-export const STALE_QUEUED_DELIVERY_MS = 48 * 60 * 60_000;
+export const STALE_QUEUED_DELIVERY_MS = 24 * 60 * 60_000;
 
 export type RetentionCandidate = Readonly<{
   file: string;

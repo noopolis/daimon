@@ -107,7 +107,7 @@ export class WakeAcceptanceStore {
         ...(includeExecutionErrors && record.execution_error !== undefined ? { execution_error: record.execution_error } : {}) };
     });
   }
-  async recoverable(agentIds: ReadonlySet<string>): Promise<readonly Stored[]> {
+  async recoverable(agentIds: ReadonlySet<string>, onStale?: (record: Stored) => void): Promise<readonly Stored[]> {
     const result: Stored[] = [];
     for (const file of await this.files()) {
       const record = await this.read(path.join(this.root, file));
@@ -115,7 +115,7 @@ export class WakeAcceptanceStore {
       if (record.state === "accepted" || record.state === "running") {
         const claim = await this.readClaimOptional(this.claimFor(record));
         // A long-parked delivery is no longer offered: it would head every batch ahead of today's mail. Compaction stops it.
-        if (staleQueuedFilesToStop([{ file, state: record.state, updatedAt: record.updated_at, acceptedAt: record.accepted_at, acceptanceId: record.acceptance_id, claimed: claim !== undefined && !expired(claim, this.now()) }], this.now()).length) continue;
+        if (staleQueuedFilesToStop([{ file, state: record.state, updatedAt: record.updated_at, acceptedAt: record.accepted_at, acceptanceId: record.acceptance_id, claimed: claim !== undefined && !expired(claim, this.now()) }], this.now()).length) { onStale?.(record); continue; }
         result.push(!record.deferred && record.execution_id === undefined && claim?.acceptance_ids?.includes(record.acceptance_id) && claim.execution_id !== undefined ? { ...record, execution_id: claim.execution_id } : record);
       }
     }
@@ -125,12 +125,12 @@ export class WakeAcceptanceStore {
     return this.serialize(async () => await this.transitionNow(acceptanceId, state, code));
   }
   /** Fuse race seam: never stops a record that was claimed after enumeration. */
-  transitionAcceptedToStopped(acceptanceId: string): Promise<Stored> {
+  transitionAcceptedToStopped(acceptanceId: string, code: "host_stopping" | "queued_wake_stopped" = "host_stopping"): Promise<Stored> {
     return this.serialize(async () => {
       const target = await this.pathForAcceptanceId(acceptanceId);
       const prior = await this.read(target);
       if (prior.state !== "accepted") return prior;
-      const record: Stored = { ...prior, state: "stopped", code: "host_stopping", updated_at: new Date().toISOString() };
+      const record: Stored = { ...prior, state: "stopped", code, updated_at: new Date().toISOString() };
       await this.replace(target, record);
       return record;
     });

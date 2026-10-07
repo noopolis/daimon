@@ -121,13 +121,19 @@ for (const failure of ["rejected", "engine_failed"] as const) test(`${failure} r
       for (const message of turn.messages) await turn.disposition(message.delivery_id, "complete");
     };
     await f.control.accept(request("broken", "handle the delivery"));
+    // A failed execution is retried once, at once, under a fresh execution id;
+    // a rejected one never ran and is not.
+    if (failure === "engine_failed") await until(() => f.attempts === 2);
     await until(async () => (await f.control.availability(token))!.state === "paused");
+    await until(async () => (await f.control.activityV2(token))!.executions!.length === 0);
+    if (failure === "engine_failed") assert.notEqual(f.calls[0]!.id, f.calls[1]!.id, "the retry is a new turn, never a replay of the sealed failure");
     const availability = (await f.control.availability(token))!;
     assert.match(availability.agents[0]!.error!, failure === "rejected" ? /invalid_request/ : /provider unavailable/);
     assert.doesNotMatch(JSON.stringify(availability), /secret-review-token/);
     const original = (await f.control.activityV2(token))!.items[0]!;
     assert.equal(original.state, "accepted"); assert.equal(original.deferred, true);
-    assert.ok(original.execution_id);
+    // A rejected wake never reached cognition and keeps its id; a failed one is cleared so no retry can replay it.
+    if (failure === "rejected") assert.ok(original.execution_id); else assert.equal(original.execution_id, undefined);
     const attempts = f.attempts; await pause(40); assert.equal(f.attempts, attempts);
     await f.restart(); await pause(40); assert.equal(f.attempts, attempts);
     assert.equal((await f.control.availability(token))!.state, "paused");
@@ -136,7 +142,8 @@ for (const failure of ["rejected", "engine_failed"] as const) test(`${failure} r
     await f.control.accept(request("unrelated", "other work"));
     await until(async () => (await f.control.activityV2(token))!.items.some((item) => item.delivery_id === "unrelated" && item.state === "completed"));
     assert.equal((await f.control.availability(token))!.state, "paused");
-    assert.equal((await f.control.activityV2(token))!.items.find((item) => item.delivery_id === "broken")!.execution_id, original.execution_id);
+    // It ran again with the unrelated delivery and failed again: deferred, its dead execution id cleared.
+    assert.equal((await f.control.activityV2(token))!.items.find((item) => item.delivery_id === "broken")!.execution_id, undefined);
     // Durable diagnostics are redacted at rest, not only at the HTTP surface.
     for (const file of await readdir(f.root)) if (file.endsWith(".json")) assert.doesNotMatch(await readFile(path.join(f.root, file), "utf8"), /secret-review-token/);
     fail = false; await f.control.accept(request("retry", "new input"));
@@ -182,4 +189,41 @@ test("availability stays answerable when durable work belongs to an old agent id
     const status = await f.control.availability(token);
     assert.ok(status); assert.equal(status.agents[0]!.pending, 0);
   } finally { await f.cleanup(); }
+});
+
+test("work a failed turn left undone is retried once at once and completes, with no new input needed", async () => {
+  const f = await fixture(); let failures = 1;
+  try {
+    f.onTurn = async (_event, turn) => {
+      if (failures-- > 0) throw new Error("engine broker turn failed (limit_exceeded; limit=tokens)");
+      for (const message of turn.messages) await turn.disposition(message.delivery_id, "complete");
+    };
+    await f.control.accept(request("revision", "file the validated revision"));
+    // Mutation guard: deferring the failed delivery (the old behaviour) leaves it waiting for mail that never comes.
+    await until(async () => (await f.control.activityV2(token))!.items.every((item) => item.state === "completed"));
+    assert.equal(f.attempts, 2);
+    assert.equal((await f.control.availability(token))!.agents[0]!.error, undefined);
+  } finally { await f.cleanup(); }
+});
+
+test("a delivery unhandled past a day is stopped where the dispatcher meets it, and the expiry is logged", async () => {
+  const f = await fixture(); const logged: string[] = []; const original = console.error;
+  console.error = (...values: unknown[]) => { logged.push(values.map(String).join(" ")); };
+  try {
+    f.reject = true; await f.control.accept(request("yesterday", "old work"));
+    await until(async () => (await f.control.availability(token))!.state === "paused");
+    await until(async () => (await f.control.activityV2(token))!.executions!.length === 0);
+    const file = (await readdir(f.root)).find((name) => /^[0-9a-f]{64}\.json$/.test(name))!;
+    const record = JSON.parse(await readFile(path.join(f.root, file), "utf8"));
+    record.accepted_at = new Date(Date.now() - 25 * 60 * 60_000).toISOString();
+    await writeFile(path.join(f.root, file), JSON.stringify(record), { mode: 0o600 });
+    f.reject = false; const before = f.calls.length;
+    await f.control.accept(request("today", "new work"));
+    await until(async () => (await f.control.activityV2(token))!.items.some((item) => item.delivery_id === "today" && item.state === "completed"));
+    const expired = (await f.control.activityV2(token))!.items.find((item) => item.delivery_id === "yesterday")!;
+    // Mutation guard: hiding it in `recoverable()` without stopping it leaves it `accepted` and silent.
+    assert.deepEqual([expired.state, expired.code], ["stopped", "queued_wake_stopped"]);
+    assert.ok(f.calls.slice(before).every((event) => !event.text.includes("old work")), "the expired delivery is never offered again");
+    assert.ok(logged.some((line) => /daimon: wake expired agent=alpha delivery=yesterday .* past 24h; stopped queued_wake_stopped/u.test(line)), logged.join("\n"));
+  } finally { console.error = original; await f.cleanup(); }
 });
