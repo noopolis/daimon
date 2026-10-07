@@ -33,8 +33,13 @@ The proxy is the per-turn limit gate too. Every broker turn registers a
 proxy forwards nothing for a turn without one. After a body is proven a lean
 worker request and before any upstream call, the meter refuses request
 `maxRequests + 1`, any request past `timeoutMs`, and any request once the
-upstream-reported running total (prompt tokens *including* cached, plus
-completion) has reached `maxTokens` — HTTP 429, and the tripped limit aborts
+upstream-reported running total has reached `maxTokens` — fresh prompt tokens
+and completion in full, cached prompt reads at their billed weight
+(`GROK_CACHED_INPUT_TOKEN_WEIGHT`, 0.25; `grokCeilingTokens`). Counting cached
+reads in full made the ceiling a context-size limit: writing and composing turns
+re-read their conversation every request, 85–90% from cache, and died at a
+1.1M "ceiling" having spent about a third of it. Sealed usage and every ledger
+keep cached tokens at their raw count. HTTP 429, and the tripped limit aborts
 the worker through the ordinary cancel/kill path. The token ceiling is checked
 between requests, so a turn overshoots it by at most the last admitted
 request. That bound holds only because a turn has at most one upstream request
@@ -132,6 +137,33 @@ Deleting the meter fallback, or refusing that frame shape in
 `decodeNativeBrokerResult`, both turn it red. The one window that stays open is
 the documented one: a crash before the turn record's rename, which the next
 boot seals `usage: null`.
+
+**A brokered turn ends when its model has answered, not when its worker
+exits** (`grokEngineBrokerTurnEnd.ts`). Grok 1.0.34 regularly logs
+`handle_prompt.done ok:true`, ends its session `turn_ended completed`, and then
+does not exit; 61 of 128 production turns over two days sat 8–27 minutes after
+their last model request until the wall clock killed them and were sealed
+`failed/timeout` with their work done. The launcher publishes stdout only on
+exit, so the broker decides instead, from what the proxy already sees: a
+successful response that called no tool and stopped is the final reply
+(`parseGrokFinalReply`, recorded by the meter only while it is the latest
+request; a new request forgets it). After `finalGraceMs` (15 s) with no model
+request and no MCP tool call in flight, the broker aborts the native run — the
+ordinary cancel/kill path — and seals the turn **completed** with that reply,
+the proxy-metered usage, and the worker it observed in `/proc` while it was
+alive (`findGrokWorkerProcess`: the identity's one process whose parent it does
+not own). The same completed seal covers finished work the launcher's output
+bound refused (`output_limit` publishes nothing; the frame's own worker pid is
+used) and a final reply that idled into the deadline; never a token or request
+limit, a client cancellation, or a failed isolation attestation. The reply is
+bounded at `GROK_FINAL_REPLY_MAX_BYTES` (64 KiB) with a marker naming what was
+cut. A worker with no model request, no tool call in flight and no activity of
+either for `idleMs` (10 min) trips the meter's `timeout` and seals as one —
+the backstop for a stall that never answers; Grok's own shell tools are
+invisible to the broker, hence minutes. The open MCP GET tunnel every hung turn
+showed is a symptom: against the real binary, Grok exits ~55 ms after `result`
+with the tunnel open, closed, refused or absent, and reopens a closed tunnel
+within milliseconds, so closing it is not a way to end a worker.
 
 Evaluator inference grants (`grokInferenceGrants.ts`) let Paideia judges and
 the DSPy optimizer — uid 2000, the trusted evaluator side — spend the broker's
@@ -748,9 +780,23 @@ every additive member here is: a projection published before the seal existed
 must still parse, and its absence means "not stated", never "running".
 
 Deferral is bounded. A delivery that sits in `accepted` past
-`STALE_QUEUED_DELIVERY_MS` (48 h, `wakeAcceptanceRetention.ts`) without a live
-claim is no longer offered by `recoverable()`, and the next compaction stops it
-`queued_wake_stopped` so it can be collected. Without that bound every
+`STALE_QUEUED_DELIVERY_MS` (24 h, `wakeAcceptanceRetention.ts`) without a live
+claim is no longer offered by `recoverable()`; the dispatcher stops it
+`queued_wake_stopped` the first time it meets it and logs
+`daimon: wake expired agent=… delivery=… accepted_at=…` on stderr (compaction
+still stops any it never met). At 48 h, deliveries from 2026-10-05 were still
+being retried, and failing, through the 10-07 edition.
+
+A failed inbox execution is retried **once, at once, under a fresh execution
+id** (`daimon: wake requeued once …` on stderr). Keeping the failed execution's
+id made every retry the same broker turn — a sealed failure replays forever, a
+changed prompt is a turn conflict that reaches the host as `engine broker
+unavailable` — and deferring it parked work a turn died on (a token ceiling
+right after a validated revision) until unrelated mail happened to arrive. The
+bound is the record's `execution_error`: set by a failure, cleared only by a
+disposition or a completed execution, so a delivery that fails again is
+deferred, with its dead execution id cleared, like any other. A rejected wake
+never reached cognition and keeps its id. Without that bound every
 undisposed or failed delivery returned to `accepted` forever, headed every later
 batch ahead of new mail, and on 2026-10-05 213 of them (some two weeks old) held
 the store at its record bound, so every `POST /v2/wakes` was refused for an
