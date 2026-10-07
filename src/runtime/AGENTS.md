@@ -155,7 +155,13 @@ alive (`findGrokWorkerProcess`: the identity's newest process whose parent it
 does not own — a previous turn's hung worker may still be beside it). The same completed seal covers finished work the launcher's output
 bound refused (`output_limit` publishes nothing; the frame's own worker pid is
 used) and a final reply that idled into the deadline; never a token or request
-limit, a client cancellation, or a failed isolation attestation. The reply is
+limit, a caller cancellation, a rejected or unattested stdout, a failed
+isolation attestation, or a model request or MCP tool call still in flight. Only
+`finish_reason: "stop"` is final — `length` was cut off and `content_filter`
+withheld. A turn the broker aborted is sealed only after its worker identity is
+empty (polled from `/proc`, bounded at `GROK_WORKER_REAP_WAIT_MS`, 10 s), so the
+agent's next worker is never started where the previous launcher handler's
+identity-wide reap would kill it. The reply is
 bounded at `GROK_FINAL_REPLY_MAX_BYTES` (64 KiB) with a marker naming what was
 cut. A worker with no model request, no tool call in flight and no activity of
 either for `idleMs` (10 min) trips the meter's `timeout` and seals as one —
