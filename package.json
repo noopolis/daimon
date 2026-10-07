@@ -33,7 +33,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/noopolis/daimon.git"
+    "url": "git+ssh://git@github.com/noopolis/daimon-harness.git"
   },
   "publishConfig": {
     "access": "public"
