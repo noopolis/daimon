@@ -3,7 +3,7 @@ import type { AttentionRegistry } from "./attention.js";
 import type { OrganizationRuntimeAgentConfig, OrganizationRuntimeHost, OrganizationRuntimeWakeResult } from "./organizationRuntime.js";
 import { engineFailureDetail } from "./organizationRuntimeHost.js";
 import { WakeAcceptanceStore, WakeExecutionClaimLostError, type WakeExecutionClaim } from "./wakeAcceptanceStore.js";
-import type { StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
+import { sanitizeExecutionError, type StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
 import { STALE_QUEUED_DELIVERY_MS } from "./wakeAcceptanceRetention.js";
 import { WakeFuse } from "./wakeFuse.js";
 import { ORGANIZATION_RUNTIME_MAX_STRING_CODEPOINTS, ORGANIZATION_RUNTIME_MAX_WAKE_TEXT_BYTES } from "../contracts/organizationRuntimeContract.js";
@@ -150,7 +150,7 @@ export class AttentionDispatcher {
           // that fails again is deferred like any other.
           const retry = result.status === "failed" && item.record.execution_error === undefined;
           await store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted", undefined, undefined, { deferred: !retry, clear_execution: result.status !== "rejected", execution_error: executionError });
-          if (retry) console.error(`daimon: wake requeued once agent=${agent.id} delivery=${item.record.delivery_id} after ${executionError}`);
+          if (retry) console.error(`daimon: wake requeued once agent=${agent.id} delivery=${item.record.delivery_id} after ${sanitizeExecutionError(executionError ?? "engine_failed")}`);
         } else if (result.status === "completed") await store.transitionClaimed(item.record.acceptance_id, item.claim, "completed", undefined, result.text);
         else await store.transitionClaimed(item.record.acceptance_id, item.claim, "failed", "engine_failed", result.status === "failed" ? result.detail : undefined);
       }

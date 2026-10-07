@@ -544,3 +544,37 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
   } while (Date.now() < deadline);
   throw new Error("timed out");
 }
+
+test("expiry never stops a delivery claimed after it was enumerated", async () => {
+  const root = await privateRoot();
+  try {
+    const store = await WakeAcceptanceStore.open(root, testStoreOptions);
+    const accepted = await store.accept(parseWakeAcceptanceRequest(request("raced")));
+    // A dispatcher claims it between the stale enumeration and the expiry.
+    const claim = await store.acquireClaim(accepted.record.acceptance_id, "77777777-7777-4777-8777-777777777777", [accepted.record.acceptance_id], randomUUID());
+    assert.equal(claim.state, "acquired");
+    // Mutation guard: checking only the receipt state stops claimed work.
+    assert.equal((await store.transitionAcceptedToStopped(accepted.record.acceptance_id, "queued_wake_stopped")).state, "accepted");
+    // The claim is per agent; once it is released, an unclaimed delivery expires.
+    if (claim.state === "acquired") await store.releaseClaim(claim.claim);
+    const unclaimed = await store.accept(parseWakeAcceptanceRequest(request("idle")));
+    assert.deepEqual([(await store.transitionAcceptedToStopped(unclaimed.record.acceptance_id, "queued_wake_stopped")).state, (await store.status(unclaimed.record.acceptance_id))?.code], ["stopped", "queued_wake_stopped"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a crash before the claim is released cannot hand a retried delivery its failed execution id back", async () => {
+  const root = await privateRoot();
+  try {
+    const store = await WakeAcceptanceStore.open(root, testStoreOptions);
+    const accepted = await store.accept(parseWakeAcceptanceRequest(request("retry-me")));
+    const executionId = randomUUID();
+    const claim = await store.acquireClaim(accepted.record.acceptance_id, "66666666-6666-4666-8666-666666666666", [accepted.record.acceptance_id], executionId);
+    if (claim.state !== "acquired") throw new Error("claim missing");
+    await store.transitionClaimed(accepted.record.acceptance_id, claim.claim, "running", undefined, undefined, { execution_id: executionId, deferred: false });
+    // The failed execution is returned for one fresh retry; the process dies before releaseClaim.
+    await store.transitionClaimed(accepted.record.acceptance_id, claim.claim, "accepted", undefined, undefined, { deferred: false, clear_execution: true, execution_error: "engine_failed: limit" });
+    const [recovered] = await store.recoverable(new Set(["alpha"]));
+    // Mutation guard: restoring the claim's id replays the sealed broker failure forever.
+    assert.equal(recovered?.execution_id, undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

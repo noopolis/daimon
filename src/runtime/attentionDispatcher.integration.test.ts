@@ -192,10 +192,11 @@ test("availability stays answerable when durable work belongs to an old agent id
 });
 
 test("work a failed turn left undone is retried once at once and completes, with no new input needed", async () => {
-  const f = await fixture(); let failures = 1;
+  const f = await fixture(); let failures = 1; const logged: string[] = []; const original = console.error;
+  console.error = (...values: unknown[]) => { logged.push(values.map(String).join(" ")); };
   try {
     f.onTurn = async (_event, turn) => {
-      if (failures-- > 0) throw new Error("engine broker turn failed (limit_exceeded; limit=tokens)");
+      if (failures-- > 0) throw new Error("engine broker turn failed (limit_exceeded; limit=tokens) Bearer secret-review-token");
       for (const message of turn.messages) await turn.disposition(message.delivery_id, "complete");
     };
     await f.control.accept(request("revision", "file the validated revision"));
@@ -203,7 +204,10 @@ test("work a failed turn left undone is retried once at once and completes, with
     await until(async () => (await f.control.activityV2(token))!.items.every((item) => item.state === "completed"));
     assert.equal(f.attempts, 2);
     assert.equal((await f.control.availability(token))!.agents[0]!.error, undefined);
-  } finally { await f.cleanup(); }
+    assert.ok(logged.some((line) => line.includes("daimon: wake requeued once agent=alpha delivery=revision")), logged.join("\n"));
+    // Mutation guard: logging the raw execution error writes the credential to stderr.
+    assert.ok(logged.every((line) => !line.includes("secret-review-token")));
+  } finally { console.error = original; await f.cleanup(); }
 });
 
 test("a delivery unhandled past a day is stopped where the dispatcher meets it, and the expiry is logged", async () => {

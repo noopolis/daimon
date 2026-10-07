@@ -259,12 +259,11 @@ export function parseGrokResponseToolNames(body: Uint8Array, contentType: string
 
 /** The most of a final reply the broker reports; the rest is cut at a marker that says how much. */
 export const GROK_FINAL_REPLY_MAX_BYTES = 64 * 1024;
-const NOT_FINAL = new Set(["tool_calls", "function_call"]);
 
 /**
  * The answer text of a response that *stopped*: every `delta.content` of a
  * streamed response (or the `message.content` of a JSON one) in order, when
- * some choice carries a `finish_reason` that is not a tool call.
+ * some choice finished with `finish_reason: "stop"` and none with anything else.
  *
  * `undefined` means the response is not known to be final — undecodable, no
  * finish reason, or one that asks for a tool. The caller additionally requires
@@ -281,8 +280,10 @@ export function parseGrokFinalReply(body: Uint8Array, contentType: string | unde
     for (const choice of candidate.choices) {
       if (!isRecord(choice)) continue;
       for (const source of [choice.delta, choice.message]) if (isRecord(source) && typeof source.content === "string") text += source.content;
+      // Only `stop` is a finished answer: `length` was cut off mid-answer and
+      // `content_filter` withheld it, so neither is work done.
       if (typeof choice.finish_reason === "string" && choice.finish_reason.length > 0) {
-        if (NOT_FINAL.has(choice.finish_reason)) return undefined;
+        if (choice.finish_reason !== "stop") return undefined;
         stopped = true;
       }
     }

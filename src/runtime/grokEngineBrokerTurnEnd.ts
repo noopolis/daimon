@@ -38,6 +38,8 @@ import type { GrokBrokerTurnMeter } from "./grokBrokerTurnMeter.js";
  */
 export type GrokBrokerTurnEndTiming = Readonly<{ finalGraceMs: number; idleMs: number; pollMs: number }>;
 export const GROK_BROKER_TURN_END: GrokBrokerTurnEndTiming = Object.freeze({ finalGraceMs: 15_000, idleMs: 10 * 60_000, pollMs: 1_000 });
+/** How long a turn the broker aborted waits for its worker identity to empty before it is sealed. */
+export const GROK_WORKER_REAP_WAIT_MS = 10_000;
 export type GrokBrokerTurnEndReason = "final_reply" | "idle";
 
 export function watchGrokBrokerTurnEnd(input: Readonly<{
@@ -47,11 +49,14 @@ export function watchGrokBrokerTurnEnd(input: Readonly<{
   onEnd: (reason: GrokBrokerTurnEndReason) => void;
   timing?: GrokBrokerTurnEndTiming;
   now?: () => number;
+  /** The turn's own abort: once anything else ended the turn, the watchdog never claims it. */
+  signal?: AbortSignal;
 }>): Readonly<{ stop(): void }> {
   const timing = input.timing ?? GROK_BROKER_TURN_END, now = input.now ?? Date.now;
   let notified: number | undefined, done = false;
   const check = (): void => {
     if (done) return;
+    if (input.signal?.aborted === true) { stop(); return; }
     const final = input.meter.finalReply();
     if (final !== undefined && notified !== final.index) {
       notified = final.index;
@@ -108,4 +113,37 @@ export async function findGrokWorkerProcess(uid: number, procRoot = "/proc"): Pr
   const roots = [...owned].filter(([, value]) => !owned.has(value.parent)).sort(([, left], [, right]) => BigInt(right.startTicks) > BigInt(left.startTicks) ? 1 : BigInt(right.startTicks) < BigInt(left.startTicks) ? -1 : 0);
   const newest = roots[0];
   return newest === undefined ? undefined : { pid: newest[0], startTicks: newest[1].startTicks };
+}
+
+/** No live (non-zombie) process owned by `uid` — the launcher's identity reap has finished, or nothing was left. */
+export async function grokWorkerIdentityEmpty(uid: number, procRoot = "/proc"): Promise<boolean> {
+  let entries: string[];
+  try { entries = await readdir(procRoot); } catch { return true; }
+  for (const entry of entries) {
+    if (!/^\d+$/u.test(entry)) continue;
+    try {
+      const status = await readFile(`${procRoot}/${entry}/status`, "utf8");
+      if (Number(/^Uid:\s+(\d+)/mu.exec(status)?.[1]) !== uid) continue;
+      if (/^State:\s+Z/mu.test(status)) continue;
+      return false;
+    } catch { /* exiting mid-scan */ }
+  }
+  return true;
+}
+
+/**
+ * Waits, bounded, for the worker identity to empty after the broker ended a
+ * turn. Ending a turn kills the launcher's client; the launcher handler then
+ * kills and reaps the identity on its own schedule. Sealing first would let
+ * the agent's next turn start a worker on the same identity that the previous
+ * handler's identity-wide reap then kills. The bound keeps a wedged launcher
+ * from holding the agent: past it the turn is sealed anyway, as before.
+ */
+export async function awaitGrokWorkerIdentityEmpty(uid: number, timeoutMs: number, empty: (uid: number) => Promise<boolean> = grokWorkerIdentityEmpty, pollMs = 100): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await empty(uid).catch(() => true)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
 }

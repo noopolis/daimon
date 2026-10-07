@@ -31,7 +31,8 @@ function post(port: number, token: string): Promise<number> {
 }
 
 type Worker = (send: () => Promise<number>, signal: AbortSignal) => Promise<string>;
-type Harness = Readonly<{ turn(wakeId: string, worker: Worker, timeoutMs?: number): ReturnType<typeof runGrokEngineBrokerTurn>; rows(): Promise<Record<string, unknown>[]>; endedStreams(): number }>;
+type Extra = Readonly<{ signal?: AbortSignal; mcpInFlight?: () => number; identityEmpty?: (uid: number) => Promise<boolean>; maxRequests?: number }>;
+type Harness = Readonly<{ turn(wakeId: string, worker: Worker, timeoutMs?: number, extra?: Extra): ReturnType<typeof runGrokEngineBrokerTurn>; rows(): Promise<Record<string, unknown>[]>; endedStreams(): number }>;
 
 /** The real proxy, meter, registry and ledgers; the launcher is a scripted worker that answers the upstream bodies in order. */
 async function withBroker(bodies: readonly string[], run: (harness: Harness) => Promise<void>, turnEnd = { finalGraceMs: 60, idleMs: 400, pollMs: 10 }): Promise<void> {
@@ -41,11 +42,12 @@ async function withBroker(bodies: readonly string[], run: (harness: Harness) => 
   const ledger = path.join(root, "usage.jsonl");
   try {
     await run({
-      turn: (wakeId, worker, timeoutMs = 30_000) => {
-        const registration: EngineBrokerServiceRegistration = { agentId: "foreman", slot: 0, workerUid: 2_200, workspace: "/workspace", profilePath: "/workers/0/.grok/sandbox.toml", eventsPath: "/workers/0/.grok/sessions/sandbox-events.jsonl", profileSha256: "a".repeat(64), usageLedgerPath: ledger, limits: { maxRequests: 32, maxTokens: 300_000, timeoutMs }, model: { model: "grok-4.6", reasoningEffort: "low" } };
+      turn: (wakeId, worker, timeoutMs = 30_000, extra = {}) => {
+        const registration: EngineBrokerServiceRegistration = { agentId: "foreman", slot: 0, workerUid: 2_200, workspace: "/workspace", profilePath: "/workers/0/.grok/sandbox.toml", eventsPath: "/workers/0/.grok/sessions/sandbox-events.jsonl", profileSha256: "a".repeat(64), usageLedgerPath: ledger, limits: { maxRequests: extra.maxRequests ?? 32, maxTokens: 300_000, timeoutMs }, model: { model: "grok-4.6", reasoningEffort: "low" } };
         const deps: GrokEngineBrokerTurnDependencies = {
           turns: new EngineBrokerTurnRegistry(path.join(root, "turns")), proxy, credentialStale: () => false,
-          mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => { ended++; }, activity: () => ({ inFlight: 0, lastActivityAt: 0 }) },
+          mcp: { register: () => "mcp-capability-0123456789abcdef", revoke: () => { ended++; }, activity: () => ({ inFlight: extra.mcpInFlight?.() ?? 0, lastActivityAt: 0 }) },
+          workerIdentityEmpty: extra.identityEmpty ?? (async () => true), workerReapWaitMs: 2_000,
           prepareIsolation: async () => async () => undefined,
           observeWorker: async (uid) => uid === 2_200 ? { pid: 5_151, startTicks: "777" } : undefined,
           turnEnd,
@@ -54,7 +56,7 @@ async function withBroker(bodies: readonly string[], run: (harness: Harness) => 
             return { text, workerPid: 4_242, workerUid: 2_200, startTicks: 99n, diagnostic: { status: "ok", stage: "output", failureClass: "none", profileApplied: false, exitCode: 0, termSignal: 0, workerPid: 4_242, workerUid: 2_200, startTicks: "99" } };
           }
         };
-        return runGrokEngineBrokerTurn(deps, registration, wakeId, "prompt", "http://127.0.0.1:43124/mcp");
+        return runGrokEngineBrokerTurn(deps, registration, wakeId, "prompt", "http://127.0.0.1:43124/mcp", extra.signal);
       },
       rows: async () => (await readFile(ledger, "utf8").catch(() => "")).split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line) as Record<string, unknown>),
       endedStreams: () => ended
@@ -169,6 +171,9 @@ test("the final-reply parser accepts only a stopped answer without tool calls, a
   assert.equal(parseGrokFinalReply(body(finalReply("hello world")), "text/event-stream"), "hello world");
   assert.equal(parseGrokFinalReply(body(toolCall), "text/event-stream"), undefined);
   assert.equal(parseGrokFinalReply(body(sse([{ choices: [{ index: 0, delta: { content: "no finish" } }] }])), "text/event-stream"), undefined);
+  // Cut off or withheld is not finished.
+  assert.equal(parseGrokFinalReply(body(sse([{ choices: [{ index: 0, delta: { content: "half an ans" }, finish_reason: "length" }] }])), "text/event-stream"), undefined);
+  assert.equal(parseGrokFinalReply(body(sse([{ choices: [{ index: 0, delta: {}, finish_reason: "content_filter" }] }])), "text/event-stream"), undefined);
   assert.equal(parseGrokFinalReply(body(JSON.stringify({ choices: [{ index: 0, message: { content: "json" }, finish_reason: "stop" }] })), "application/json"), "json");
   assert.equal(boundGrokFinalReply("short", 100), "short");
   const cut = boundGrokFinalReply("é".repeat(100), 80);
@@ -193,4 +198,49 @@ test("the worker process is the identity's newest live process whose parent it d
     await proc(50, 2_200, 10, "S", "3000");
     assert.deepEqual(await findGrokWorkerProcess(2_200, root), { pid: 50, startTicks: "3000" });
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a broker-ended turn is sealed only after its worker identity empties", async () => {
+  await withBroker([finalReply("DONE")], async ({ turn }) => {
+    let polls = 0;
+    // Mutation guard: sealing straight after the abort never polls the identity.
+    const result = await turn("wake-reap", async (send, signal) => { await send(); return untilAborted(signal); }, 30_000, { identityEmpty: async () => ++polls >= 3 });
+    assert.equal(result.outcome, "completed");
+    assert.equal(polls, 3);
+  });
+});
+
+test("a caller cancellation after the final reply stays a cancellation", async () => {
+  await withBroker([finalReply("DONE")], async ({ turn }) => {
+    const caller = new AbortController();
+    const turnId = turnIdFor("foreman", "wake-cancel");
+    // Mutation guard: without the caller veto, the output-limit failure that ends the cancelled worker is sealed completed.
+    await assert.rejects(turn("wake-cancel", async (send) => { await send(); caller.abort(); throw decodeNativeBrokerResult(outputLimitFrame(turnId), turnId, []) as never; }, 30_000, { signal: caller.signal }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.code === "cancelled");
+  }, { finalGraceMs: 60_000, idleMs: 60_000, pollMs: 10 });
+});
+
+test("a request limit is never finished work, even beside a final reply and an output-limit failure", async () => {
+  await withBroker([finalReply("EARLY"), toolCall], async ({ turn }) => {
+    const turnId = turnIdFor("foreman", "wake-limit");
+    await assert.rejects(turn("wake-limit", async (send) => { await send(); await send(); throw decodeNativeBrokerResult(outputLimitFrame(turnId), turnId, []) as never; }, 30_000, { maxRequests: 1 }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.accounting?.limitReason === "requests");
+  }, { finalGraceMs: 60_000, idleMs: 60_000, pollMs: 10 });
+});
+
+test("a final reply that hits the deadline with an MCP call still in flight is not completed", async () => {
+  await withBroker([finalReply("NOT-YET")], async ({ turn }) => {
+    await assert.rejects(turn("wake-mcp", async (send, signal) => { await send(); return untilAborted(signal); }, 300, { mcpInFlight: () => 1 }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.accounting?.limitReason === "timeout");
+  }, { finalGraceMs: 60_000, idleMs: 60_000, pollMs: 10 });
+});
+
+test("stdout that reports an undeclared model is rejected even when a final reply was seen", async () => {
+  await withBroker([finalReply("DONE")], async ({ turn }) => {
+    const session = "01a0ad21-a90f-7f71-8054-93fdb4334d6a", frameUsage = { input_tokens: 2_568, output_tokens: 79, cache_read_input_tokens: 128, cache_creation_input_tokens: 0 };
+    const stdout = [
+      { type: "system", subtype: "init", session_id: session },
+      { type: "assistant", message: { id: "msg_0", type: "message", role: "assistant", model: "daimon-broker-grok", content: [{ type: "text", text: "DONE" }], stop_reason: "end_turn", usage: frameUsage }, parent_tool_use_id: null, session_id: session },
+      { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "DONE", stop_reason: "end_turn", total_cost_usd: 0.001, usage: frameUsage, modelUsage: { "grok-4.5-build": {} }, session_id: session }
+    ].map((frame) => JSON.stringify(frame)).join("\n");
+    // The worker exits after the grace would have expired, so the watchdog had already claimed the turn.
+    await assert.rejects(turn("wake-model", async (send) => { await send(); await new Promise((resolve) => setTimeout(resolve, 150)); return stdout; }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.accounting?.outcome === "failed");
+  });
 });

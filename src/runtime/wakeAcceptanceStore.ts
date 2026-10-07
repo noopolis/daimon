@@ -116,7 +116,7 @@ export class WakeAcceptanceStore {
         const claim = await this.readClaimOptional(this.claimFor(record));
         // A long-parked delivery is no longer offered: it would head every batch ahead of today's mail. Compaction stops it.
         if (staleQueuedFilesToStop([{ file, state: record.state, updatedAt: record.updated_at, acceptedAt: record.accepted_at, acceptanceId: record.acceptance_id, claimed: claim !== undefined && !expired(claim, this.now()) }], this.now()).length) { onStale?.(record); continue; }
-        result.push(!record.deferred && record.execution_id === undefined && claim?.acceptance_ids?.includes(record.acceptance_id) && claim.execution_id !== undefined ? { ...record, execution_id: claim.execution_id } : record);
+        result.push(!record.deferred && record.execution_id === undefined && record.execution_error === undefined && claim?.acceptance_ids?.includes(record.acceptance_id) && claim.execution_id !== undefined ? { ...record, execution_id: claim.execution_id } : record);
       }
     }
     return result.sort((left, right) => left.accepted_at.localeCompare(right.accepted_at) || left.acceptance_id.localeCompare(right.acceptance_id));
@@ -129,8 +129,8 @@ export class WakeAcceptanceStore {
     return this.serialize(async () => {
       const target = await this.pathForAcceptanceId(acceptanceId);
       const prior = await this.read(target);
-      if (prior.state !== "accepted") return prior;
-      const record: Stored = { ...prior, state: "stopped", code, updated_at: new Date().toISOString() };
+      const claim = prior.state === "accepted" ? await this.readClaimOptional(this.claimFor(prior)) : undefined;
+      if (prior.state !== "accepted" || (claim !== undefined && !expired(claim, this.now()))) return prior; const record: Stored = { ...prior, state: "stopped", code, updated_at: new Date().toISOString() };
       await this.replace(target, record);
       return record;
     });
