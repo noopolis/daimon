@@ -151,8 +151,8 @@ request; a new request forgets it). After `finalGraceMs` (15 s) with no model
 request and no MCP tool call in flight, the broker aborts the native run — the
 ordinary cancel/kill path — and seals the turn **completed** with that reply,
 the proxy-metered usage, and the worker it observed in `/proc` while it was
-alive (`findGrokWorkerProcess`: the identity's one process whose parent it does
-not own). The same completed seal covers finished work the launcher's output
+alive (`findGrokWorkerProcess`: the identity's newest process whose parent it
+does not own — a previous turn's hung worker may still be beside it). The same completed seal covers finished work the launcher's output
 bound refused (`output_limit` publishes nothing; the frame's own worker pid is
 used) and a final reply that idled into the deadline; never a token or request
 limit, a client cancellation, or a failed isolation attestation. The reply is

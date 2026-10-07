@@ -81,10 +81,11 @@ export type GrokWorkerProcess = Readonly<{ pid: number; startTicks: string }>;
  * A turn the broker ends early never receives the launcher's result frame (a
  * cancelled client is not written to), yet a completed response must name the
  * worker it came from. One identity carries at most one turn at a time
- * (`native/AGENTS.md`), so the process owned by `uid` whose parent is *not*
- * owned by `uid` is that turn's worker: the process the launcher forked. More
- * than one such root means the identity is not what the contract says, and the
- * answer is `undefined` rather than a guess.
+ * (`native/AGENTS.md`), so a process owned by `uid` whose parent is *not* owned
+ * by `uid` is a worker the launcher forked. A previous turn's worker can still
+ * be alive beside it — a hung worker is exactly what this module exists for, and
+ * its kill is the launcher's — so the newest such root (the latest start time)
+ * is this turn's: turns of one identity are sequential.
  */
 export async function findGrokWorkerProcess(uid: number, procRoot = "/proc"): Promise<GrokWorkerProcess | undefined> {
   let entries: string[];
@@ -104,8 +105,7 @@ export async function findGrokWorkerProcess(uid: number, procRoot = "/proc"): Pr
       owned.set(Number(entry), { parent, startTicks });
     } catch { /* a process exiting mid-scan is not part of the answer */ }
   }
-  const roots = [...owned].filter(([, value]) => !owned.has(value.parent));
-  if (roots.length !== 1) return undefined;
-  const [pid, value] = roots[0]!;
-  return { pid, startTicks: value.startTicks };
+  const roots = [...owned].filter(([, value]) => !owned.has(value.parent)).sort(([, left], [, right]) => BigInt(right.startTicks) > BigInt(left.startTicks) ? 1 : BigInt(right.startTicks) < BigInt(left.startTicks) ? -1 : 0);
+  const newest = roots[0];
+  return newest === undefined ? undefined : { pid: newest[0], startTicks: newest[1].startTicks };
 }

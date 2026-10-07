@@ -176,7 +176,7 @@ test("the final-reply parser accepts only a stopped answer without tool calls, a
   assert.match(cut, /^é+\n\[… \d+ bytes truncated by the Daimon broker …\]$/u);
 });
 
-test("the worker process is the identity's one process whose parent it does not own", async () => {
+test("the worker process is the identity's newest live process whose parent it does not own", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "daimon-proc-"));
   const proc = async (pid: number, uid: number, parent: number, state = "S", start = `${pid}00`) => {
     await mkdir(path.join(root, String(pid)));
@@ -187,7 +187,10 @@ test("the worker process is the identity's one process whose parent it does not 
     await proc(10, 0, 1); await proc(20, 2_200, 10); await proc(21, 2_200, 20); await proc(30, 2_201, 10);
     assert.deepEqual(await findGrokWorkerProcess(2_200, root), { pid: 20, startTicks: "2000" });
     assert.equal(await findGrokWorkerProcess(2_202, root), undefined);
-    await proc(40, 2_200, 10);
-    assert.equal(await findGrokWorkerProcess(2_200, root), undefined, "two roots is not an identity the contract allows");
+    // A previous turn's hung worker (started earlier) beside this turn's: the newest root is this turn's.
+    await proc(40, 2_200, 10, "S", "500"); await proc(41, 2_200, 10, "Z", "9000");
+    assert.deepEqual(await findGrokWorkerProcess(2_200, root), { pid: 20, startTicks: "2000" });
+    await proc(50, 2_200, 10, "S", "3000");
+    assert.deepEqual(await findGrokWorkerProcess(2_200, root), { pid: 50, startTicks: "3000" });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
