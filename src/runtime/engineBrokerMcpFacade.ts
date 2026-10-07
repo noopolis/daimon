@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Readable } from "node:stream";
 import { GROK_WORKER_MAX_TURNS } from "../contracts/grokWorkerContract.js";
 import { EngineBrokerCapabilities } from "./engineBrokerCapabilities.js";
-import { EngineBrokerMcpCallLog, type EngineBrokerMcpCallObservation, type EngineBrokerMcpRefusalReason, type EngineBrokerMcpTunnelHandle } from "./engineBrokerMcpCallLog.js";
+import { EngineBrokerMcpCallLog, type EngineBrokerMcpActivity, type EngineBrokerMcpCallObservation, type EngineBrokerMcpRefusalReason, type EngineBrokerMcpTunnelHandle } from "./engineBrokerMcpCallLog.js";
 
 /**
  * The brokered worker's only route to its own per-wake Daimon MCP mount. The
@@ -197,6 +197,16 @@ export async function startEngineBrokerMcpFacade() {
       endTurnStreams(turnId);
       calls.close(turnId);
     },
+    /**
+     * Ends the turn's open streams — the standalone GET SSE tunnel above all —
+     * without revoking its capability. The broker calls this once the model has
+     * given its final reply: the tunnel is the one channel that outlives every
+     * request, and a worker that finished its turn must not be left holding it.
+     * A tool call still in flight is torn down too, but a final reply has none.
+     */
+    endStreams(turnId: string): void { endTurnStreams(turnId); },
+    /** Tool-call activity for the broker's idle watchdog; `undefined` for a turn never registered. */
+    activity: (turnId: string): EngineBrokerMcpActivity | undefined => calls.activity(turnId),
     /**
      * What the facade saw of this turn's tool calls, GET tunnels and refusals,
      * or `undefined` for a turn
