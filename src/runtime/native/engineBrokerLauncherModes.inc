@@ -1,3 +1,17 @@
+/* The broker that must be this client's parent: the pid it names, else the
+   parent at entry. A malformed name is refused rather than ignored. */
+static pid_t client_broker(void) {
+  const char *named = getenv("DAIMON_BROKER_PID");
+  char *end = NULL;
+  long value;
+  if (named == NULL)
+    return getppid();
+  errno = 0;
+  value = strtol(named, &end, 10);
+  if (errno || end == named || *end || value < 2 || value > INT32_MAX)
+    return -1;
+  return (pid_t)value;
+}
 static int client_mode(void) {
   struct dbl_request request;
   uint32_t prompt_length = 0, capability_length = 0;
@@ -6,7 +20,22 @@ static int client_mode(void) {
   struct dbl_result result;
   struct sockaddr_un a = {.sun_family = AF_UNIX};
   int s = -1, p = -1, c = -1, ok = -1;
+  pid_t broker = client_broker();
   if (getuid() != DBL_BROKER_UID)
+    goto done;
+  /* The client dies with the broker that spawned it. The broker kills its
+     client whenever a turn ends, but a broker that dies cannot: the client is
+     detached into its own session, so it lived on, holding its handler's
+     socket open, and the handler kept supervising a turn nobody would ever
+     read — spinning a full core for ever before the launcher had a ceiling,
+     and outliving the turn by up to DBL_MAX_TURN_SECONDS after. Closing the
+     socket is the one signal the handler acts on, so the client must not
+     outlive its broker. The death signal only covers a death after the prctl;
+     the broker names itself in DAIMON_BROKER_PID so a client whose broker was
+     already gone before it ran — adopted by init or a subreaper — refuses
+     instead of connecting. Without that name only the race after this line's
+     first getppid() is closed. */
+  if (broker < 1 || prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() != broker)
     goto done;
   if (full_read(STDIN_FILENO, &request, sizeof(request)) ||
       full_read(STDIN_FILENO, &prompt_length, sizeof(prompt_length)) ||

@@ -59,6 +59,32 @@ The suite compiles the launcher with `-DDBL_MAX_TURN_SECONDS=8` because it
 cannot wait 4200 seconds to prove a bound; drop that `-D` and the ceiling case
 fails on its socket deadline instead of passing on a timeout.
 
+**A handler leaked whenever its broker died, and the client is what kept it.**
+The handler ends a turn when its client disconnects, and the broker always
+kills its `--client` when a turn ends — while the broker is alive. A broker that
+dies cannot: the client is spawned detached into its own session, so it lived
+on, blocked reading its result and holding the handler's socket open, and the
+handler kept supervising a turn nobody would ever read. With Grok's habit of
+closing its stdout and staying alive, that was the production leak exactly:
+`orphaned_client_case` built against the pre-ceiling launcher reports
+`handler 23 outlived its dead broker's turn, burning 199 ticks in 2s` — a full
+core, for ever, under a parent that is the root broker. The ceiling and the EOF
+fix above stopped the spin but not the leak: the handler then waited, idle, for
+up to `DBL_MAX_TURN_SECONDS` (seventy minutes) past its turn. `client_mode` now
+sets `PR_SET_PDEATHSIG, SIGKILL`, so the client dies with its broker, the
+socket closes, and the handler kills the worker and exits at once. The parent
+is compared before and after the `prctl`, not tested against 1, because a
+broker can legitimately be pid 1 in its container and one that died before the
+`prctl` landed has already reparented the client. A death signal cannot cover
+a death that already happened, so the broker also names itself in
+`DAIMON_BROKER_PID` (`engineBrokerNativeClient.ts`) and the client refuses when
+that pid is not its parent — a client whose broker died before it ran never
+connects. `orphaned_client_case` stands in for a crashed broker and requires the
+handler gone within six seconds of the turn being fed, inside the integration
+build's 8-second ceiling, so the ceiling cannot be what passes it; removing the
+`prctl` turns it red. `preorphaned_client_case` lets the broker die before its
+client runs; ignoring the named pid turns it red.
+
 **`DBL_LISTEN_BACKLOG` is 128 and was 16.** Concurrency is structurally bounded
 well below either — the dispatcher runs at most one execution per agent, so
 twelve agents is a ceiling of twelve — and a measured 19,110-sample census of a
