@@ -61,8 +61,11 @@ export class AttentionDispatcher {
   /** Stops admitting executions; a running turn finishes and its records settle as usual. */
   pause(): void { this.paused = true; for (const finish of this.waiters) finish(); }
   /** Admits again and revisits every agent whose inbox moved while paused. */
-  resume(): void {
+  resume(queued: Iterable<string> = []): void {
     this.paused = false;
+    // Agents with queued work get an owed pass too: a delivery parked before the
+    // drain (a budget pause, say) has no generation of its own to wake it.
+    for (const agentId of queued) this.pausedOut.add(agentId);
     for (const agent of this.options.agents) if ((this.generations.get(agent.id) ?? 0) > (this.observed.get(agent.id) ?? 0) || this.pausedOut.has(agent.id)) this.notify(agent.id);
   }
   /** True once no inbox loop is alive: nothing runs, and nothing can start until resume. */

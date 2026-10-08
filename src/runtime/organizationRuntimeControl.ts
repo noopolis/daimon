@@ -203,8 +203,10 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
         drainedSince = undefined;
         // A latched operator stop or fatal fault outlives the drain: resume never reopens it.
         if (!hardReason()) {
-          // The dispatcher owes a pass to every agent whose dispatch the drain withheld.
-          dispatcher?.resume();
+          // An owed pass for every agent the drain withheld or that holds queued work;
+          // owed passes never count as new input, so deferred deliveries stay deferred.
+          const queued = new Set((await store.recoverable(knownAgents).catch(() => [])).filter((record) => !record.deferred).map((record) => record.agent_id));
+          if (drainedSince === undefined && !hardReason()) dispatcher?.resume(queued);
           void schedules?.drain().catch(() => undefined);
         }
       }

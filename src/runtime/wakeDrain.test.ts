@@ -158,6 +158,25 @@ test("resume never re-runs a delivery an attention turn deferred during the drai
   } finally { core.release(); await control.stop(); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
+test("resume dispatches queued work a budget pause parked before the drain", async () => {
+  const root = await privateRoot();
+  const store = await WakeAcceptanceStore.open(root, storeOptions);
+  const core = new HeldCoreHost();
+  let budget: "available" | "paused" = "paused";
+  const fuse = { snapshot: async () => ({ state: budget }), admit: async () => ({ state: "admitted" as const }) } as unknown as WakeFuse;
+  const dispatcher = new AttentionDispatcher({ store, host: core as unknown as OrganizationRuntimeHost, fuse, agents: parseOrganizationRuntimeConfig(config).agents, registry: new Map(), token, onIdle: () => undefined });
+  try {
+    await store.accept(parseWakeAcceptanceRequest(request("parked")));
+    dispatcher.notify("alpha", true);
+    await waitFor(() => dispatcher.quiescent());
+    dispatcher.pause();
+    budget = "available";
+    dispatcher.resume(["alpha"]);
+    await core.waitForWakes(1);
+    assert.equal(core.wakes[0]?.event.id, "parked");
+  } finally { core.release(); await dispatcher.stop(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 type Gate = { passed: boolean; entered: Promise<void>; arrive: () => void; opened: Promise<void>; open: () => void };
 function gate(): Gate {
   let arrive!: () => void; let open!: () => void;
