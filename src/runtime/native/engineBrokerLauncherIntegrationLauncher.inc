@@ -445,6 +445,72 @@ static int process_exited(pid_t pid) {
   cursor = strrchr(buffer, ')');
   return cursor && cursor[1] == ' ' && (cursor[2] == 'Z' || cursor[2] == 'X');
 }
+static int write_orphan_frame(int fd, const char *provider) {
+  struct dbl_request request_value = request();
+  unsigned char capability[DBL_MAX_CAPABILITY_BUNDLE];
+  uint32_t capability_length =
+      (uint32_t)make_bundle(provider, "mcp.Orphan-1", capability);
+  uint32_t prompt_length = 6;
+  return write_all(fd, &request_value, sizeof(request_value)) &&
+         write_all(fd, &prompt_length, sizeof(prompt_length)) &&
+         write_all(fd, "prompt", prompt_length) &&
+         write_all(fd, &capability_length, sizeof(capability_length)) &&
+         write_all(fd, capability, capability_length);
+}
+/* The same crash, one step earlier: the broker spawned its client, fed it, and
+   died before the client ran. The death signal cannot cover a death that has
+   already happened, so the client must notice its named broker is not its
+   parent and refuse — never connect and start a turn nobody owns. */
+static void preorphaned_client_case(void) {
+  int input[2], ready[2], status;
+  long client = 0;
+  check(!pipe(input) && !pipe(ready), "preorphan pipes");
+  pid_t broker = fork();
+  check(broker >= 0, "preorphan broker fork");
+  if (!broker) {
+    pid_t self = getpid();
+    close(ready[0]);
+    pid_t child = fork();
+    if (child < 0)
+      _exit(90);
+    if (!child) {
+      char named[32];
+      close(input[1]);
+      close(ready[1]);
+      while (getppid() == self)
+        usleep(1000); /* run only once the broker is gone */
+      snprintf(named, sizeof(named), "%ld", (long)self);
+      int null_output = open("/dev/null", O_WRONLY);
+      if (null_output < 0 || dup2(input[0], 0) < 0 || dup2(null_output, 1) < 0 ||
+          setenv("DAIMON_BROKER_PID", named, 1))
+        _exit(91);
+      execl("/opt/daimon/bin/daimon-engine-broker", "daimon-engine-broker",
+            "--client", NULL);
+      _exit(127);
+    }
+    close(input[0]);
+    long announced = (long)child;
+    if (!write_orphan_frame(input[1], "wall-hang") ||
+        write(ready[1], &announced, sizeof(announced)) != sizeof(announced))
+      _exit(92);
+    _exit(0);
+  }
+  close(input[0]);
+  close(input[1]);
+  close(ready[1]);
+  check(read(ready[0], &client, sizeof(client)) == sizeof(client) && client > 1,
+        "preorphan broker named its client");
+  close(ready[0]);
+  check(waitpid(broker, &status, 0) == broker, "the broker died before its client ran");
+  int exited = 0;
+  for (int attempt = 0; attempt < 150 && !exited; attempt++) {
+    exited = process_exited((pid_t)client);
+    if (!exited)
+      usleep(20000);
+  }
+  check(exited, "a client whose broker is already gone refuses to run");
+  check(worker_identity_processes(2200) == 0, "no worker was started for an orphaned client");
+}
 static void orphaned_client_case(void) {
   int input[2], ready[2], status;
   char go = 0;
@@ -467,16 +533,7 @@ static void orphaned_client_case(void) {
       _exit(127);
     }
     close(input[0]);
-    struct dbl_request request_value = request();
-    unsigned char capability[DBL_MAX_CAPABILITY_BUNDLE];
-    uint32_t capability_length =
-        (uint32_t)make_bundle("wall-hang", "mcp.Orphan-1", capability);
-    uint32_t prompt_length = 6;
-    if (!write_all(input[1], &request_value, sizeof(request_value)) ||
-        !write_all(input[1], &prompt_length, sizeof(prompt_length)) ||
-        !write_all(input[1], "prompt", prompt_length) ||
-        !write_all(input[1], &capability_length, sizeof(capability_length)) ||
-        !write_all(input[1], capability, capability_length))
+    if (!write_orphan_frame(input[1], "wall-hang"))
       _exit(92);
     close(input[1]);
     if (write(ready[1], "r", 1) != 1)
@@ -488,6 +545,10 @@ static void orphaned_client_case(void) {
   close(input[1]);
   close(ready[1]);
   check(read(ready[0], &go, 1) == 1 && go == 'r', "orphan broker fed its client");
+  /* The handler's ceiling clock starts after this, so a turn gone within six
+     seconds of it was not ended by the 8-second ceiling, however the
+     scheduler treated this case. */
+  time_t fed = time(NULL);
   close(ready[0]);
   sleep(1); /* past the worker's own short-lived --auth-provider child */
   pid_t handler = -1;
@@ -508,6 +569,7 @@ static void orphaned_client_case(void) {
   if (!gone)
     fprintf(stderr, "handler %ld outlived its dead broker's turn\n", (long)handler);
   check(gone, "a handler exits with a turn whose broker died");
+  check(time(NULL) - fed < 6, "the handler ended with its broker, not on its ceiling");
   check_worker_identity_settled(2200, "an orphaned turn left nothing behind");
 }
 static void org_cases(void) {
@@ -526,6 +588,7 @@ static void org_cases(void) {
   worker_ceiling_case();
   worker_escape_cancel_case();
   orphaned_client_case();
+  preorphaned_client_case();
   int s = connect_socket(), p = sealed("prompt"),
       c = sealed_bundle("provider.Token-1", "mcp.Token-2");
   struct dbl_request q = request();

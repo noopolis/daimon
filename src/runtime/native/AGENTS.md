@@ -75,10 +75,15 @@ sets `PR_SET_PDEATHSIG, SIGKILL`, so the client dies with its broker, the
 socket closes, and the handler kills the worker and exits at once. The parent
 is compared before and after the `prctl`, not tested against 1, because a
 broker can legitimately be pid 1 in its container and one that died before the
-`prctl` landed has already reparented the client. `orphaned_client_case` stands
-in for a crashed broker and requires the handler gone within three seconds,
-well inside the integration build's 8-second ceiling, so the ceiling cannot be
-what passes it; removing the `prctl` turns it red.
+`prctl` landed has already reparented the client. A death signal cannot cover
+a death that already happened, so the broker also names itself in
+`DAIMON_BROKER_PID` (`engineBrokerNativeClient.ts`) and the client refuses when
+that pid is not its parent — a client whose broker died before it ran never
+connects. `orphaned_client_case` stands in for a crashed broker and requires the
+handler gone within six seconds of the turn being fed, inside the integration
+build's 8-second ceiling, so the ceiling cannot be what passes it; removing the
+`prctl` turns it red. `preorphaned_client_case` lets the broker die before its
+client runs; ignoring the named pid turns it red.
 
 **`DBL_LISTEN_BACKLOG` is 128 and was 16.** Concurrency is structurally bounded
 well below either — the dispatcher runs at most one execution per agent, so

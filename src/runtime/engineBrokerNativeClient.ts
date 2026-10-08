@@ -19,7 +19,7 @@ export type NativeBrokerTurn = Readonly<{slot:number;requestId:string;turnId:str
 export interface NativeBrokerTurnResult {text:string;workerPid:number;workerUid:number;startTicks:bigint;diagnostic:NativeBrokerDiagnostic}
 
 export async function runNativeBrokerTurn(executable:string,input:NativeBrokerTurn,signal?:AbortSignal):Promise<Readonly<NativeBrokerTurnResult>>{
-  const frame=encodeNativeBrokerTurn(input),child=trackCliChild(spawn(executable,["--client"],{detached:process.platform!=="win32",env:{LANG:"C",LC_ALL:"C",TZ:"UTC"},stdio:["pipe","pipe","ignore"],...(signal===undefined?{}:{signal})}));const chunks:Buffer[]=[];let bytes=0;
+  const frame=encodeNativeBrokerTurn(input),child=trackCliChild(spawn(executable,["--client"],{detached:process.platform!=="win32",env:{LANG:"C",LC_ALL:"C",TZ:"UTC",DAIMON_BROKER_PID:String(process.pid)},stdio:["pipe","pipe","ignore"],...(signal===undefined?{}:{signal})}));const chunks:Buffer[]=[];let bytes=0;
   child.stdout!.on("data",(chunk:Buffer)=>{bytes+=chunk.length;if(bytes<=ENGINE_BROKER_NATIVE_RESULT_BYTES+MAX_OUTPUT)chunks.push(chunk);});child.stdin!.end(frame);frame.fill(0);
   try{const code=await new Promise<number|null>((resolve,reject)=>{child.once("error",reject);child.once("exit",resolve);});if(code!==0||bytes>ENGINE_BROKER_NATIVE_RESULT_BYTES+MAX_OUTPUT)throw new Error();return decodeNativeBrokerResult(Buffer.concat(chunks),input.turnId,[input.providerCapability,input.mcpCapability]);}catch(error){if(error instanceof NativeBrokerTurnFailure)throw error;throw new Error("engine broker turn failed");}finally{await terminateChild(child).catch(()=>undefined);}
 }

@@ -133,9 +133,9 @@ export const GROK_ENGINE_BROKER = {
   projectionVersion: "noopolis.daimon.grok-broker-projection.v1",
   slotPreflightVersion: "noopolis.daimon.grok-slot-preflight.v2",
   artifacts: {
-    sourceSha256: "756cebf70a346b26cfb6c107d372e5c08cf5c6e92000124f5da7a3b105cf1b40",
-    x64Sha256: "34df119013b41783b4e05a7181cd7df2878f90d6319517416e56be558a566da8",
-    arm64Sha256: "e950993a0b91a8cefc6e5c03d998a9a9c7a116693f0c625ada87b558771e4580"
+    sourceSha256: "15836d7ad69f12ef581a6e5b8635c9db43b2177dac609160c0749d3d1fefbaa8",
+    x64Sha256: "95aa9c272225e74ff9f45f54dde4bc30aee324e9ba24d8a876db9151c81b454d",
+    arm64Sha256: "d0dc1c03197c3e90f09b66ad7c89b4f7b448d06dc84c03b247dce976d6018d6e"
   }
 } as const;
 export const AGY_SUBSCRIPTION_REALM = {
