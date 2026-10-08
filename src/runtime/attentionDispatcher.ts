@@ -31,9 +31,14 @@ export class AttentionDispatcher {
 
   notify(agentId: string, fresh = false): void {
     if (fresh) this.generations.set(agentId, (this.generations.get(agentId) ?? 0) + 1);
-    if (this.stopping || this.paused || this.work.has(agentId)) return;
-    this.pausedOut.delete(agentId);
-    const task = this.drain(agentId).catch((error) => { this.observed.set(agentId, this.generations.get(agentId) ?? 0); this.errors.set(agentId, engineFailureDetail(error) ?? "inbox_storage_unavailable"); }).finally(() => {
+    if (this.stopping) return;
+    // Every pass a drain withholds is owed back on resume.
+    if (this.paused) { this.pausedOut.add(agentId); return; }
+    if (this.work.has(agentId)) return;
+    // An owed pass is not new input: it starts from the generation already seen, so
+    // deferred deliveries stay deferred unless something really arrived meanwhile.
+    const baseline = this.pausedOut.delete(agentId) ? this.observed.get(agentId) ?? 0 : 0;
+    const task = this.drain(agentId, baseline).catch((error) => { this.observed.set(agentId, this.generations.get(agentId) ?? 0); this.errors.set(agentId, engineFailureDetail(error) ?? "inbox_storage_unavailable"); }).finally(() => {
       this.work.delete(agentId);
       // A resume that landed while this loop was still unwinding its paused exit found it busy; run the owed pass now.
       if (!this.stopping && ((this.generations.get(agentId) ?? 0) > (this.observed.get(agentId) ?? 0) || this.pausedOut.has(agentId))) this.notify(agentId);
@@ -63,9 +68,9 @@ export class AttentionDispatcher {
   /** True once no inbox loop is alive: nothing runs, and nothing can start until resume. */
   quiescent(): boolean { return this.work.size === 0; }
 
-  private async drain(agentId: string): Promise<void> {
+  private async drain(agentId: string, baseline = 0): Promise<void> {
     const agent = this.options.agents.find((value) => value.id === agentId)!;
-    let observedGeneration = 0;
+    let observedGeneration = baseline;
     while (!this.stopping) {
       if (this.paused) { this.pausedOut.add(agentId); return; }
       const generation = this.generations.get(agentId) ?? 0;

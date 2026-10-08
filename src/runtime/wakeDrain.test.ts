@@ -137,6 +137,27 @@ test("a synchronous v1 turn keeps the host draining until it ends", async () => 
   } finally { core.release(); await control.stop(); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
+test("resume never re-runs a delivery an attention turn deferred during the drain", async () => {
+  const root = await privateRoot(); const usage = await fuseDirectory();
+  const core = new HeldCoreHost();
+  const attentionConfig = { ...config, agents: [{ ...config.agents[0]!, attention: { maxBatchMessages: 4 } }] };
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(attentionConfig, core, { acceptanceStorePath: root, controlToken: token, storeOptions, fuseEnvironment: fuseEnvironment(usage) });
+  try {
+    await control.start();
+    const first = await control.accept(request("read-not-disposed"));
+    await core.waitForWakes(1);
+    await control.drain(token);
+    core.release();
+    await waitFor(async () => (await control.availability(token))?.drain?.state === "drained");
+    await control.resume(token);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(core.wakes.length, 1, "a resume is not new input for a deferred delivery");
+    assert.equal((await control.activityV2(token))?.items.find((item) => item.acceptance_id === receiptId(first))?.deferred, true);
+    await control.accept(request("new-mail"));
+    await core.waitForWakes(2); core.release();
+  } finally { core.release(); await control.stop(); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
+});
+
 type Gate = { passed: boolean; entered: Promise<void>; arrive: () => void; opened: Promise<void>; open: () => void };
 function gate(): Gate {
   let arrive!: () => void; let open!: () => void;
