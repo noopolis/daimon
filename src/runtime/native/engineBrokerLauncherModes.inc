@@ -6,7 +6,19 @@ static int client_mode(void) {
   struct dbl_result result;
   struct sockaddr_un a = {.sun_family = AF_UNIX};
   int s = -1, p = -1, c = -1, ok = -1;
+  pid_t broker = getppid();
   if (getuid() != DBL_BROKER_UID)
+    goto done;
+  /* The client dies with the broker that spawned it. The broker kills its
+     client whenever a turn ends, but a broker that dies cannot: the client is
+     detached into its own session, so it lived on, holding its handler's
+     socket open, and the handler kept supervising a turn nobody would ever
+     read — spinning a full core for ever before the launcher had a ceiling,
+     and outliving the turn by up to DBL_MAX_TURN_SECONDS after. Closing the
+     socket is the one signal the handler acts on, so the client must not
+     outlive its broker. The parent is compared rather than tested against 1:
+     a broker that died before the prctl landed has already reparented us. */
+  if (prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() != broker)
     goto done;
   if (full_read(STDIN_FILENO, &request, sizeof(request)) ||
       full_read(STDIN_FILENO, &prompt_length, sizeof(prompt_length)) ||
