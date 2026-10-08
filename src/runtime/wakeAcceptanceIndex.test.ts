@@ -137,6 +137,18 @@ test("a stale lookup never unbinds the newer binding a concurrent sync installed
   assert.equal((await index.find(fresh, read))?.acceptance_id, fresh);
 });
 
+test("a record that fails to read never lets the index outgrow the directory", async () => {
+  let round = 0;
+  const stat = () => ({ ino: BigInt(round), size: 1n, mtimeNs: BigInt(round), ctimeNs: BigInt(round) });
+  const source = {
+    directoryStat: async () => stat(), files: async () => [`good-${round}.json`, "bad.json"], fileStat: async () => stat(),
+    readId: async (file: string) => { if (file.endsWith("/bad.json")) throw new SyntaxError("corrupt record"); return `00000000-0000-4000-8000-${String(round).padStart(12, "0")}`; }
+  };
+  const index = new WakeAcceptanceIndex("/store", source, () => 10_000_000_000n);
+  for (round = 1; round <= 50; round += 1) await assert.rejects(index.find(randomUUID(), async () => undefined), /corrupt record/);
+  assert.ok((index as unknown as { byFile: Map<string, unknown> }).byFile.size <= 2, "entries for files the directory no longer lists are pruned");
+});
+
 test("compaction drops deleted receipts from the index and keeps survivors reachable", async () => {
   const root = await privateRoot();
   try {

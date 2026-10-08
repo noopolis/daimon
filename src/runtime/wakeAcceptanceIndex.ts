@@ -67,13 +67,22 @@ export class WakeAcceptanceIndex {
     const directoryStamp = stampOf(directory);
     if (this.synced === directoryStamp) return;
     const mutations = this.mutations;
-    const present = new Set<string>();
-    for (const name of await this.source.files()) {
-      const file = path.join(this.root, name);
+    const listed = (await this.source.files()).map((name) => path.join(this.root, name));
+    // Prune what the directory no longer lists even when a record below fails to
+    // read, so the maps stay bounded by the store's own record bound.
+    const present = new Set(listed);
+    try { await this.scan(listed, present); } finally {
+      for (const file of [...this.byFile.keys()]) if (!present.has(file)) this.drop(file);
+    }
+    // Vouch for the directory only if nothing rebound while listing and its stamp
+    // was already settled when it was taken (the racy-timestamp rule).
+    this.synced = this.mutations === mutations && !racy(directory, startedAt) ? directoryStamp : undefined;
+  }
+  private async scan(listed: readonly string[], present: Set<string>): Promise<void> {
+    for (const file of listed) {
       const seenAt = this.nowNs();
       const stat = await this.source.fileStat(file);
-      if (stat === undefined) continue;
-      present.add(file);
+      if (stat === undefined) { present.delete(file); continue; }
       const stamp = racy(stat, seenAt) ? undefined : stampOf(stat);
       const known = this.byFile.get(file);
       if (known !== undefined && known.stamp !== undefined && known.stamp === stamp) continue;
@@ -85,10 +94,6 @@ export class WakeAcceptanceIndex {
       }
       this.bind(file, id, stamp);
     }
-    for (const file of [...this.byFile.keys()]) if (!present.has(file)) this.drop(file);
-    // Vouch for the directory only if nothing rebound while listing and its stamp
-    // was already settled when it was taken (the racy-timestamp rule).
-    this.synced = this.mutations === mutations && !racy(directory, startedAt) ? directoryStamp : undefined;
   }
   /** A binding found stale: drop only what still says so, never a newer binding of the same file. */
   private unbind(acceptanceId: string, file: string): void {
