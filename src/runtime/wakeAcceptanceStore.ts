@@ -16,6 +16,7 @@ import {
 import { sanitizeExecutionError, parseStoredWakeAcceptance, publicAcceptance, publicStatus, type StoredWakeAcceptanceRecord } from "./wakeAcceptanceRecord.js";
 import { assertOfflineReconciliationLeaseAvailable } from "./wakeAcceptanceReconciliation.js";
 import { acquireHostRegistration, pruneDeadHostRegistrations, releaseHostRegistration, type StoreHostRegistration } from "./storeCoordination.js";
+import { WakeAcceptanceIndex } from "./wakeAcceptanceIndex.js";
 import { MAX_WAKE_ACCEPTANCE_RECORDS, WAKE_ACCEPTANCE_COMPACTION_THRESHOLD, staleQueuedFilesToStop, terminalFilesToCompact } from "./wakeAcceptanceRetention.js";
 type Stored = StoredWakeAcceptanceRecord;
 type ActivityRow = OrganizationRuntimeWakeReceiptStatus & Readonly<{ active: boolean; queue_position?: number; execution_error?: string }>;
@@ -24,13 +25,16 @@ export type WakeExecutionClaimResult = Readonly<{ state: "acquired"; claim: Wake
 type DirectoryIdentity = Readonly<{ dev: number; ino: number; uid: number; mode: number }>;
 export type WakeAcceptanceStoreTestOptions = Readonly<{ claimTtlMs?: number; afterFinalLockAssertion?: () => Promise<void>; nowForTest?: () => number; ownerLiveness?: (lock: TransitionLock) => Promise<boolean>; processIdentity?: () => Promise<Omit<TransitionLock, "owner_id" | "generation">> }>;
 /** Deliberately absent from the public option type; adjacent tests synchronize only this race. */
-type InternalTestHooks = Readonly<{ afterInitialLeaseCheckForTest?: () => Promise<void> }>;
+type InternalTestHooks = Readonly<{ afterInitialLeaseCheckForTest?: () => Promise<void>; onRecordReadForTest?: (file: string) => void }>;
 const DEFAULT_CLAIM_TTL_MS = 240_000;
 /** Durable, private idempotency authority; callers must pre-create its 0700 root. */
 export class WakeAcceptanceStore {
   private mutations: Promise<void> = Promise.resolve();
-  private readonly acceptanceFiles = new Map<string, string>();
-  private constructor(private readonly root: string, private readonly directory: Awaited<ReturnType<typeof open>>, private readonly identity: DirectoryIdentity, private readonly registration: StoreHostRegistration, private readonly claimTtlMs: number, private readonly now: () => number, private readonly owner: Omit<TransitionLock, "owner_id" | "generation">, private readonly ownerLiveness: (lock: TransitionLock) => Promise<boolean>, private readonly afterFinalLockAssertion?: () => Promise<void>) {}
+  private readonly index: WakeAcceptanceIndex;
+  private onRecordRead?: (file: string) => void;
+  private constructor(private readonly root: string, private readonly directory: Awaited<ReturnType<typeof open>>, private readonly identity: DirectoryIdentity, private readonly registration: StoreHostRegistration, private readonly claimTtlMs: number, private readonly now: () => number, private readonly owner: Omit<TransitionLock, "owner_id" | "generation">, private readonly ownerLiveness: (lock: TransitionLock) => Promise<boolean>, private readonly afterFinalLockAssertion?: () => Promise<void>) {
+    this.index = new WakeAcceptanceIndex(root, { directoryStat: async () => await this.directory.stat({ bigint: true }), files: async () => await this.files(), readId: async (file) => (await this.read(file)).acceptance_id, fileStat: async (file) => await lstat(file, { bigint: true }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; }) }, () => BigInt(this.now()) * 1_000_000n);
+  }
   static async open(root: string, options: WakeAcceptanceStoreTestOptions = {}): Promise<WakeAcceptanceStore> {
     const claimTtlMs = options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
     if (!Number.isInteger(claimTtlMs) || claimTtlMs < 1 || claimTtlMs > 600_000) throw new Error("wake acceptance claim lease is outside its bound");
@@ -48,7 +52,8 @@ export class WakeAcceptanceStore {
       if (!same(identity(before), identity(after))) throw new Error("wake acceptance store changed during validation");
       const registration = await acquireHostRegistration(real, directory, owner);
       await pruneDeadHostRegistrations(real, directory, registration, options.ownerLiveness ?? processIsAlive);
-      return new WakeAcceptanceStore(real, directory, identity(before), registration, claimTtlMs, options.nowForTest ?? Date.now, owner, options.ownerLiveness ?? processIsAlive, options.afterFinalLockAssertion);
+      const store = new WakeAcceptanceStore(real, directory, identity(before), registration, claimTtlMs, options.nowForTest ?? Date.now, owner, options.ownerLiveness ?? processIsAlive, options.afterFinalLockAssertion);
+      store.onRecordRead = (options as WakeAcceptanceStoreTestOptions & InternalTestHooks).onRecordReadForTest; return store;
     } catch (error) {
       await directory.close().catch(() => undefined);
       throw error;
@@ -80,7 +85,7 @@ export class WakeAcceptanceStore {
         return { record: winner, created: false };
       }
       await this.directory.sync();
-      this.acceptanceFiles.set(record.acceptance_id, target);
+      this.index.set(record.acceptance_id, target);
       return { record, created: true };
     } finally {
       await unlink(temporary).catch(() => undefined);
@@ -255,14 +260,8 @@ export class WakeAcceptanceStore {
   }
   private async findByAcceptanceId(acceptanceId: string): Promise<Stored | undefined> {
     if (!uuid(acceptanceId)) return undefined;
-    const known = this.acceptanceFiles.get(acceptanceId);
-    if (known !== undefined) return await this.readOptional(known);
-    for (const file of await this.files()) {
-      const record = await this.read(path.join(this.root, file));
-      this.acceptanceFiles.set(record.acceptance_id, path.join(this.root, file));
-      if (record.acceptance_id === acceptanceId) return record;
-    }
-    return undefined;
+    await this.verify();
+    return await this.index.find(acceptanceId, async (file) => await this.readOptional(file));
   }
   private async pathForAcceptanceId(acceptanceId: string): Promise<string> {
     const record = await this.findByAcceptanceId(acceptanceId);
@@ -310,6 +309,7 @@ export class WakeAcceptanceStore {
   private async read(file: string): Promise<Stored> {
     const entry = await lstat(file);
     if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== process.getuid?.() || (entry.mode & 0o777) !== 0o600 || entry.size > MAX_WAKE_ACCEPTANCE_RECORD_BYTES) throw new Error("wake acceptance record is unsafe");
+    this.onRecordRead?.(file);
     const bytes = await readFile(file);
     if (bytes.length > MAX_WAKE_ACCEPTANCE_RECORD_BYTES) throw new Error("wake acceptance record exceeds its bound");
     return parseStoredWakeAcceptance(JSON.parse(bytes.toString("utf8")));
@@ -356,8 +356,8 @@ export class WakeAcceptanceStore {
     for (const file of staleQueuedFilesToStop(candidates, this.now())) { const entry = records.find((candidate) => candidate.file === file)!; entry.record = { ...entry.record, state: "stopped", code: "queued_wake_stopped", updated_at: new Date(this.now()).toISOString() }; await this.replace(path.join(this.root, file), entry.record); }
     for (const file of terminalFilesToCompact(records.map(({ file, record }) => ({ file, state: record.state, updatedAt: record.updated_at, acceptanceId: record.acceptance_id })))) {
       const record = records.find((candidate) => candidate.file === file)?.record;
-      if (record !== undefined) this.acceptanceFiles.delete(record.acceptance_id);
       await unlink(path.join(this.root, file));
+      if (record !== undefined) this.index.forget(path.join(this.root, file));
     }
     await this.directory.sync();
   }
