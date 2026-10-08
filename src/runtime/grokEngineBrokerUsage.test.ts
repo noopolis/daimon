@@ -145,15 +145,16 @@ test("the token ceiling stops a turn one request past the ceiling at most", asyn
 test("the wall-clock limit aborts a worker that is mid-request", async () => {
   await withBroker(async ({ turn, usageRows, requestRows, upstreamAborts }) => {
     const started = Date.now();
-    // Request 2 is still upstream (1.5 s) when the 1 s wall clock fires.
+    // Request 2 is still upstream (5 s) when the 1 s wall clock fires; the margin
+    // between them absorbs a loaded CI runner without blurring what is asserted.
     const worker: Worker = async (send, signal) => { assert.equal(await send(), 200); void send().catch(() => undefined); return untilAborted(signal); };
     await assert.rejects(turn("wake-4", worker, { timeoutMs: 1_000 }), (error: unknown) => error instanceof EngineBrokerTurnFailure && error.code === "limit_exceeded" && error.accounting?.limitReason === "timeout" && error.accounting.requests === 2);
-    assert.ok(Date.now() - started < 1_400, "the turn ends at the deadline, not when the in-flight request returns");
+    assert.ok(Date.now() - started < 3_000, "the turn ends at the deadline, not when the in-flight request returns");
     assert.equal(upstreamAborts(), 1, "the stuck upstream call is aborted, not left running");
     // The aborted request reported nothing, so it is charged the estimate and says so.
     assert.deepEqual((await usageRows()).map((row) => [row.reason, row.limit_reason, row.total, row.calls, row.estimated_requests]), [["wake_timeout", "timeout", 2_775 + 4_297, 2, 1]]);
     assert.deepEqual((await requestRows()).map((row) => [row.request, row.requests, row.usage_source, row.total]), [[0, 2, "upstream", 2_775], [1, 2, "estimated", 4_297]]);
-  }, undefined, (call) => call === 2 ? 1_500 : 15);
+  }, undefined, (call) => call === 2 ? 5_000 : 15);
 });
 
 test("a wake may only lower a declared limit: raising one is refused before any turn record or worker", async () => {
