@@ -814,8 +814,8 @@ and a miss re-lists the directory only when its stamp (inode, size, mtime,
 ctime) moved — another process may write the store — reading only record files
 whose own stamp moved. A stamp younger than two seconds is never trusted as
 unchanged (coarse filesystem clocks), and a hit is always re-read and checked
-to still carry the id, so a stale binding can cost a false miss for at most one
-poll, never serve the wrong record. `wakeAcceptanceIndex.test.ts` counts record
+to still carry the id, so a stale binding can at worst cost a false miss,
+never serve the wrong record. `wakeAcceptanceIndex.test.ts` counts record
 reads to pin this.
 
 A failed inbox execution is retried **once, at once, under a fresh execution
