@@ -29,6 +29,9 @@ export class WakeAcceptanceIndex {
   private readonly byId = new Map<string, string>();
   private readonly byFile = new Map<string, Entry>();
   private synced: string | undefined;
+  /** Bumped by every binding change made outside a sync; a sync that saw one never vouches for the directory. */
+  private mutations = 0;
+  private refreshing: Promise<void> | undefined;
   constructor(private readonly root: string, private readonly source: WakeAcceptanceIndexSource, private readonly nowNs: () => bigint = () => BigInt(Date.now()) * 1_000_000n) {}
   /**
    * The record bound to this id, verified to still carry it. Unknown and
@@ -41,33 +44,37 @@ export class WakeAcceptanceIndex {
       if (known !== undefined) {
         const record = await read(known);
         if (record?.acceptance_id === acceptanceId) return record;
-        this.forget(known);
+        this.unbind(acceptanceId, known);
       }
       if (attempt === 0) await this.refresh();
     }
     return undefined;
   }
   /** Binds a record this process wrote; its file stamp is learned on the next sync. */
-  set(acceptanceId: string, file: string): void { this.bind(file, acceptanceId, undefined); }
-  /** Drops a record file this process deleted, or a binding found stale. */
-  forget(file: string): void {
-    const entry = this.byFile.get(file);
-    if (entry !== undefined && this.byId.get(entry.id) === file) this.byId.delete(entry.id);
-    this.byFile.delete(file);
-    this.synced = undefined;
-  }
-  /** Brings the index level with the directory; a no-op while the directory is unchanged. */
+  set(acceptanceId: string, file: string): void { this.mutations += 1; this.bind(file, acceptanceId, undefined); }
+  /** Drops a record file this process deleted. */
+  forget(file: string): void { this.mutations += 1; this.drop(file); }
+  /** Brings the index level with the directory; a no-op while the directory is unchanged. Single-flight. */
   async refresh(): Promise<void> {
+    while (this.refreshing !== undefined) await this.refreshing.catch(() => undefined);
+    const run = this.refreshNow();
+    this.refreshing = run;
+    try { await run; } finally { if (this.refreshing === run) this.refreshing = undefined; }
+  }
+  private async refreshNow(): Promise<void> {
+    const startedAt = this.nowNs();
     const directory = await this.source.directoryStat();
     const directoryStamp = stampOf(directory);
     if (this.synced === directoryStamp) return;
+    const mutations = this.mutations;
     const present = new Set<string>();
     for (const name of await this.source.files()) {
       const file = path.join(this.root, name);
+      const seenAt = this.nowNs();
       const stat = await this.source.fileStat(file);
       if (stat === undefined) continue;
       present.add(file);
-      const stamp = this.racy(stat) ? undefined : stampOf(stat);
+      const stamp = racy(stat, seenAt) ? undefined : stampOf(stat);
       const known = this.byFile.get(file);
       if (known !== undefined && known.stamp !== undefined && known.stamp === stamp) continue;
       let id: string;
@@ -78,8 +85,23 @@ export class WakeAcceptanceIndex {
       }
       this.bind(file, id, stamp);
     }
-    for (const file of [...this.byFile.keys()]) if (!present.has(file)) this.forget(file);
-    this.synced = this.racy(directory) ? undefined : directoryStamp;
+    for (const file of [...this.byFile.keys()]) if (!present.has(file)) this.drop(file);
+    // Vouch for the directory only if nothing rebound while listing and its stamp
+    // was already settled when it was taken (the racy-timestamp rule).
+    this.synced = this.mutations === mutations && !racy(directory, startedAt) ? directoryStamp : undefined;
+  }
+  /** A binding found stale: drop only what still says so, never a newer binding of the same file. */
+  private unbind(acceptanceId: string, file: string): void {
+    this.mutations += 1;
+    if (this.byId.get(acceptanceId) === file) this.byId.delete(acceptanceId);
+    if (this.byFile.get(file)?.id === acceptanceId) this.byFile.delete(file);
+    this.synced = undefined;
+  }
+  private drop(file: string): void {
+    const entry = this.byFile.get(file);
+    if (entry !== undefined && this.byId.get(entry.id) === file) this.byId.delete(entry.id);
+    this.byFile.delete(file);
+    this.synced = undefined;
   }
   private bind(file: string, acceptanceId: string, stamp: string | undefined): void {
     const prior = this.byFile.get(file);
@@ -87,9 +109,10 @@ export class WakeAcceptanceIndex {
     this.byFile.set(file, { id: acceptanceId, ...(stamp === undefined ? {} : { stamp }) });
     this.byId.set(acceptanceId, file);
   }
-  private racy(stat: WakeAcceptanceStat): boolean {
-    const changed = stat.mtimeNs > stat.ctimeNs ? stat.mtimeNs : stat.ctimeNs;
-    return this.nowNs() - changed < RACY_WINDOW_NS;
-  }
+}
+/** A stamp taken within the window of its own last change may share a tick with a later write. */
+function racy(stat: WakeAcceptanceStat, observedAt: bigint): boolean {
+  const changed = stat.mtimeNs > stat.ctimeNs ? stat.mtimeNs : stat.ctimeNs;
+  return observedAt - changed < RACY_WINDOW_NS;
 }
 function stampOf(stat: WakeAcceptanceStat): string { return `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`; }

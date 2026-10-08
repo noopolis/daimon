@@ -64,14 +64,16 @@ test("the index follows another process's create, delete and recreate of a recor
     const mine = (await store.accept(request("mine"))).record;
     const foreign = (await other.accept(request("foreign"))).record;
     assert.equal((await store.status(foreign.acceptance_id))?.delivery_id, "foreign", "a foreign create is found after the directory changed");
-    // A foreign delete: the stale binding is dropped, never served.
+    // A foreign delete and recreate behind a cached binding: the file now carries
+    // another id, and the hit path must refuse to serve it for the old one.
     await unlink(path.join(root, recordFile("foreign")));
-    assert.equal(await store.status(foreign.acceptance_id), undefined);
-    // A foreign recreate of the same delivery binds a new id to the same file.
     const recreated = (await other.accept(request("foreign"))).record;
     assert.notEqual(recreated.acceptance_id, foreign.acceptance_id);
-    assert.equal((await store.status(recreated.acceptance_id))?.acceptance_id, recreated.acceptance_id);
     assert.equal(await store.status(foreign.acceptance_id), undefined);
+    assert.equal((await store.status(recreated.acceptance_id))?.acceptance_id, recreated.acceptance_id);
+    // A plain foreign delete: the stale binding is dropped, never served.
+    await unlink(path.join(root, recordFile("foreign")));
+    assert.equal(await store.status(recreated.acceptance_id), undefined);
     assert.equal((await store.status(mine.acceptance_id))?.delivery_id, "mine");
     reads();
     assert.equal(await store.status(foreign.acceptance_id), undefined);
@@ -91,11 +93,48 @@ test("a directory stamp inside the racy-timestamp window is never trusted as unc
   assert.equal(await racy.find(late, read), undefined);
   files.set("b.json", late);
   assert.equal((await racy.find(late, read))?.acceptance_id, late, "a write in the stamp's own tick is found");
+  // Racy is judged when the stamp was taken, not when a slow scan ends.
+  let clock = stamp.mtimeNs + 1_000_000n;
+  const slowScan = new WakeAcceptanceIndex("/store", source, () => { const value = clock; clock += 3_000_000_000n; return value; });
+  files.delete("b.json");
+  assert.equal(await slowScan.find(late, read), undefined);
+  files.set("b.json", late);
+  assert.equal((await slowScan.find(late, read))?.acceptance_id, late, "a scan that outlived the window does not vouch for a stamp taken inside it");
   const settled = new WakeAcceptanceIndex("/store", source, () => stamp.mtimeNs + 10_000_000_000n);
   files.delete("b.json");
   assert.equal(await settled.find(late, read), undefined);
   files.set("b.json", late);
   assert.equal(await settled.find(late, read), undefined, "a settled, unchanged stamp is trusted: a miss reads nothing");
+});
+
+test("a stale lookup never unbinds the newer binding a concurrent sync installed", async () => {
+  const old = "11111111-1111-4111-8111-111111111111"; const fresh = "22222222-2222-4222-8222-222222222222";
+  let directory = { ino: 1n, size: 64n, mtimeNs: 1n, ctimeNs: 1n };
+  const files = new Map<string, { id: string; ino: bigint }>([["f.json", { id: old, ino: 10n }]]);
+  let gate: (() => void) | undefined;
+  const source = {
+    directoryStat: async () => directory, files: async () => [...files.keys()],
+    fileStat: async (file: string) => { const entry = files.get(path.basename(file)); return entry && { ino: entry.ino, size: 1n, mtimeNs: 1n, ctimeNs: 1n }; },
+    readId: async (file: string) => { if (path.basename(file) === "g.json" && gate === undefined) await new Promise<void>((resolve) => { gate = resolve; }); return files.get(path.basename(file))!.id; }
+  };
+  const index = new WakeAcceptanceIndex("/store", source, () => 10_000_000_000n);
+  const read = async (file: string) => files.has(path.basename(file)) ? { acceptance_id: files.get(path.basename(file))!.id } : undefined;
+  assert.equal((await index.find(old, read))?.acceptance_id, old);
+  // Another process recreates f.json under a new id and adds g.json.
+  files.set("f.json", { id: fresh, ino: 11n }); files.set("g.json", { id: "33333333-3333-4333-8333-333333333333", ino: 12n });
+  directory = { ...directory, mtimeNs: 2n, ctimeNs: 2n };
+  // The old-id lookup reads f.json before the sync rebinds it, and sees the new id only after.
+  let releaseRead: (() => void) | undefined;
+  const slowOld = index.find(old, async (file) => { await new Promise<void>((resolve) => { releaseRead = resolve; }); return await read(file); });
+  const freshLookup = index.find(fresh, read);
+  while (gate === undefined) await new Promise((resolve) => setImmediate(resolve));
+  releaseRead!();
+  // Let the stale lookup see its mismatch and unbind while the sync is still in flight.
+  for (let turn = 0; turn < 10; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  gate();
+  assert.equal(await slowOld, undefined);
+  assert.equal((await freshLookup)?.acceptance_id, fresh, "the concurrent sync's binding survived the stale unbind");
+  assert.equal((await index.find(fresh, read))?.acceptance_id, fresh);
 });
 
 test("compaction drops deleted receipts from the index and keeps survivors reachable", async () => {
