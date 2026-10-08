@@ -22,12 +22,14 @@ export class AttentionDispatcher {
   private readonly active = new Map<string, { execution_id: string; delivery_ids: string[] }>();
   private readonly errors = new Map<string, string>();
   private stopping = false;
+  /** Reversible drain: no new execution starts; durable deliveries stay queued. */
+  private paused = false;
   private fatal: "ledger_unavailable" | undefined;
   constructor(private readonly options: Options) {}
 
   notify(agentId: string, fresh = false): void {
     if (fresh) this.generations.set(agentId, (this.generations.get(agentId) ?? 0) + 1);
-    if (this.stopping || this.work.has(agentId)) return;
+    if (this.stopping || this.paused || this.work.has(agentId)) return;
     const task = this.drain(agentId).catch((error) => { this.observed.set(agentId, this.generations.get(agentId) ?? 0); this.errors.set(agentId, engineFailureDetail(error) ?? "inbox_storage_unavailable"); }).finally(() => {
       this.work.delete(agentId);
       if (!this.stopping && (this.generations.get(agentId) ?? 0) > (this.observed.get(agentId) ?? 0)) this.notify(agentId);
@@ -47,11 +49,20 @@ export class AttentionDispatcher {
     await this.options.store.releaseClaims(this.owner);
   }
   halt(): void { this.stopping = true; for (const finish of this.waiters) finish(); }
+  /** Stops admitting executions; a running turn finishes and its records settle as usual. */
+  pause(): void { this.paused = true; for (const finish of this.waiters) finish(); }
+  /** Admits again and revisits every agent whose inbox moved while paused. */
+  resume(): void {
+    this.paused = false;
+    for (const agent of this.options.agents) if ((this.generations.get(agent.id) ?? 0) > (this.observed.get(agent.id) ?? 0)) this.notify(agent.id);
+  }
+  /** True once no inbox loop is alive: nothing runs, and nothing can start until resume. */
+  quiescent(): boolean { return this.work.size === 0; }
 
   private async drain(agentId: string): Promise<void> {
     const agent = this.options.agents.find((value) => value.id === agentId)!;
     let observedGeneration = 0;
-    while (!this.stopping) {
+    while (!this.stopping && !this.paused) {
       const generation = this.generations.get(agentId) ?? 0;
       const stale: StoredWakeAcceptanceRecord[] = [];
       const records = (await this.options.store.recoverable(new Set(this.options.agents.map((value) => value.id)), (record) => { if (record.agent_id === agentId) stale.push(record); })).filter((record) => record.agent_id === agentId);
@@ -61,7 +72,7 @@ export class AttentionDispatcher {
       this.errors.delete(agentId);
       if (!selected.length) return;
       const budget = await this.options.fuse.snapshot(agentId, agent.attention);
-      if (budget.state !== "available") return;
+      if (budget.state !== "available" || this.paused) return;
       const executionId = selected[0]!.execution_id ?? randomUUID();
       const acquired = await this.options.store.acquireClaim(selected[0]!.acceptance_id, this.owner, selected.map((record) => record.acceptance_id), executionId);
       if (acquired.state === "held") { await this.waitUntil(acquired.retry_at); continue; }
@@ -74,8 +85,9 @@ export class AttentionDispatcher {
         for (const item of claimed.filter((value) => value.record.state === "running")) await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
         await this.options.store.releaseClaim(claimed[0]!.claim); continue;
       }
-      const verdict = await this.options.fuse.admit(agentId, randomUUID(), agent.attention);
-      if (verdict.state !== "admitted" || this.stopping) {
+      // A drain that arrived after the claim releases it before any budget is spent.
+      const verdict = this.paused ? undefined : await this.options.fuse.admit(agentId, randomUUID(), agent.attention);
+      if (verdict?.state !== "admitted" || this.stopping) {
         for (const item of claimed) await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
         await this.options.store.releaseClaim(claimed[0]!.claim); return;
       }
@@ -173,7 +185,7 @@ export class AttentionDispatcher {
   }
 
   private async waitUntil(timestamp: string): Promise<void> {
-    if (this.stopping) return;
+    if (this.stopping || this.paused) return;
     await new Promise<void>((resolve) => {
       const finish = (): void => { clearTimeout(timer); this.waiters.delete(finish); resolve(); };
       const timer = setTimeout(finish, Math.max(1, Date.parse(timestamp) - Date.now())); this.waiters.add(finish);

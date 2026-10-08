@@ -124,6 +124,20 @@ test("CLI strictly authenticates and routes a production Daimon engine", async (
     assert.equal(work.version, "noopolis.daimon.work-availability.v1");
     assert.equal(work.agents[0]?.agent_id, "agent");
     assert.equal((await fetch(`http://127.0.0.1:${port}/v2/availability`)).status, 401);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/v2/drain`, { method: "POST" })).status, 401);
+    const drained = await fetch(`http://127.0.0.1:${port}/v2/drain`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
+    assert.equal(drained.status, 200);
+    assert.match(((await drained.json()) as { drain?: { state: string } }).drain?.state ?? "", /^(draining|drained)$/u);
+    const refused = await fetch(`http://127.0.0.1:${port}/v2/wakes`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ agent_id: "agent", delivery_id: "during-drain", event: {
+        version: "noopolis.daimon.wake.v2", kind: "manual", text: "wake", occurred_at: "2026-08-17T00:00:00.000Z"
+      } })
+    });
+    assert.equal(refused.status, 409);
+    assert.equal(((await refused.json()) as { blocked?: { version: string; reason: string } }).blocked?.reason, "operator_stop");
+    const resumed = await fetch(`http://127.0.0.1:${port}/v2/resume`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
+    assert.equal(resumed.status, 200);
+    assert.equal(((await resumed.json()) as { drain?: unknown }).drain, undefined);
     const conflict = await fetch(`http://127.0.0.1:${port}/v2/wakes`, {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ agent_id: "agent", delivery_id: "delivery-1", event: {
         version: "noopolis.daimon.wake.v2", kind: "manual", text: "different", occurred_at: "2026-08-17T00:00:00.000Z"

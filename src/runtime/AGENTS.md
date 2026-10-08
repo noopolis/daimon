@@ -768,6 +768,19 @@ Live turn authority is `activity.executions`, independent of receipt completion;
 its execution id must equal the engine wake id. Budget pauses retain acceptance,
 and operator stop remains a hard latch.
 
+Drain is the reversible operator stop (`POST /v2/drain`, `POST /v2/resume`,
+`organizationRuntimeControl.ts`). It is a separate, in-process gate and must
+never be folded into the fuse: `fuse.stop` is a safety latch that only an
+operator removing the file *and* restarting clears, and resume never reopens it
+(it checks the hard reason first and the halted dispatcher stays halted).
+While drained, `accept` answers `blocked("operator_stop")` — the existing
+`work-blocked` reason, because Moltnet's bridge treats any reason outside its
+closed list as a hard failure rather than a deferral — and the dispatcher's
+`pause()` lets no inbox loop start or admit a turn; a loop that already holds a
+claim releases it before `fuse.admit`, so a drain spends no budget. Queued
+deliveries stay `accepted`. Availability says `drained` only when no inbox loop
+is alive (`quiescent()`), which is the signal a drained release waits for.
+
 That authority has to outlive the host, because the caller who needs it reads it
 last. `activityV2` used to answer `undefined` once `stop()` closed the acceptance
 store — HTTP 503 `native_host_unavailable` through a caller's route — and the one

@@ -172,6 +172,12 @@ descriptor with a bounded retry delay. A budget pause never becomes a terminal
 receipt. Existing fuse trip markers remain latched until explicit operator
 recovery; changing attention settings does not erase historical spending.
 
+`POST /v2/drain` and `POST /v2/resume` (same bearer token) are the reversible
+counterpart: a drain answers new wakes with the same 409 `work-blocked`
+descriptor, keeps queued deliveries, lets running turns finish and reports
+`drain: {state: "draining" | "drained", since}` in availability; resume
+dispatches the queue. Neither touches the latched `fuse.stop`.
+
 A batch's atomic per-agent claim records its complete membership and stable
 `execution_id` before cognition. Individual receipts retain their delivery ids
 and explicit state. `GET /v2/activity.executions` identifies the live turn even

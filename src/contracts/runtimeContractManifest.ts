@@ -1,4 +1,4 @@
-import { WORK_AVAILABILITY_SCHEMA, WORK_BLOCKED_SCHEMA } from "./attentionContract.js";
+import { OPERATOR_DRAIN, WORK_AVAILABILITY_SCHEMA, WORK_BLOCKED_SCHEMA } from "./attentionContract.js";
 import { GROK_BROKER_MODELS, GROK_BROKER_REASONING_EFFORTS, GROK_WORKER_MAX_TURNS, GROK_WORKER_TOOL_IDS, GROK_WORKER_VISIBLE_TOOLS } from "./grokWorkerContract.js";
 import {
   ORGANIZATION_RUNTIME_CONFIG_SCHEMA,
@@ -170,6 +170,7 @@ export const RUNTIME_CONTRACT_MANIFEST = {
   attention: { enabledBy: "agents[].attention", defaultMaxBatchMessages: 8, defaultMaxBatchBytes: 12000, idleDispatch: "immediate", busyDispatch: "bounded-pending-message-batch", completion: "explicit-per-delivery", unhandled: "deferred-until-new-input", accounting: "execution-start-reservations" },
   workAvailabilityResponseSchema: WORK_AVAILABILITY_SCHEMA,
   workBlockedSchema: WORK_BLOCKED_SCHEMA,
+  operatorDrain: OPERATOR_DRAIN,
   supportedEngineKinds: ["agy", "codex", "grok"],
   engineCredentialMaterial: ENGINE_CREDENTIAL_MATERIAL,
   grokSubscriptionRealm: GROK_SUBSCRIPTION_REALM,
