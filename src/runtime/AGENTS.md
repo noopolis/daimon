@@ -819,6 +819,18 @@ prunes `.host-online-*` markers of hosts provably dead in its PID namespace
 directory bound), and a store over its bound refuses as `WakeInboxFullError` —
 the control host's `queue_full`, never a 400 `invalid_request`.
 
+Receipt lookup never scans the store per poll. `GET /v2/wake-receipts/:id` for
+an unknown or compacted id used to re-read every record file (~2,100) on each
+poll and held an idle host at ~1.4 cores. `wakeAcceptanceIndex.ts` keeps the
+acceptance-id → record-file index: own accepts and compaction deletes update it,
+and a miss re-lists the directory only when its stamp (inode, size, mtime,
+ctime) moved — another process may write the store — reading only record files
+whose own stamp moved. A stamp younger than two seconds is never trusted as
+unchanged (coarse filesystem clocks), and a hit is always re-read and checked
+to still carry the id, so a stale binding can at worst cost a false miss,
+never serve the wrong record. `wakeAcceptanceIndex.test.ts` counts record
+reads to pin this.
+
 A failed inbox execution is retried **once, at once, under a fresh execution
 id** (`daimon: wake requeued once …` on stderr). Keeping the failed execution's
 id made every retry the same broker turn — a sealed failure replays forever, a
