@@ -6,6 +6,11 @@ import test from "node:test";
 
 import { ORGANIZATION_RUNTIME_VERSION, type OrganizationRuntimeHost, type OrganizationRuntimeWakeRequest } from "./organizationRuntime.js";
 import { createOrganizationRuntimeControlHostWithCoreForTest } from "./organizationRuntimeControl.js";
+import { parseOrganizationRuntimeConfig } from "./organizationRuntime.js";
+import { AttentionDispatcher } from "./attentionDispatcher.js";
+import { WakeAcceptanceStore, type WakeExecutionClaim } from "./wakeAcceptanceStore.js";
+import { WakeFuse } from "./wakeFuse.js";
+import { parseWakeAcceptanceRequest, type WakeReceiptState } from "./wakeAcceptanceTypes.js";
 
 const token = "control-secret";
 const config = {
@@ -83,6 +88,61 @@ test("resume never clears the latched operator stop", async () => {
   } finally { core.release(); await control.stop(); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
 });
 
+test("a resume that lands while a paused loop is still unwinding its claim still dispatches the queue", async () => {
+  const root = await privateRoot();
+  const store = await WakeAcceptanceStore.open(root, storeOptions);
+  const fuse = await WakeFuse.open({ organizationKey: "alpha", environment: { DAIMON_WAKE_FUSE: "off" } });
+  const core = new HeldCoreHost();
+  // Holds the first transition to each state until the test opens it.
+  const running = gate(); const rollback = gate();
+  const gated = new Proxy(store, { get(target, key, receiver) {
+    if (key !== "transitionClaimed") { const value = Reflect.get(target, key, receiver); return typeof value === "function" ? value.bind(target) : value; }
+    return async (id: string, claim: WakeExecutionClaim, state: WakeReceiptState, ...rest: unknown[]) => {
+      const hold = state === "running" ? running : state === "accepted" ? rollback : undefined;
+      if (hold !== undefined && !hold.passed) { hold.passed = true; hold.arrive(); await hold.opened; }
+      return await (target.transitionClaimed as (...args: unknown[]) => Promise<unknown>)(id, claim, state, ...rest);
+    };
+  } });
+  const dispatcher = new AttentionDispatcher({ store: gated, host: core as unknown as OrganizationRuntimeHost, fuse, agents: parseOrganizationRuntimeConfig(config).agents, registry: new Map(), token, onIdle: () => undefined });
+  try {
+    await store.accept(parseWakeAcceptanceRequest(request("queued")));
+    dispatcher.notify("alpha");
+    await running.entered;
+    dispatcher.pause();
+    running.open();
+    await rollback.entered;
+    // The loop saw the drain and is rolling its claim back; resume finds it busy.
+    dispatcher.resume();
+    rollback.open();
+    await core.waitForWakes(1);
+    assert.equal(core.wakes[0]?.event.id, "queued");
+  } finally { core.release(); await dispatcher.stop(); await fuse.close(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a synchronous v1 turn keeps the host draining until it ends", async () => {
+  const root = await privateRoot(); const usage = await fuseDirectory();
+  const core = new HeldCoreHost();
+  const control = createOrganizationRuntimeControlHostWithCoreForTest(config, core, { acceptanceStorePath: root, controlToken: token, storeOptions, fuseEnvironment: fuseEnvironment(usage) });
+  try {
+    await control.start();
+    const turn = control.wake({ token, agentId: "alpha", event: { version: "noopolis.daimon.wake.v1", id: "v1-turn", kind: "manual", text: "go", occurredAt: "2026-08-17T00:00:00.000Z" } });
+    await core.waitForWakes(1);
+    assert.equal((await control.drain(token))?.drain?.state, "draining");
+    const refused = await control.wake({ token, agentId: "alpha", event: { version: "noopolis.daimon.wake.v1", id: "v1-late", kind: "manual", text: "go", occurredAt: "2026-08-17T00:00:00.000Z" } });
+    assert.equal(refused.status, "stopped");
+    core.release();
+    assert.equal((await turn).status, "completed");
+    assert.equal((await control.availability(token))?.drain?.state, "drained");
+    assert.equal(core.wakes.length, 1);
+  } finally { core.release(); await control.stop(); await rm(root, { recursive: true, force: true }); await rm(usage, { recursive: true, force: true }); }
+});
+
+type Gate = { passed: boolean; entered: Promise<void>; arrive: () => void; opened: Promise<void>; open: () => void };
+function gate(): Gate {
+  let arrive!: () => void; let open!: () => void;
+  const entered = new Promise<void>((resolve) => { arrive = resolve; }); const opened = new Promise<void>((resolve) => { open = resolve; });
+  return { passed: false, entered, arrive: () => arrive(), opened, open: () => open() };
+}
 function receiptId(result: { state: string; acceptance_id?: string }): string { assert.equal(result.state, "accepted"); return result.acceptance_id!; }
 async function privateRoot(): Promise<string> { const root = await mkdtemp(path.join(os.tmpdir(), "daimon-drain-")); await chmod(root, 0o700); return root; }
 async function fuseDirectory(): Promise<string> { const directory = await mkdtemp(path.join(os.tmpdir(), "daimon-drain-fuse-")); await writeFile(path.join(directory, "usage.jsonl"), ""); return directory; }

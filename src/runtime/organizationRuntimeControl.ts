@@ -55,6 +55,8 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
   let sealedActivity: OrganizationRuntimeActivityV2 | undefined;
   /** In-process only: a restarted host admits, so a drained release ends drained-free. */
   let drainedSince: string | undefined;
+  /** Synchronous v1 turns bypass the dispatcher; a drain is not drained while one is admitted or running. */
+  let v1Turns = 0;
 
   /**
    * One projection, read the same way live and at shutdown. `active` is decided by
@@ -116,7 +118,7 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
         ? { error: dispatcher?.failure(agent.id) ?? executionErrors.get(agent.id) } : {})
     })));
     // "drained" only once no inbox loop is alive: nothing runs and nothing can start until resume.
-    const drain: WorkDrain | undefined = drainedSince === undefined ? undefined : { state: dispatcher?.quiescent() === false ? "draining" : "drained", since: drainedSince };
+    const drain: WorkDrain | undefined = drainedSince === undefined ? undefined : { state: dispatcher?.quiescent() === false || v1Turns > 0 ? "draining" : "drained", since: drainedSince };
     return { version: "noopolis.daimon.work-availability.v1", state: hardReason() ? "stopped" : drain !== undefined || agents.some((agent) => agent.budget.state !== "available" || agent.error) ? "paused" : "running", agents, ...(drain === undefined ? {} : { drain }) };
   };
 
@@ -128,8 +130,13 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
       if (!tokensEqual(expectedToken, request.token)) return { version: "noopolis.daimon.wake-result.v1", status: "rejected", agentId: request.agentId, wakeId: request.event.id, code: "unauthorized" };
       if (!knownAgents.has(request.agentId)) return { version: "noopolis.daimon.wake-result.v1", status: "rejected", agentId: request.agentId, wakeId: request.event.id, code: "unknown_agent" };
       if (config.agents.find((agent) => agent.id === request.agentId)?.attention !== undefined) return { version: "noopolis.daimon.wake-result.v1", status: "rejected", agentId: request.agentId, wakeId: request.event.id, code: "durable_inbox_required" };
-      if (hardReason() || drainedSince !== undefined || (await fuse!.admit(request.agentId, request.event.id, config.agents.find((agent) => agent.id === request.agentId)?.attention)).state !== "admitted") return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
-      return await host.wake(request);
+      // v1 has no `blocked` member on its wire; a drain answers it exactly as the latched stop does.
+      if (hardReason() || drainedSince !== undefined) return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
+      v1Turns += 1;
+      try {
+        if ((await fuse!.admit(request.agentId, request.event.id, config.agents.find((agent) => agent.id === request.agentId)?.attention)).state !== "admitted") return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
+        return await host.wake(request);
+      } finally { v1Turns -= 1; }
     },
     health: async (agentId) => await host.health(agentId),
     activity: async (request) => await host.activity(request),
