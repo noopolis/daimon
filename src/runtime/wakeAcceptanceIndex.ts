@@ -1,11 +1,19 @@
 import path from "node:path";
 
+import { MAX_WAKE_ACCEPTANCE_RECORDS } from "./wakeAcceptanceRetention.js";
+
 /**
  * A stamp younger than this may share a coarse filesystem timestamp tick with
  * a write that lands after it was taken, so it is never trusted to prove that
  * nothing changed (the racy-timestamp rule).
  */
 const RACY_WINDOW_NS = 2_000_000_000n;
+/**
+ * Own writes bind without a sync, so another process compacting behind a host
+ * that only ever hits could leave bindings for files that are gone. Past this
+ * many the index is dropped and the next miss rebuilds it from the directory.
+ */
+const MAX_INDEX_ENTRIES = MAX_WAKE_ACCEPTANCE_RECORDS * 2;
 export type WakeAcceptanceStat = Readonly<{ ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }>;
 type Entry = { id: string; stamp?: string };
 export type WakeAcceptanceIndexSource = Readonly<{
@@ -51,7 +59,11 @@ export class WakeAcceptanceIndex {
     return undefined;
   }
   /** Binds a record this process wrote; its file stamp is learned on the next sync. */
-  set(acceptanceId: string, file: string): void { this.mutations += 1; this.bind(file, acceptanceId, undefined); }
+  set(acceptanceId: string, file: string): void {
+    this.mutations += 1;
+    if (this.byFile.size >= MAX_INDEX_ENTRIES) { this.byFile.clear(); this.byId.clear(); this.synced = undefined; }
+    this.bind(file, acceptanceId, undefined);
+  }
   /** Drops a record file this process deleted. */
   forget(file: string): void { this.mutations += 1; this.drop(file); }
   /** Brings the index level with the directory; a no-op while the directory is unchanged. Single-flight. */

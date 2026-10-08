@@ -8,6 +8,7 @@ import test from "node:test";
 import { WakeAcceptanceIndex } from "./wakeAcceptanceIndex.js";
 import { WakeAcceptanceStore, type WakeAcceptanceStoreTestOptions } from "./wakeAcceptanceStore.js";
 import { parseWakeAcceptanceRequest, wakeAcceptanceDigest } from "./wakeAcceptanceTypes.js";
+import { MAX_WAKE_ACCEPTANCE_RECORDS } from "./wakeAcceptanceRetention.js";
 
 const request = (delivery: string) => parseWakeAcceptanceRequest({ token: "control-secret", agent_id: "alpha", delivery_id: delivery, event: { version: "noopolis.daimon.wake.v2", kind: "manual" as const, text: "hello", occurred_at: "2026-08-17T00:00:00.000Z" } });
 const identity = { processIdentity: async () => ({ pid: 1, process_start: "test-start", boot_id: "test-boot", pid_namespace_dev: 1, pid_namespace_ino: 1 }), ownerLiveness: async () => true };
@@ -147,6 +148,19 @@ test("a record that fails to read never lets the index outgrow the directory", a
   const index = new WakeAcceptanceIndex("/store", source, () => 10_000_000_000n);
   for (round = 1; round <= 50; round += 1) await assert.rejects(index.find(randomUUID(), async () => undefined), /corrupt record/);
   assert.ok((index as unknown as { byFile: Map<string, unknown> }).byFile.size <= 2, "entries for files the directory no longer lists are pruned");
+});
+
+test("own writes behind a foreign compactor never grow the index past its bound", async () => {
+  const files = new Map<string, string>();
+  const source = { directoryStat: async () => ({ ino: 1n, size: 1n, mtimeNs: 1n, ctimeNs: 1n }), files: async () => [...files.keys()].map((file) => path.basename(file)), fileStat: async () => ({ ino: 1n, size: 1n, mtimeNs: 1n, ctimeNs: 1n }), readId: async (file: string) => files.get(file)! };
+  const index = new WakeAcceptanceIndex("/store", source, () => 10_000_000_000n);
+  for (let generation = 0; generation < 5_000; generation += 1) {
+    files.clear();
+    const id = `00000000-0000-4000-8000-${String(generation).padStart(12, "0")}`; const file = `/store/${generation}.json`;
+    files.set(file, id); index.set(id, file);
+    assert.equal((await index.find(id, async (candidate) => ({ acceptance_id: files.get(candidate)! })))?.acceptance_id, id);
+  }
+  assert.ok((index as unknown as { byFile: Map<string, unknown> }).byFile.size <= MAX_WAKE_ACCEPTANCE_RECORDS * 2);
 });
 
 test("compaction drops deleted receipts from the index and keeps survivors reachable", async () => {
