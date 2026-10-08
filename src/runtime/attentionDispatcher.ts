@@ -22,15 +22,26 @@ export class AttentionDispatcher {
   private readonly active = new Map<string, { execution_id: string; delivery_ids: string[] }>();
   private readonly errors = new Map<string, string>();
   private stopping = false;
+  /** Reversible drain: no new execution starts; durable deliveries stay queued. */
+  private paused = false;
+  /** Agents whose inbox loop gave up its turn to a drain; resume owes each one a pass. */
+  private readonly pausedOut = new Set<string>();
   private fatal: "ledger_unavailable" | undefined;
   constructor(private readonly options: Options) {}
 
   notify(agentId: string, fresh = false): void {
     if (fresh) this.generations.set(agentId, (this.generations.get(agentId) ?? 0) + 1);
-    if (this.stopping || this.work.has(agentId)) return;
-    const task = this.drain(agentId).catch((error) => { this.observed.set(agentId, this.generations.get(agentId) ?? 0); this.errors.set(agentId, engineFailureDetail(error) ?? "inbox_storage_unavailable"); }).finally(() => {
+    if (this.stopping) return;
+    // Every pass a drain withholds is owed back on resume.
+    if (this.paused) { this.pausedOut.add(agentId); return; }
+    if (this.work.has(agentId)) return;
+    // An owed pass is not new input: it starts from the generation already seen, so
+    // deferred deliveries stay deferred unless something really arrived meanwhile.
+    const baseline = this.pausedOut.delete(agentId) ? this.observed.get(agentId) ?? 0 : 0;
+    const task = this.drain(agentId, baseline).catch((error) => { this.observed.set(agentId, this.generations.get(agentId) ?? 0); this.errors.set(agentId, engineFailureDetail(error) ?? "inbox_storage_unavailable"); }).finally(() => {
       this.work.delete(agentId);
-      if (!this.stopping && (this.generations.get(agentId) ?? 0) > (this.observed.get(agentId) ?? 0)) this.notify(agentId);
+      // A resume that landed while this loop was still unwinding its paused exit found it busy; run the owed pass now.
+      if (!this.stopping && ((this.generations.get(agentId) ?? 0) > (this.observed.get(agentId) ?? 0) || this.pausedOut.has(agentId))) this.notify(agentId);
       this.options.onIdle(agentId);
     });
     this.work.set(agentId, task);
@@ -47,11 +58,24 @@ export class AttentionDispatcher {
     await this.options.store.releaseClaims(this.owner);
   }
   halt(): void { this.stopping = true; for (const finish of this.waiters) finish(); }
+  /** Stops admitting executions; a running turn finishes and its records settle as usual. */
+  pause(): void { this.paused = true; for (const finish of this.waiters) finish(); }
+  /** Admits again and revisits every agent whose inbox moved while paused. */
+  resume(queued: Iterable<string> = []): void {
+    this.paused = false;
+    // Agents with queued work get an owed pass too: a delivery parked before the
+    // drain (a budget pause, say) has no generation of its own to wake it.
+    for (const agentId of queued) this.pausedOut.add(agentId);
+    for (const agent of this.options.agents) if ((this.generations.get(agent.id) ?? 0) > (this.observed.get(agent.id) ?? 0) || this.pausedOut.has(agent.id)) this.notify(agent.id);
+  }
+  /** True once no inbox loop is alive: nothing runs, and nothing can start until resume. */
+  quiescent(): boolean { return this.work.size === 0; }
 
-  private async drain(agentId: string): Promise<void> {
+  private async drain(agentId: string, baseline = 0): Promise<void> {
     const agent = this.options.agents.find((value) => value.id === agentId)!;
-    let observedGeneration = 0;
+    let observedGeneration = baseline;
     while (!this.stopping) {
+      if (this.paused) { this.pausedOut.add(agentId); return; }
       const generation = this.generations.get(agentId) ?? 0;
       const stale: StoredWakeAcceptanceRecord[] = [];
       const records = (await this.options.store.recoverable(new Set(this.options.agents.map((value) => value.id)), (record) => { if (record.agent_id === agentId) stale.push(record); })).filter((record) => record.agent_id === agentId);
@@ -62,6 +86,7 @@ export class AttentionDispatcher {
       if (!selected.length) return;
       const budget = await this.options.fuse.snapshot(agentId, agent.attention);
       if (budget.state !== "available") return;
+      if (this.paused) { this.pausedOut.add(agentId); return; }
       const executionId = selected[0]!.execution_id ?? randomUUID();
       const acquired = await this.options.store.acquireClaim(selected[0]!.acceptance_id, this.owner, selected.map((record) => record.acceptance_id), executionId);
       if (acquired.state === "held") { await this.waitUntil(acquired.retry_at); continue; }
@@ -74,8 +99,13 @@ export class AttentionDispatcher {
         for (const item of claimed.filter((value) => value.record.state === "running")) await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
         await this.options.store.releaseClaim(claimed[0]!.claim); continue;
       }
-      const verdict = await this.options.fuse.admit(agentId, randomUUID(), agent.attention);
-      if (verdict.state !== "admitted" || this.stopping) {
+      // A drain that arrived after the claim releases it before any budget is spent.
+      // Admission is the drain's linearization point: a turn the fuse admitted before
+      // the loop saw the drain is a running turn, and keeps the host "draining".
+      const pausedBeforeAdmit = this.paused;
+      const verdict = pausedBeforeAdmit ? undefined : await this.options.fuse.admit(agentId, randomUUID(), agent.attention);
+      if (verdict?.state !== "admitted" || this.stopping) {
+        if (pausedBeforeAdmit) this.pausedOut.add(agentId);
         for (const item of claimed) await this.options.store.transitionClaimed(item.record.acceptance_id, item.claim, "accepted");
         await this.options.store.releaseClaim(claimed[0]!.claim); return;
       }
@@ -173,7 +203,7 @@ export class AttentionDispatcher {
   }
 
   private async waitUntil(timestamp: string): Promise<void> {
-    if (this.stopping) return;
+    if (this.stopping || this.paused) return;
     await new Promise<void>((resolve) => {
       const finish = (): void => { clearTimeout(timer); this.waiters.delete(finish); resolve(); };
       const timer = setTimeout(finish, Math.max(1, Date.parse(timestamp) - Date.now())); this.waiters.add(finish);

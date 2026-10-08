@@ -9,12 +9,17 @@ import { WakeAcceptanceConflictError, WakeAcceptanceStore, WakeInboxFullError, p
 import { parseWakeAcceptanceRequest, ACTIVITY_V2_VERSION, type OrganizationRuntimeActivityV2, type OrganizationRuntimeWakeAcceptanceResult, type OrganizationRuntimeWakeReceiptStatus } from "./wakeAcceptanceTypes.js";
 
 type BlockReason = "operator_stop" | "ledger_unavailable" | "host_stopping" | "host_stopped" | "queue_full";
-export type WorkAvailability = Readonly<{ version: "noopolis.daimon.work-availability.v1"; state: "running" | "paused" | "stopped"; agents: readonly Readonly<{ agent_id: string; pending: number; running: boolean; deferred: number; budget: WakeBudgetSnapshot; error?: string }>[] }>;
+export type WorkDrain = Readonly<{ state: "draining" | "drained"; since: string }>;
+export type WorkAvailability = Readonly<{ version: "noopolis.daimon.work-availability.v1"; state: "running" | "paused" | "stopped"; agents: readonly Readonly<{ agent_id: string; pending: number; running: boolean; deferred: number; budget: WakeBudgetSnapshot; error?: string }>[]; drain?: WorkDrain }>;
 export type OrganizationRuntimeControlHost = OrganizationRuntimeHost & Readonly<{
   accept(request: unknown): Promise<OrganizationRuntimeWakeAcceptanceResult>;
   wakeReceipt(token: string | undefined, acceptanceId: string): Promise<OrganizationRuntimeWakeReceiptStatus | undefined>;
   activityV2(token: string | undefined): Promise<OrganizationRuntimeActivityV2 | undefined>;
   availability(token: string | undefined): Promise<WorkAvailability | undefined>;
+  /** Reversible operator drain: new wakes answer work-blocked, queued ones stay durable, running turns finish. */
+  drain(token: string | undefined): Promise<WorkAvailability | undefined>;
+  /** Ends a drain and dispatches the queue. Never clears the latched `fuse.stop`. */
+  resume(token: string | undefined): Promise<WorkAvailability | undefined>;
 }>;
 export type OrganizationRuntimeControlOptions = Readonly<{ acceptanceStorePath: string; controlToken?: string }>;
 type TestControlOptions = OrganizationRuntimeControlOptions & Readonly<{
@@ -48,6 +53,10 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
   let started = false;
   let stopping = false;
   let sealedActivity: OrganizationRuntimeActivityV2 | undefined;
+  /** In-process only: a restarted host admits, so a drained release ends drained-free. */
+  let drainedSince: string | undefined;
+  /** Synchronous v1 turns bypass the dispatcher; a drain is not drained while one is admitted or running. */
+  let v1Turns = 0;
 
   /**
    * One projection, read the same way live and at shutdown. `active` is decided by
@@ -75,6 +84,8 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
     // Check the operator latch before taking ownership, even between polls.
     await fuse?.pollOperatorStop();
     const reason = hardReason(); if (reason) return blocked(reason);
+    // A drain is an operator stop that can be undone; bridges already defer on this reason.
+    if (drainedSince !== undefined) return blocked("operator_stop");
     const operation = (async (): Promise<OrganizationRuntimeWakeAcceptanceResult> => {
       try {
         const accepted = await store!.accept(request);
@@ -92,6 +103,25 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
     try { return await operation; } finally { persistence.delete(operation); }
   };
 
+  const availability = async (token: string | undefined): Promise<WorkAvailability | undefined> => {
+    if (!tokensEqual(expectedToken, token) || !store || !fuse) return undefined;
+    await fuse.pollOperatorStop();
+    const items = await store.activityWithExecutionErrors();
+    const executionErrors = new Map(items.filter((record) => (record.state === "accepted" || record.state === "running")
+      && record.execution_error !== undefined).map((record) => [record.agent_id, record.execution_error!]));
+    const agents = await Promise.all(config.agents.map(async (agent) => ({
+      agent_id: agent.id, pending: items.filter((item) => item.agent_id === agent.id && (item.state === "accepted" || item.state === "running" && !dispatcher?.activeExecutions().some((execution) => execution.agent_id === agent.id))).length,
+      running: dispatcher?.activeExecutions().some((execution) => execution.agent_id === agent.id) ?? false,
+      deferred: items.filter((item) => item.agent_id === agent.id && item.state === "accepted" && item.deferred).length,
+      budget: await fuse!.snapshot(agent.id, agent.attention),
+      ...((dispatcher?.failure(agent.id) ?? executionErrors.get(agent.id))
+        ? { error: dispatcher?.failure(agent.id) ?? executionErrors.get(agent.id) } : {})
+    })));
+    // "drained" only once no inbox loop is alive: nothing runs and nothing can start until resume.
+    const drain: WorkDrain | undefined = drainedSince === undefined ? undefined : { state: dispatcher?.quiescent() === false || v1Turns > 0 ? "draining" : "drained", since: drainedSince };
+    return { version: "noopolis.daimon.work-availability.v1", state: hardReason() ? "stopped" : drain !== undefined || agents.some((agent) => agent.budget.state !== "available" || agent.error) ? "paused" : "running", agents, ...(drain === undefined ? {} : { drain }) };
+  };
+
   return {
     wake: async (request) => {
       try { request = parseOrganizationRuntimeWakeRequest(request); } catch { return { version: "noopolis.daimon.wake-result.v1", status: "rejected", agentId: "", wakeId: "", code: "invalid_request" }; }
@@ -100,8 +130,13 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
       if (!tokensEqual(expectedToken, request.token)) return { version: "noopolis.daimon.wake-result.v1", status: "rejected", agentId: request.agentId, wakeId: request.event.id, code: "unauthorized" };
       if (!knownAgents.has(request.agentId)) return { version: "noopolis.daimon.wake-result.v1", status: "rejected", agentId: request.agentId, wakeId: request.event.id, code: "unknown_agent" };
       if (config.agents.find((agent) => agent.id === request.agentId)?.attention !== undefined) return { version: "noopolis.daimon.wake-result.v1", status: "rejected", agentId: request.agentId, wakeId: request.event.id, code: "durable_inbox_required" };
-      if (hardReason() || (await fuse!.admit(request.agentId, request.event.id, config.agents.find((agent) => agent.id === request.agentId)?.attention)).state !== "admitted") return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
-      return await host.wake(request);
+      // v1 has no `blocked` member on its wire; a drain answers it exactly as the latched stop does.
+      if (hardReason() || drainedSince !== undefined) return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
+      v1Turns += 1;
+      try {
+        if ((await fuse!.admit(request.agentId, request.event.id, config.agents.find((agent) => agent.id === request.agentId)?.attention)).state !== "admitted") return { version: "noopolis.daimon.wake-result.v1", status: "stopped", agentId: request.agentId, wakeId: request.event.id, code: "host_stopping" };
+        return await host.wake(request);
+      } finally { v1Turns -= 1; }
     },
     health: async (agentId) => await host.health(agentId),
     activity: async (request) => await host.activity(request),
@@ -126,7 +161,7 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
         if (config.version === "noopolis.daimon.organization-runtime.v2") {
           schedules = createScheduleController({ acceptanceStorePath: options.acceptanceStorePath, agents: config.agents, ...options.scheduleOptions,
             accept: async (occurrence) => {
-              if (dispatcher?.busy(occurrence.agentId) || hardReason()) return false;
+              if (dispatcher?.busy(occurrence.agentId) || hardReason() || drainedSince !== undefined) return false;
               const result = await accept({ token: expectedToken, agent_id: occurrence.agentId, delivery_id: occurrence.deliveryId, event: { version: "noopolis.daimon.wake.v2", kind: "schedule", text: occurrence.prompt, occurred_at: occurrence.occurredAt } });
               return result.state === "accepted";
             }
@@ -155,21 +190,27 @@ function createControl(config: OrganizationRuntimeConfig, host: OrganizationRunt
       if (store === undefined) return sealedActivity;
       return await projectActivity(store, "running");
     },
-    async availability(token) {
+    availability,
+    async drain(token) {
       if (!tokensEqual(expectedToken, token) || !store || !fuse) return undefined;
-      await fuse.pollOperatorStop();
-      const items = await store.activityWithExecutionErrors();
-      const executionErrors = new Map(items.filter((record) => (record.state === "accepted" || record.state === "running")
-        && record.execution_error !== undefined).map((record) => [record.agent_id, record.execution_error!]));
-      const agents = await Promise.all(config.agents.map(async (agent) => ({
-        agent_id: agent.id, pending: items.filter((item) => item.agent_id === agent.id && (item.state === "accepted" || item.state === "running" && !dispatcher?.activeExecutions().some((execution) => execution.agent_id === agent.id))).length,
-        running: dispatcher?.activeExecutions().some((execution) => execution.agent_id === agent.id) ?? false,
-        deferred: items.filter((item) => item.agent_id === agent.id && item.state === "accepted" && item.deferred).length,
-        budget: await fuse!.snapshot(agent.id, agent.attention),
-        ...((dispatcher?.failure(agent.id) ?? executionErrors.get(agent.id))
-          ? { error: dispatcher?.failure(agent.id) ?? executionErrors.get(agent.id) } : {})
-      })));
-      return { version: "noopolis.daimon.work-availability.v1", state: hardReason() ? "stopped" : agents.some((agent) => agent.budget.state !== "available" || agent.error) ? "paused" : "running", agents };
+      drainedSince ??= new Date().toISOString();
+      dispatcher?.pause();
+      return await availability(token);
+    },
+    async resume(token) {
+      if (!tokensEqual(expectedToken, token) || !store || !fuse) return undefined;
+      if (drainedSince !== undefined) {
+        drainedSince = undefined;
+        // A latched operator stop or fatal fault outlives the drain: resume never reopens it.
+        if (!hardReason()) {
+          // An owed pass for every agent the drain withheld or that holds queued work;
+          // owed passes never count as new input, so deferred deliveries stay deferred.
+          const queued = new Set((await store.recoverable(knownAgents).catch(() => [])).filter((record) => !record.deferred).map((record) => record.agent_id));
+          if (drainedSince === undefined && !hardReason()) dispatcher?.resume(queued);
+          void schedules?.drain().catch(() => undefined);
+        }
+      }
+      return await availability(token);
     },
     async stop(): Promise<OrganizationRuntimeShutdownCompletion> {
       if (!started && stopping) return { version: "noopolis.daimon.organization-runtime-stop.v1", state: "stopped" };

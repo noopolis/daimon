@@ -789,6 +789,19 @@ neither settles a closure proof. `state` is optional on the wire for the reason
 every additive member here is: a projection published before the seal existed
 must still parse, and its absence means "not stated", never "running".
 
+Drain is the reversible operator stop (`POST /v2/drain`, `POST /v2/resume`,
+`organizationRuntimeControl.ts`). It is a separate, in-process gate and must
+never be folded into the fuse: `fuse.stop` is a safety latch that only an
+operator removing the file *and* restarting clears, and resume never reopens it
+(it checks the hard reason first and the halted dispatcher stays halted).
+While drained, `accept` answers `blocked("operator_stop")` — the existing
+`work-blocked` reason, because Moltnet's bridge treats any reason outside its
+closed list as a hard failure rather than a deferral — and the dispatcher's
+`pause()` lets no inbox loop start or admit a turn; a loop that already holds a
+claim releases it before `fuse.admit`, so a drain spends no budget. Queued
+deliveries stay `accepted`. Availability says `drained` only when no inbox loop
+is alive (`quiescent()`), which is the signal a drained release waits for.
+
 Deferral is bounded. A delivery that sits in `accepted` past
 `STALE_QUEUED_DELIVERY_MS` (24 h, `wakeAcceptanceRetention.ts`) without a live
 claim is no longer offered by `recoverable()`; the dispatcher stops it

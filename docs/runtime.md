@@ -52,6 +52,16 @@ Set `DAIMON_RUNTIME_ACCEPTANCE_STORE` to enable the durable v2 control plane:
 - `GET /v2/wake-receipts/<acceptance_id>` returns redacted lifecycle status.
 - `GET /v2/activity` includes durable receipts and active executions.
 - `GET /v2/availability` reports running, pending, deferred, and budget state.
+- `POST /v2/drain` stops admitting turns until `POST /v2/resume`; both answer
+  the availability document.
+
+A drain is the reversible operator stop. New wakes answer HTTP 409 with the
+existing `work-blocked` descriptor (reason `operator_stop`, so current bridges
+defer and retry), queued deliveries stay accepted, and a running turn finishes.
+Availability then reports `state: "paused"` and `drain: {state, since}`:
+`draining` while a turn may still run, `drained` once nothing can start. Resume
+dispatches the queue. A drain lives in the process: a restarted host admits.
+It never clears the latched `fuse.stop`, which stays the deliberate safety stop.
 
 Equal delivery retries return the original acceptance. A changed payload for the
 same delivery id is rejected. Accepted delivery is durable at-least-once turn

@@ -131,6 +131,11 @@ async function handleRequest(
       const availability = await control.availability(expectedToken);
       return availability === undefined ? respond(response, 404, { error: "not_found" }) : respond(response, 200, availability);
     }
+    if (control !== undefined && request.method === "POST" && (url.pathname === "/v2/drain" || url.pathname === "/v2/resume")) {
+      assertQuery(url, []);
+      const availability = url.pathname === "/v2/drain" ? await control.drain(expectedToken) : await control.resume(expectedToken);
+      return availability === undefined ? respond(response, 404, { error: "not_found" }) : respond(response, 200, availability);
+    }
     if (control !== undefined && request.method === "GET" && url.pathname === "/v2/activity") {
       assertQuery(url, []);
       const activity = await control.activityV2(expectedToken);

@@ -8,8 +8,15 @@ const budget = { type: "object", additionalProperties: false, required: ["armed"
 } } as const;
 export const WORK_AVAILABILITY_SCHEMA = { type: "object", additionalProperties: false, required: ["version", "state", "agents"], properties: {
   version: { const: "noopolis.daimon.work-availability.v1" }, state: { enum: ["running", "paused", "stopped"] },
-  agents: { type: "array", maxItems: 32, items: { type: "object", additionalProperties: false, required: ["agent_id", "pending", "running", "deferred", "budget"], properties: { agent_id: { type: "string" }, pending: count, running: { type: "boolean" }, deferred: count, budget, error: { type: "string" } } } }
+  agents: { type: "array", maxItems: 32, items: { type: "object", additionalProperties: false, required: ["agent_id", "pending", "running", "deferred", "budget"], properties: { agent_id: { type: "string" }, pending: count, running: { type: "boolean" }, deferred: count, budget, error: { type: "string" } } } },
+  drain: { type: "object", additionalProperties: false, required: ["state", "since"], properties: { state: { enum: ["draining", "drained"] }, since: { type: "string" } } }
 } } as const;
+/** Reversible operator drain; the latched `fuse.stop` is a separate, unchanged safety stop. */
+export const OPERATOR_DRAIN = {
+  drainRoute: "POST /v2/drain", resumeRoute: "POST /v2/resume", authorization: "control-bearer",
+  response: "workAvailabilityResponseSchema", blockedReason: "operator_stop", queuedWakes: "retained", runningTurns: "finish",
+  scope: "process", resumeClearsOperatorStop: false
+} as const;
 export const WORK_BLOCKED_SCHEMA = { type: "object", additionalProperties: false, required: ["version", "reason", "retry_after_ms"], properties: {
   version: { const: "noopolis.daimon.work-blocked.v1" }, reason: { enum: ["operator_stop", "ledger_unavailable", "host_stopping", "host_stopped", "queue_full"] }, retry_after_ms: { type: "integer", minimum: 1000, maximum: 300000 }
 } } as const;
